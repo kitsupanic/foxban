@@ -112,7 +112,27 @@ function main() {
   // provisioned D1/R2 into the committed wrangler.jsonc and prompted for ADMIN_EMAILS as a secret.
   if (!env.ADMIN_EMAILS && env.WORKERS_CI) {
     const r = spawnSync("pnpm", ["run", "deploy:button"], { cwd: root, stdio: "inherit" });
-    process.exit(r.status ?? 1);
+    if (r.status !== 0) process.exit(r.status ?? 1);
+    // The button skips the secret upload below, so add the sealing key here. A failure only
+    // warns: the Worker is live, and the GitHub page tells the Admin how to set the key by hand.
+    const manual = `set ${ENCRYPTION_KEY_SECRET} to the output of \`openssl rand -base64 32\``;
+    const listed = spawnSync("pnpm", ["exec", "wrangler", "secret", "list"], { cwd: root, encoding: "utf8", env });
+    let names;
+    try {
+      names = parseSecretNames(listed.status === 0 ? listed.stdout : "");
+    } catch {
+      process.stderr.write(listed.stderr ?? "");
+      console.warn(`deploy: could not read the Worker's secret list; ${manual}`);
+      process.exit(0);
+    }
+    if (!names.includes(ENCRYPTION_KEY_SECRET)) {
+      console.log(`deploy: adding ${ENCRYPTION_KEY_SECRET}`);
+      const put = spawnSync("pnpm", ["exec", "wrangler", "secret", "put", ENCRYPTION_KEY_SECRET], {
+        cwd: root, env, input: newEncryptionKey(), stdio: ["pipe", "inherit", "inherit"],
+      });
+      if (put.status !== 0) console.warn(`deploy: could not add the key; ${manual}`);
+    }
+    process.exit(0);
   }
   if (!env.ADMIN_EMAILS) fail("ADMIN_EMAILS is required (set it in .env.deploy or the environment).");
 

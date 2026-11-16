@@ -1098,7 +1098,7 @@ const app = new Hono<AppEnv>()
     zValidator("json", z.object({ organization: z.string().regex(GITHUB_LOGIN_RE).optional() })),
     async (c) => {
       // No sealing key: the deploy script has not run since this feature shipped.
-      if (!canCreateGitHubApp(c.env)) return c.json({ error: "GitHub App setup needs GITHUB_APP_ENCRYPTION_KEY; redeploy with pnpm deploy" }, 503);
+      if (!canCreateGitHubApp(c.env)) return c.json({ error: "GitHub App setup needs GITHUB_APP_ENCRYPTION_KEY; redeploy with pnpm run deploy" }, 503);
       if (await getInstanceGitHubAppSummary(c.env)) return c.json({ error: "this instance already has a GitHub App" }, 409);
       const state = crypto.randomUUID();
       setCookie(c, GITHUB_APP_MANIFEST_STATE_COOKIE, state, {

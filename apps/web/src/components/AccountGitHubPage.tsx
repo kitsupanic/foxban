@@ -198,7 +198,7 @@ export function AccountGitHubPage() {
                 {create.error && <p role="alert" className="boards-dialog-error">{create.error.message}</p>}
               </>
             ) : (
-              <p role="alert" className="boards-dialog-error">This instance has no GITHUB_APP_ENCRYPTION_KEY secret yet. Run <code>pnpm deploy</code> to create it, or set it yourself to the output of <code>openssl rand -base64 32</code>.</p>
+              <p role="alert" className="boards-dialog-error">This instance has no GITHUB_APP_ENCRYPTION_KEY secret yet. Run <code>pnpm run deploy</code> to create it, or set it yourself to the output of <code>openssl rand -base64 32</code>.</p>
             )}
           </div>
         </section>

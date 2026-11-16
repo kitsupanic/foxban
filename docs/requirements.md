@@ -16,7 +16,8 @@ A small team per instance. Low traffic. Authenticated, invite-only.
 - Live sync: changes appear immediately for all connected users.
 - Card details: title, description, and contributors section showing card creator and assignment history.
 - Relations: link cards with task identifier search (`<KEY>-<NUMBER>` and positive integer).
-- Auth: simple sign-in — email+password or a shared invite code.
+- Workspaces (ADR 0066): every board belongs to one workspace. A workspace has admins and members; a Guest is added to individual boards and sees only those. A board is a Workspace board (every member opens it) or a Private board (its board members and the workspace admins).
+- Auth: email+password, or Log in with GitHub once an account is linked (ADR 0065). Signup needs an invite link, except for configured admins (ADR 0012).
 - Profile: a signed-in user manages their custom avatar upload (with fallback to GitHub or initials), display name, sign-in email, password, linked GitHub identity, and timezone preference.
 - Member presence: boards show a member rail with live online/offline presence, last seen relative time, local time in each member's effective timezone, and role badges (Owner, Admin). Responsive layout adapts with an accessible drawer on narrow screens.
 - GitHub development info (ADR 0064): an instance has one GitHub App, made by an Admin with a button, and its connected repositories belong to the instance, not to a board. Any branch or pull request in a connected repository that names a task key shows on that card for the board's members, live, from signed webhooks. Members can link a pull request by hand, unlink one, and create a git branch named after the canonical lower-case task key and a pull request targeting the repository's default branch directly from the card modal, in a repository they pick.
@@ -30,7 +31,7 @@ Mechanics for all of the above: [architecture.md](architecture.md).
 
 ## Non-goals (do not build unless asked)
 
-- Multi-tenant orgs, billing, public signup, roles beyond member/owner.
+- Billing, public signup, roles beyond those above (instance Admin; workspace admin, member and Guest; board owner, manager and member).
 - Offline mode / CRDTs — last-write-wins through the single-threaded DO is sufficient.
 - Mobile apps. Responsive web is enough.
 - SSR, SEO, analytics.

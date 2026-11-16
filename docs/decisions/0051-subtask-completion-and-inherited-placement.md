@@ -1,7 +1,7 @@
 # 0051 — Subtask completion and inherited placement
 
 ## Status
-Accepted — 2026-09-13
+Superseded by 0067 — 2026-11-16 (accepted 2026-09-13)
 
 ## Context
 Subtasks have been full cards linked by a `subtask` relation since ADR 0019, but the board rendered the child as a second root card in its own stored column with no completion of its own. We chose a parent-contained family (a "Subtasks" disclosure with connected child rows) and an **independent completion flag**, because a subtask shares its parent's column and therefore cannot have a status of its own. Two facts had to be settled: where completion lives, and where a child is placed while its parent moves.

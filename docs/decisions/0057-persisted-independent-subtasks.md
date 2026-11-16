@@ -1,7 +1,7 @@
 # 0057 — Persisted independent subtask workflow
 
 ## Status
-Accepted — 2026-10-01. Supersedes ADR 0051 only on explicitly configured boards. The isolated ADR 0056 trial remains available.
+Accepted — 2026-10-01. Supersedes ADR 0051 only on explicitly configured boards. The isolated ADR 0056 trial remains available. Activation, per-child review and export parts superseded by ADR 0067; the trial was removed by ADR 0068.
 
 ## Decision
 A subtask is a task with one parent relation and its own stored column. Moving a parent or child updates one card row and never moves the rest of the family. Same-column children nest under the active parent; children elsewhere appear once as ordinary draggable card faces with a parent navigation link. Grouping is presentation, not persisted placement. Direct active child progress spans all columns, independent of filtering and parent status. Checklists remain boolean inline steps.

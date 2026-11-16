@@ -1,7 +1,7 @@
 # 0063 — Instance config lives outside the repo
 
 ## Status
-Accepted — 2026-11-10
+Accepted — 2026-11-10. Its GitHub Actions deploy parts are superseded by ADR 0070.
 
 ## Context
 foxban is being prepared for open source as a free Kanban anyone can run on
