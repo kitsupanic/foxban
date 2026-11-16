@@ -141,6 +141,8 @@ export async function run(
   // Fenced as aborted: it can never commit, so the client must rotate the id.
   if (existing.status === 410) return terminal(410, "transfer operation was aborted");
   if (ok(existing)) {
+    // No receipt in a success body is a broken answer, not a verdict: keep the id retryable.
+    if (!existing.body.receipt) return failed("transfer needs retry");
     if (!sameOperation(existing.body.receipt, ids)) return terminal(409, "transfer operation identity mismatch");
     return finish(existing.body.receipt);
   }

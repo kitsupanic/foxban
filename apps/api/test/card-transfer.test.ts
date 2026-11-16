@@ -73,6 +73,7 @@ describe("CardTransfer.run", () => {
     { name: "receipt already committed: only finalizes", inject: { receipt: r(200, { receipt }) }, outcome: moved, calls: ["receipt", "finalize"] },
     { name: "committed receipt, finalize fails", inject: { receipt: r(200, { receipt }), finalize: r(500) }, outcome: refused(500, "transfer needs retry"), calls: ["receipt", "finalize"] },
     { name: "receipt of another operation", inject: { receipt: r(200, { receipt: foreignReceipt }) }, outcome: refused(409, "transfer operation identity mismatch", TRANSFER_TERMINAL_CODE), calls: ["receipt"] },
+    { name: "receipt answer without a receipt: retryable", inject: { receipt: r(200) }, outcome: refused(500, "transfer needs retry"), calls: ["receipt"] },
     // Pinned as-is: any other lookup failure reads as "no receipt yet".
     { name: "receipt lookup errors: carries on", inject: { receipt: r(500) }, outcome: moved, calls: full },
 
