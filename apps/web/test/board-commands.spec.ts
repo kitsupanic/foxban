@@ -42,6 +42,8 @@ const table: { name: string; run: (c: ReturnType<typeof boardCommands>) => unkno
   { name: "restore lands at the flat tail", run: c => c.restoreCard("A", "work"), result: "sent", sent: [{ type: "card.restore", id: "A", columnId: "work", position: "a7" }] },
   { name: "restore of a live card", run: c => c.restoreCard("L", "work"), result: "no-op", sent: [] },
   { name: "column moved right lands after the target", run: c => c.moveColumn("todo", "work"), result: "sent", sent: [{ type: "column.move", id: "todo", position: "a1V" }] },
+  { name: "rename a column", run: c => c.renameColumn("work", "Doing"), result: "sent", sent: [{ type: "column.rename", id: "work", title: "Doing" }] },
+  { name: "configure workflow against the current roles", run: c => c.configureWorkflow("work", "done"), result: "sent", sent: [{ type: "workflow.configure", startingColumnId: "work", completedColumnId: "done", expectedStartingColumnId: "todo", expectedCompletedColumnId: "done" }] },
   { name: "column dropped on itself", run: c => c.moveColumn("todo", "todo"), result: "no-op", sent: [] },
   // Placement: same peer rules as a drag onto the column body.
   { name: "completing a subtask whose parent is in Done lands after its last sibling", run: c => c.moveCard("C", { columnId: "done" }), result: "sent", sent: [{ type: "card.move", id: "C", columnId: "done", position: "a2" }] },

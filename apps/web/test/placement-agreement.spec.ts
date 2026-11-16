@@ -42,8 +42,10 @@ const cases: { name: string; state: BoardState; cardId: string; columnId: string
 
 for (const { name, state, cardId, columnId } of cases) {
   test(`flat tail and peer-aware placement render the same order: ${name}`, () => {
-    const { flatOrder, peerOrder } = placeBoth(state, cardId, columnId);
+    const { flatOrder, peerOrder, peer } = placeBoth(state, cardId, columnId);
     expect(flatOrder).toEqual(peerOrder);
+    // Peer-aware placement must not tie any key already in the destination.
+    expect(state.cards.some(c => c.id !== cardId && c.columnId === columnId && c.position === peer)).toBe(false);
   });
 }
 test("the two rules do mint different keys for a nested child", () => {

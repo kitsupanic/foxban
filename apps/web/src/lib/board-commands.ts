@@ -93,6 +93,13 @@ export function boardCommands(send: SendMutation, readBoard: () => BoardState | 
       // Concurrent creates can tie; use the same one-row append fallback as cards.
       return emit({ type: "column.move", id, position: generateKeyBetween(prev, prev === next ? null : next) });
     }),
+    renameColumn: (id: string, title: string): Sent => emit({ type: "column.rename", id, title }),
+    /** The expected current roles let the board refuse a choice made against a stale view. */
+    configureWorkflow: (startingColumnId: string, completedColumnId: string): Sent => withBoard(state => emit({
+      type: "workflow.configure", startingColumnId, completedColumnId,
+      expectedStartingColumnId: state.columns.find(column => column.starting)?.id ?? null,
+      expectedCompletedColumnId: state.columns.find(column => column.completed)?.id ?? null,
+    })),
     deleteColumn: (id: string): Sent => withBoard(state => state.columns.some(column => column.id === id) ? emit({ type: "column.delete", id }) : "no-op"),
 
     toggleLabel: (cardId: string, labelId: string): Sent => withBoard(state => {

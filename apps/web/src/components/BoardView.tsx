@@ -1363,7 +1363,7 @@ export function BoardView({
             />
           )}
           {canManageColumns && state && workflowSettingsOpen && (
-            <WorkflowSettings state={state} send={sendMutation} connected={connected} onClose={closeWorkflowSettings} />
+            <WorkflowSettings state={state} commands={commands} connected={connected} onClose={closeWorkflowSettings} />
           )}
           {shortcutsOpen && (
             <KeyboardShortcutsDialog canManageColumns={canManageColumns} onClose={closeShortcuts} />
@@ -1729,7 +1729,7 @@ export function BoardView({
                       membersById={membersById}
                       boardKey={meta.key}
                       pullRequestBadges={pullRequestBadges}
-                      send={sendMutation}
+                      commands={commands}
                       onOpenCard={openFromBoard}
                       onToggleSubtasks={toggleSubtasks}
                       onRequestDelete={(trigger) => openColumnDelete(column.id, trigger)}

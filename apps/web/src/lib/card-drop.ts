@@ -49,10 +49,17 @@ export function resolveCardDrop(state: BoardState, hierarchy: SubtaskHierarchy, 
   }
   const currentIndex = peers.filter(candidate => byPosition(candidate, card) < 0).length;
   if (destination === card.columnId && index === currentIndex) return null;
+  // Peers are a subset of the column, so the gap after `lower` may hold other rows' keys
+  // (a nested child's, or a parent's). Bounding by the first key above `lower` in the whole
+  // column keeps the new key unique; it still sorts after the previous peer and before the next.
+  const lower = peers[index - 1]?.position ?? null;
+  const columnAbove = columnCards(state, destination).find(candidate => candidate.id !== cardId && (lower === null || candidate.position > lower))?.position ?? null;
+  const nextPeer = peers[index]?.position ?? null;
+  const upper = nextPeer !== null && (columnAbove === null || nextPeer < columnAbove) ? nextPeer : columnAbove;
   try {
-    return { columnId: destination, position: generateKeyBetween(peers[index - 1]?.position ?? null, peers[index]?.position ?? null), hint };
+    return { columnId: destination, position: generateKeyBetween(lower, upper), hint };
   } catch {
-    // Preserve the existing concurrent equal-key fallback: append after prev.
-    try { return { columnId: destination, position: generateKeyBetween(peers[index - 1]?.position ?? null, null), hint }; } catch { return null; }
+    // Concurrent equal peer keys: the next peer ties `lower`, so append past it in the column.
+    try { return { columnId: destination, position: generateKeyBetween(lower, columnAbove), hint }; } catch { return null; }
   }
 }

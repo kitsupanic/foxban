@@ -1,11 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { X } from "lucide-react";
-import type { ClientMessage } from "@foxban/shared";
 import type { BoardState } from "../lib/apply-mutation";
+import type { BoardCommands } from "../lib/board-commands";
 import { Button } from "./ui/button";
 
 /** Which column starts new subtasks and which means done. No column title is interpreted as workflow semantics. */
-export function WorkflowSettings({ state, send, connected, onClose }: { state: BoardState; send: (message: ClientMessage) => void; connected: boolean; onClose: () => void }) {
+export function WorkflowSettings({ state, commands, connected, onClose }: { state: BoardState; commands: BoardCommands; connected: boolean; onClose: () => void }) {
   const titleId = useId();
   const startId = useId();
   const doneId = useId();
@@ -42,7 +42,7 @@ export function WorkflowSettings({ state, send, connected, onClose }: { state: B
   const save = (event: React.FormEvent) => {
     event.preventDefault();
     if (!valid || !connected) return;
-    send({ type: "workflow.configure", mutationId: crypto.randomUUID(), startingColumnId: start, completedColumnId: done, expectedStartingColumnId: currentStart || null, expectedCompletedColumnId: currentDone || null });
+    commands.configureWorkflow(start, done);
     onClose();
   };
 
