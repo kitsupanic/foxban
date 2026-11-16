@@ -45,6 +45,7 @@ import {
   verifyUserPassword,
   BOARD_SELECT_COLS,
   boardManageSql,
+  boardMemberSql,
   boardOpenSql,
   toBoardRow,
   type AppEnv,
@@ -1443,8 +1444,7 @@ const app = new Hono<AppEnv>()
               bm.role AS explicitRole,
               CASE WHEN b.access_mode='workspace' THEN wm.role ELSE NULL END AS workspaceRole
          FROM boards b
-         LEFT JOIN users u ON EXISTS(SELECT 1 FROM board_members x WHERE x.board_id=b.id AND x.user_id=u.id)
-              OR (b.access_mode='workspace' AND EXISTS(SELECT 1 FROM workspace_members x WHERE x.workspace_id=b.workspace_id AND x.user_id=u.id))
+         LEFT JOIN users u ON ${boardMemberSql("b", "u.id")}
          LEFT JOIN board_members bm ON bm.board_id=b.id AND bm.user_id=u.id
          LEFT JOIN workspace_members wm ON wm.workspace_id=b.workspace_id AND wm.user_id=u.id
         WHERE b.id=? AND ${boardOpenSql("b", "?", "?=1")}
@@ -1598,12 +1598,9 @@ const app = new Hono<AppEnv>()
       // destination is workspace-access. Explicit-only would drop an assignee the
       // destination board really does admit.
       const { results: destMembers } = await c.env.DB.prepare(
-        `SELECT board_members.user_id AS userId FROM board_members WHERE board_members.board_id = ?
-          UNION
-         SELECT wm.user_id AS userId FROM workspace_members wm
-           JOIN boards b ON b.id = ? AND b.access_mode='workspace' AND b.workspace_id = wm.workspace_id`,
+        `SELECT u.id AS userId FROM boards b JOIN users u ON ${boardMemberSql("b", "u.id")} WHERE b.id = ?`,
       )
-        .bind(destinationBoardId, destinationBoardId)
+        .bind(destinationBoardId)
         .all<{ userId: string }>();
       const destMemberSet = new Set(destMembers.map((m) => m.userId));
 

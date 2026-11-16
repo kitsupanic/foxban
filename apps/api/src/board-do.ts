@@ -88,7 +88,7 @@ import {
 } from "./development-info";
 import { syncBranchRoute } from "./github-branch-routes";
 import { syncPullRequestRoute } from "./github-pr-routes";
-import { canManageBoard, canOpenBoard, isAdminEmail } from "./auth";
+import { boardMemberSql, canManageBoard, canOpenBoard, isAdminEmail } from "./auth";
 import { generateKeyBetween } from "fractional-indexing";
 import {
   MCP_BOARD_READ_PATH,
@@ -1129,11 +1129,7 @@ export class BoardDO extends DurableObject<Env> {
    */
   private async currentAssigneeEligible(boardId: string, assigneeId: string): Promise<boolean> {
     const row = await this.env.DB.prepare(
-      `SELECT 1 AS present FROM boards b
-        WHERE b.id=?
-          AND (EXISTS(SELECT 1 FROM board_members x WHERE x.board_id=b.id AND x.user_id=?)
-               OR (b.access_mode='workspace'
-                   AND EXISTS(SELECT 1 FROM workspace_members x WHERE x.workspace_id=b.workspace_id AND x.user_id=?)))`,
+      `SELECT 1 AS present FROM boards b WHERE b.id=? AND ${boardMemberSql("b", "?")}`,
     )
       .bind(boardId, assigneeId, assigneeId)
       .first();

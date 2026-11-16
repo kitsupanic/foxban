@@ -1,7 +1,7 @@
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { appOrigin, mcpOrigin, isAdminEmail, boardOpenSql, findAccessibleBoard, findAccessibleBoardByKey, toBoardRow, type BoardRow } from "./auth";
+import { appOrigin, mcpOrigin, isAdminEmail, boardMemberSql, boardOpenSql, findAccessibleBoard, findAccessibleBoardByKey, toBoardRow, type BoardRow } from "./auth";
 import {
   agentCredentialsRouter,
   authenticateAgentCredential,
@@ -204,17 +204,6 @@ function failure(error: unknown): McpToolResult {
   return { ok: false, error: { code: "internal_error", message: "Unexpected failure; retry mutations with the same operationKey.", retryable: true } };
 }
 
-/**
- * A board's effective members: an explicit grant, or a workspace membership while
- * the board is workspace-access. The member list and assignee eligibility read this
- * same relation, so an inherited member can be assigned through MCP exactly like
- * the REST member list already shows them.
- */
-function effectiveBoardMemberClause(userExpression: string): string {
-  return `(EXISTS(SELECT 1 FROM board_members x WHERE x.board_id=b.id AND x.user_id=${userExpression})
-     OR (b.access_mode='workspace' AND EXISTS(SELECT 1 FROM workspace_members x WHERE x.workspace_id=b.workspace_id AND x.user_id=${userExpression})))`;
-}
-
 function createServer(env: Env, authorization: string, base: string): McpServer {
   const server = new McpServer(
     { name: "foxban", version: "1.0.0" },
@@ -298,7 +287,7 @@ function createServer(env: Env, authorization: string, base: string): McpServer 
       }
       const { results } = await env.DB.prepare(
         `SELECT b.pending_access_operation_id AS pendingAccessOperationId, users.id AS id, users.name AS name
-           FROM boards b LEFT JOIN users ON users.id > ? AND ${effectiveBoardMemberClause("users.id")}
+           FROM boards b LEFT JOIN users ON users.id > ? AND ${boardMemberSql("b", "users.id")}
           WHERE b.id = ? AND ${boardOpenSql("b", "?", "?=1")}
           ORDER BY users.id LIMIT ?`,
       ).bind(after, board.id, isAdminEmail(env, principal.user.email) ? 1 : 0,
