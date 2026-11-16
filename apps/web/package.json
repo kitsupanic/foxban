@@ -1,0 +1,48 @@
+{
+  "name": "@foxban/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "playwright test --config playwright.logic.config.ts",
+    "test:e2e": "node e2e/run-e2e.mjs",
+    "test:e2e:smoke": "node e2e/run-focused.mjs auth.spec.ts boards.spec.ts sync.spec.ts attachments.spec.ts --grep \"signup lands on Home|a created board appears in the list and opens with its name|a member sees another user's column and card appear live|the toolbar Image button embeds the upload, lists it and badges the card|permanently deletes a board\"",
+    "test:e2e:focus": "node e2e/run-focused.mjs"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@foxban/shared": "workspace:*",
+    "@tanstack/react-query": "^5.102.8",
+    "@tanstack/react-router": "^1.170.32",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "fractional-indexing": "^4.0.0",
+    "hono": "^4.13.5",
+    "lucide-react": "^1.40.0",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.0.0",
+    "micromark-extension-gfm": "^3.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@foxban/api": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@playwright/test": "^1.62.1",
+    "@tailwindcss/typography": "^0.5.20",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.2.2"
+  }
+}

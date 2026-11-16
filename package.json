@@ -1,0 +1,19 @@
+{
+  "name": "foxban",
+  "private": true,
+  "packageManager": "pnpm@11.24.0",
+  "scripts": {
+    "dev:api": "pnpm --filter @foxban/api dev",
+    "dev:web": "pnpm --filter @foxban/web dev",
+    "build": "pnpm --filter @foxban/web build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --if-present test",
+    "deploy": "node scripts/deploy.mjs",
+    "deploy:button": "pnpm build && wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "test:scripts": "node --test scripts/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "wrangler": "^4.127.1"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"]
+  },
+  // `src/lib/api.ts` imports `AppType` from the Worker's source, which pulls the
+  // Worker's own sources into this program; they need the generated Worker globals.
+  "include": ["src", "vite.config.ts", "../api/worker-configuration.d.ts"]
+}

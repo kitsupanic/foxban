@@ -1,0 +1,75 @@
+# foxban
+
+A real-time Kanban board anyone can run on their own Cloudflare account.
+
+## Running foxban
+
+**Instance**:
+One deployed copy of foxban on one Cloudflare account, with its own users and boards.
+_Avoid_: Deployment, server, site
+
+**Admin**:
+A person whose email is listed in the instance's admin list. Admins can sign up without an invite and create invites for others.
+_Avoid_: Owner, superuser
+
+## Workspaces
+
+**Workspace**:
+A shared space that owns boards and has members. Every board is in exactly one workspace.
+_Avoid_: Team, organization, personal workspace; using "workspace" for the app shell or a board page
+
+**Workspace admin**:
+A workspace member who manages its members, invites and settings, and can open every board in it. A workspace always has at least one. Not the same as an Admin, which is about the instance.
+_Avoid_: Owner, manager
+
+**Workspace member**:
+A person who belongs to a workspace. Members can open its Workspace boards and create boards.
+_Avoid_: User, collaborator
+
+**Guest**:
+A person added to a board in a workspace they are not a member of. They see that board only.
+_Avoid_: External member, observer
+
+**Operator**:
+An Admin acting through instance-Admin power alone: on a workspace they are not a member of (from the All workspaces page), or on a Private board they were not added to, in a workspace they do belong to.
+_Avoid_: Superuser, support access
+
+**Private board**:
+A board only its board members and workspace admins can open.
+_Avoid_: Restricted board
+
+**Workspace board**:
+A board every member of its workspace can open.
+_Avoid_: Public board, shared board
+
+**Home**:
+The `/` page. It lists all your boards by workspace, with guest boards under their own heading.
+_Avoid_: Dashboard, boards page
+
+**App shell**:
+The sidebar and header around every signed-in page.
+_Avoid_: Workspace, workspace shell
+
+## GitHub
+
+**Task key**:
+A card's board key and task number together, like `KR-42`. It is unique in the instance, but changes when the board key is edited or the card moves to another board.
+_Avoid_: Ticket id, card number
+
+**GitHub App**:
+The one GitHub app an instance uses for everything GitHub: pictures, sign-in and repos. An Admin creates it.
+_Avoid_: OAuth App, integration
+
+**Connected repo**:
+A GitHub repo the instance's GitHub App is installed on. It belongs to the instance, not to a board.
+_Avoid_: Board repo, linked repo
+
+**Development info**:
+The branches, commits and pull requests linked to a card, by its task key or by hand.
+_Avoid_: Dev status, GitHub status
+
+## Editing
+
+**Authored operation**:
+A change a person wrote out, like a title, a comment or a checklist item, whose text is kept until the board confirms it. If the board refuses it or the connection drops, the text is still there to retry. A drag is not one.
+_Avoid_: Save, edit, write

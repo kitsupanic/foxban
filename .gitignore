@@ -1,0 +1,25 @@
+node_modules/
+dist/
+.wrangler/
+worker-configuration.d.ts
+playwright-report/
+test-results/
+test-results-logic/
+graphify-out/
+.DS_Store
+# Playwright CLI output (may contain credentials)
+.playwright-cli/
+CLAUDE.local.md
+# Instance config for scripts/deploy.mjs and its generated wrangler config
+.env.deploy
+wrangler.generated.jsonc
+# Root-level wrangler dev vars are yours; apps/api/.dev.vars (e2e stubs) is committed
+/.dev.vars
+# Local working notes and tool state (not part of the project)
+docs/journal.md
+docs/milestones.md
+.scratch/
+.impeccable/
+.playwright/
+artifacts/
+*.local.md

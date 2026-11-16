@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security bug
+    url: https://github.com/kitsupanic/foxban/security/advisories/new
+    about: Please report security bugs in private, not as an issue.

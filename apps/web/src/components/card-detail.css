@@ -1,0 +1,277 @@
+.card-detail-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  align-content: start;
+}
+
+.card-detail-details-pane { display: contents; }
+
+.card-detail-essentials {
+  min-width: 0;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--card-details-surface);
+}
+
+.card-detail-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.card-details-heading { margin-bottom: 4px; font-size: 15px; font-weight: 650; }
+
+.card-property-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.card-property-label { min-width: 0; color: var(--muted-foreground); font-size: 12px; font-weight: 500; line-height: 1.5; }
+.card-property-control { min-width: 0; }
+.card-property-control > .relative > button,
+.card-property-date > input {
+  min-height: 34px;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  padding-inline: 8px;
+  font-size: 16px;
+}
+.card-property-control > .relative > button:not(:focus-visible),
+.card-property-date > input:not(:focus-visible) { box-shadow: none; }
+.card-property-control > .relative > button:hover,
+.card-property-control > .relative > button[aria-expanded="true"],
+.card-property-date > input:hover { background: var(--accent); }
+.card-property-date { position: relative; display: flex; align-items: center; gap: 2px; min-height: 36px; }
+.card-property-date > input { flex: 1; width: 0; min-width: 0; font-size: 16px; }
+.card-date-empty { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--foreground); font-size: 16px; }
+.card-property-date[data-empty="true"]:not(:focus-within) > input { color: transparent; }
+.card-property-date:focus-within > .card-date-empty { display: none; }
+.card-property-date > button { flex: 0 0 32px; min-height: 36px; margin: 0; }
+.card-property-readonly { font-size: 14px; }
+
+.card-details-save-hint {
+  margin-bottom: 16px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.card-text-draft-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.card-text-save-actions {
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+}
+
+.card-detail-fields > * {
+  min-width: 0;
+}
+
+.card-detail-fields > :last-child {
+  grid-column: 1 / -1;
+}
+
+.card-detail-sidebar {
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--card-details-surface);
+}
+
+.card-section-title, .card-details-disclosure > summary > h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.card-section-icon { width: 16px; height: 16px; flex: 0 0 auto; color: var(--muted-foreground); stroke-width: 1.75; }
+.card-detail-sections > * { padding-block: 24px; }
+.card-detail-sections > :first-child { padding-top: 0; }
+.card-detail-sections > :last-child { padding-bottom: 0; }
+.card-description-editor [data-testid="description-view"] { font-size: 16px; line-height: 1.65; }
+.card-description-editor [data-testid="description-view"] a { color: #1d4ed8; }
+.card-description-heading { display: flex; min-height: 32px; align-items: center; justify-content: space-between; gap: 12px; }
+.card-description-heading > button { flex: 0 0 auto; min-height: 34px; padding: 6px; border: 0; background: transparent; color: var(--muted-foreground); font-size: 12px; font-weight: 500; box-shadow: none; }
+.card-description-heading > button:hover { background: var(--muted); }
+.card-description-heading > button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.card-detail-activity { background: var(--card); }
+.card-comment-content { border: 0; border-radius: 0; padding: 0; background: transparent; box-shadow: none; }
+.card-comment-content .prose { font-size: 15px; line-height: 1.6; }
+.card-comment-start { min-height: 44px; border-radius: 7px; }
+.card-comment-composer-row > :first-child { width: 24px; height: 24px; margin-top: 8px; }
+.card-comment-composer-row[data-expanded="false"] .card-comment-composer { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 8px; }
+.card-comment-composer .markdown-editor { min-width: 0; }
+.markdown-editor[data-compact="true"] .markdown-editor-toolbar { display: none; }
+.markdown-editor[data-compact="true"] textarea { min-height: 64px; height: 64px; resize: none; padding: 10px 12px; border: 1px solid var(--input); border-radius: 7px; background: var(--card); font-size: 16px; line-height: 22px; }
+.card-comment-actions { align-items: center; justify-content: flex-end; }
+.card-comment-actions > button { min-height: 44px; padding-inline: 14px; font-size: 14px; }
+.card-comment-actions > button:disabled { color: white; background: #9ca3af; border-color: transparent; opacity: 0.65; }
+.card-comment-content time { font-size: 12px; }
+.card-description-editor > button {
+  border: 1px dashed var(--border);
+  background: transparent;
+}
+.card-detail-activity [role="tab"] { min-height: 34px; padding: 6px 8px; border-color: transparent; border-bottom-width: 2px; border-radius: 0; background: transparent; font-size: 12px; }
+.card-detail-activity [role="tab"]:not(:focus-visible) { box-shadow: none; }
+.card-detail-activity [role="tab"][aria-selected="true"] { border-bottom-color: var(--brand); color: var(--primary); background: transparent; }
+.card-detail-activity [role="tab"]:hover { background: var(--muted); }
+.card-detail-sidebar > :first-child { padding-top: 0; }
+.card-sidebar-section > button { align-self: flex-start; width: auto; min-height: 36px; border: 1px solid var(--input); border-radius: 7px; background: var(--card); padding-inline: 10px; color: var(--foreground); }
+.card-sidebar-section > button:not(:focus-visible) { box-shadow: none; }
+.card-sidebar-section > button:hover { background: var(--accent); }
+@media (pointer: coarse) { .card-sidebar-section > button { min-height: 44px; } }
+.card-detail-sidebar .card-section-title, .card-details-disclosure > summary > h3 { font-size: 13px; font-weight: 600; }
+.card-details-disclosure { min-width: 0; padding-block: 4px; border-top: 1px solid var(--border); }
+.card-details-disclosure > summary { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-radius: 5px; cursor: pointer; list-style: none; }
+.card-details-disclosure > summary::-webkit-details-marker { display: none; }
+.card-details-disclosure > summary:hover { color: var(--foreground); background: var(--accent); }
+.card-details-disclosure > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.card-details-disclosure > summary > svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted-foreground); transform: rotate(-90deg); }
+.card-details-disclosure[open] > summary > svg { transform: none; }
+.card-disclosure-content { min-width: 0; padding-block: 8px 12px; }
+.card-disclosure-content > :first-child { padding-top: 0; }
+.card-subtasks-section[data-empty="true"] {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 16px;
+}
+.card-subtasks-section[data-empty="true"] > :first-child { grid-column: 1; grid-row: 1; }
+.card-checklist-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.card-checklist-section { gap: 12px; }
+.card-checklist-section [role="progressbar"] { height: 4px; }
+.card-checklist-items > li { min-height: 36px; gap: 10px; padding: 4px 6px; border-radius: 6px; }
+.card-checklist-items > li:hover, .card-checklist-items > li:focus-within { background: var(--accent); }
+.card-checklist-items > li > input[type="checkbox"] { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--primary); }
+.card-checklist-items > li > button[data-checklist-item-edit], .card-checklist-items > li > input:not([type="checkbox"]) { min-width: 0; overflow-wrap: anywhere; }
+.card-checklist-reveal { min-height: 36px; gap: 8px; border: 1px solid var(--input); background: var(--card); padding-inline: 10px; }
+.card-checklist-reveal, .card-subtask-add, .card-sidebar-section > button { font-size: 13px; }
+.card-checklist-section[data-empty="true"] > .card-checklist-items:empty { display: none; }
+.card-checklist-add { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+.card-checklist-add > input { min-width: 0; height: 36px; }
+.card-checklist-add > button { min-height: 36px; padding-inline: 12px; font-size: 14px; }
+.card-checklist-section > [role="alert"], .card-subtasks-section > [role="alert"] { grid-column: 1 / -1; }
+.card-subtasks-section[data-empty="true"] > .card-subtask-add { grid-column: 2; grid-row: 1; justify-self: end; }
+.card-subtask-add { min-height: 36px; padding-inline: 10px; border-color: var(--input); background: var(--card); color: var(--foreground); box-shadow: 0 1px 2px rgb(0 0 0 / 3%); }
+.card-subtask-add:hover { background: var(--accent); }
+.card-subtask-add:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.card-text-clean-icon { display: inline-block; width: 14px; height: 14px; margin-right: 6px; color: var(--muted-foreground); vertical-align: -2px; }
+.card-text-save-actions > button:disabled { background: var(--muted-foreground); color: var(--card); border-color: transparent; }
+.card-detail-eyebrow { color: var(--muted-foreground); font-size: 12px; }
+.card-detail-type { display: inline-flex; align-items: center; gap: 5px; }
+.card-detail-header > div > :last-child { align-self: flex-end; }
+
+@media (max-width: 479px) {
+  .card-comment-composer-row[data-expanded="false"] .card-comment-composer { grid-template-columns: minmax(0, 1fr); }
+  .card-comment-composer-row[data-expanded="false"] .card-comment-actions { justify-content: flex-end; }
+}
+
+@media (pointer: coarse), (max-width: 47.99rem) {
+  .card-property-control > .relative > button, .card-property-date > input,
+  .card-property-date > button, .card-checklist-reveal, .card-subtask-add,
+  .card-description-heading > button, .card-sidebar-section > button,
+  .card-checklist-add > input, .card-checklist-add > button,
+  .card-detail-activity [role="tab"] { min-height: 44px; }
+}
+
+/* Shallow landscape windows need one scroll to keep lower details reachable. */
+@media (min-width: 48rem) and (min-height: 600px) {
+  .card-detail-body {
+    --card-details-width: 20rem;
+    position: relative;
+    grid-template-columns: minmax(0, 1fr) var(--card-details-width);
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .card-detail-details-pane {
+    display: block;
+    grid-column: 2;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    border-left: 1px solid var(--border);
+    background: var(--card-details-surface);
+  }
+
+  /* Position against the body, outside the static Details wrapper's scroll. */
+  .card-detail-main {
+    position: absolute;
+    inset: 0 var(--card-details-width) 0 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .card-detail-essentials {
+    border-bottom: 0;
+  }
+
+  .card-detail-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .card-detail-sidebar {
+    border-top: 0;
+  }
+
+  .card-detail-sidebar > :first-child {
+    padding-top: 0;
+  }
+
+  .card-detail-sections, .card-detail-activity { padding: 24px; }
+  .card-detail-essentials, .card-detail-sidebar { padding-inline: 20px; }
+  .card-property-control > .relative > button, .card-property-date > input { font-size: 13px; }
+  .card-date-empty { font-size: 13px; }
+  .markdown-editor[data-compact="true"] textarea { font-size: 14px; }
+  .card-text-save-actions > button { font-size: 14px; }
+}
+
+@media (min-width: 80rem) and (min-height: 600px) {
+  .card-detail-body { --card-details-width: 23rem; }
+}
+
+@media (min-width: 48rem) {
+  .card-detail-title, .card-detail-title-input { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.3; }
+  .card-detail-title-input { min-height: 44px; }
+  .card-detail-header { padding: 22px 24px 20px; }
+  .card-section-title { min-height: 32px; font-size: 15px; letter-spacing: normal; }
+  .card-description-editor [data-testid="description-view"] { font-size: 14px; line-height: 1.75; }
+  .card-comment-content .prose { font-size: 14px; }
+  .card-text-save-actions {
+    display: flex;
+    width: auto;
+    flex: 0 0 auto;
+  }
+}
+.card-detail-shell {
+  --foreground: #24252a;
+  --card-foreground: #24252a;
+  --popover-foreground: #24252a;
+  --border: #e4e6eb;
+  --input: #e4e6eb;
+  --card-details-surface: #f7f8fa;
+}
