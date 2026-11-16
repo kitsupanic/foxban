@@ -73,3 +73,11 @@ _Avoid_: Dev status, GitHub status
 **Authored operation**:
 A change a person wrote out, like a title, a comment or a checklist item, whose text is kept until the board confirms it. If the board refuses it or the connection drops, the text is still there to retry. A drag is not one.
 _Avoid_: Save, edit, write
+
+**Instant mutation**:
+A one-click change, like a move, an assignee, a label or a delete, that shows at once and is not held for retry. If the board refuses it, the change is rolled back. Every one goes out through the board commands module (`apps/web/src/lib/board-commands.ts`), which makes its ids and picks where a card lands.
+_Avoid_: Quick edit, fire-and-forget
+
+**Family-finish gate**:
+The check that stops a parent with open subtasks from moving into the completed column on its own. The person is asked to finish the parent alone or the whole family. Every move goes through it, a drag or a status change alike.
+_Avoid_: Completion check

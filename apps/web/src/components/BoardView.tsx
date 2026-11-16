@@ -24,7 +24,7 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { generateKeyBetween } from "fractional-indexing";
+import { useBoardCommands } from "../lib/board-commands";
 import { cardDropPeers, resolveCardDrop, type CardDrop } from "../lib/card-drop";
 import { Link, getRouteApi, useBlocker } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -155,6 +155,7 @@ export function BoardView({
     retire: retireTrackedMutation,
     readBoard: () => queryClient.getQueryData<BoardState>(boardQueryKey(boardId)),
   });
+  const commands = useBoardCommands(boardId, sendMutation);
   const me = useQuery(meQuery);
   // Board metadata is resolved by the route shell via GET /boards/by-key/:key and passed in.
   const meta = boardMeta;
@@ -456,14 +457,15 @@ export function BoardView({
     setFinishIntent(null); setFinishLocalError(null); finish.discard();
     if (intent) restoreFocusSoon(() => intent.trigger?.isConnected ? intent.trigger : document.querySelector<HTMLElement>(`[data-card-body="${CSS.escape(intent.id)}"]`) ?? document.querySelector<HTMLElement>('[aria-label="Search cards"]'));
   };
-  const requestCardMove = (id: string, columnId: string, position: string, trigger?: HTMLElement | null) => {
+  // Drag passes the drop's position; a status change lets the commands place the card among its peers.
+  const requestCardMove = (id: string, to: { columnId: string; position?: string }, trigger?: HTMLElement | null) => {
     if (!state || finishActive || finishIntent) return;
     const card = state.cards.find(card => card.id === id);
-    if (card && card.columnId !== columnId && state.columns.some(column => column.id === columnId && column.completed) && completionFamily(state, id).open.length > 0) {
-      setFinishIntent({ id, columnId, position, sourceColumnId: card.columnId, sourcePosition: card.position, trigger: trigger ?? document.querySelector<HTMLElement>(`[data-card-body="${CSS.escape(id)}"]`) });
-      setFinishLocalError(null); return;
+    const result = commands.moveCard(id, to);
+    if (card && typeof result === "object") {
+      setFinishIntent({ id, ...result.needsFinish, sourceColumnId: card.columnId, sourcePosition: card.position, trigger: trigger ?? document.querySelector<HTMLElement>(`[data-card-body="${CSS.escape(id)}"]`) });
+      setFinishLocalError(null);
     }
-    sendMutation({ type: "card.move", mutationId: crypto.randomUUID(), id, columnId, position });
   };
   const chooseFinish = (scope: "parent" | "family") => {
     if (!state || !finishIntent || finishActive || !connected) return;
@@ -890,26 +892,21 @@ export function BoardView({
     if (!canManageColumns) return;
     const currentBoard = queryClient.getQueryData<BoardState>(boardQueryKey(boardId));
     if (!currentBoard) return;
-    const sortedNow = sortedColumns(currentBoard);
     creation.start({
       kind: "column",
-      fields: { id: crypto.randomUUID(), title, position: generateKeyBetween(sortedNow.at(-1)?.position ?? null, null) },
+      fields: { id: crypto.randomUUID(), title, position: commands.placeNewColumn() },
     });
   };
 
   const createCard = (draft: CardCreateDraft) => {
-    const currentBoard = queryClient.getQueryData<BoardState>(boardQueryKey(boardId));
-    if (!currentBoard) return;
-    // The tail is read from the latest unfiltered cache: a filter hides rows, it
-    // never reorders the column.
-    const tail = columnCards(currentBoard, draft.columnId).at(-1)?.position ?? null;
+    if (!queryClient.getQueryData<BoardState>(boardQueryKey(boardId))) return;
     creation.start({
       kind: "card",
       fields: {
         id: crypto.randomUUID(),
         columnId: draft.columnId,
         title: draft.title,
-        position: generateKeyBetween(tail, null),
+        position: commands.placeNewCard(draft.columnId),
         taskType: draft.taskType,
         priority: draft.priority,
         assigneeId: draft.assigneeId,
@@ -1117,53 +1114,19 @@ export function BoardView({
     }
   }, [openCard, columnToDelete, archiveOpen, memberDrawerOpen, filterDialogOpen]);
   const restoreArchivedCard = useCallback(
-    (cardId: string, columnId: string): boolean => {
-      const currentBoard = queryClient.getQueryData<BoardState>(boardQueryKey(boardId));
-      if (!currentBoard) return false;
-      const isArchived = currentBoard.archivedCards.some((card) => card.id === cardId);
-      if (!isArchived) return false;
-      if (!currentBoard.columns.some((column) => column.id === columnId)) return false;
-      // The restored card lands at the tail of the column it was sent to.
-      const position = generateKeyBetween(columnCards(currentBoard, columnId).at(-1)?.position ?? null, null);
-      return sendMutation({
-        type: "card.restore",
-        mutationId: crypto.randomUUID(),
-        id: cardId,
-        columnId,
-        position,
-      });
-    },
-    [boardId, queryClient, sendMutation],
+    (cardId: string, columnId: string): boolean => commands.restoreCard(cardId, columnId) === "sent",
+    [commands],
   );
   const purgeArchivedCard = useCallback(
-    (cardId: string): boolean => {
-      const currentBoard = queryClient.getQueryData<BoardState>(boardQueryKey(boardId));
-      if (!currentBoard?.archivedCards.some((card) => card.id === cardId)) return false;
-      return sendMutation({
-        type: "card.purge",
-        mutationId: crypto.randomUUID(),
-        id: cardId,
-      });
-    },
-    [boardId, queryClient, sendMutation],
+    (cardId: string): boolean => commands.purgeCard(cardId) === "sent",
+    [commands],
   );
 
 
   const confirmColumnDelete = () => {
     if (!canManageColumns || columnDeleteId === null) return;
-    const currentBoard = queryClient.getQueryData<BoardState>(boardQueryKey(boardId));
-    if (!currentBoard?.columns.some((candidate) => candidate.id === columnDeleteId)) {
-      closeColumnDelete();
-      return;
-    }
-    const sent = sendMutation({
-      type: "column.delete",
-      mutationId: crypto.randomUUID(),
-      id: columnDeleteId,
-    });
-    if (sent) {
-      closeColumnDelete();
-    }
+    // Gone already (a peer deleted it) closes too; only an unsent delete keeps the dialog.
+    if (commands.deleteColumn(columnDeleteId) !== "not-sent") closeColumnDelete();
   };
 
   // Everything the shortcut listener reads changes identity on every render, so
@@ -1310,40 +1273,14 @@ export function BoardView({
 
       if (columnId === overId) return;
 
-      const currentOrdered = sortedColumns(state);
-      const oldIndex = currentOrdered.findIndex((col) => col.id === columnId);
-      const targetCol = currentOrdered.find((col) => col.id === overId);
-      if (oldIndex === -1 || !targetCol) return;
-
-      const withoutMoved = currentOrdered.filter((col) => col.id !== columnId);
-      const targetIndexInRemaining = withoutMoved.findIndex((col) => col.id === targetCol.id);
-      if (targetIndexInRemaining === -1) return;
-
-      // If moving right (oldIndex < newIndex), the column lands after targetCol
-      // If moving left (oldIndex > newIndex), the column lands at targetCol's position (before targetCol)
-      const targetColOriginalIndex = currentOrdered.findIndex((col) => col.id === targetCol.id);
-      const insertIndex = oldIndex < targetColOriginalIndex
-        ? targetIndexInRemaining + 1
-        : targetIndexInRemaining;
-
-      const prevPos = withoutMoved[insertIndex - 1]?.position ?? null;
-      const nextPos = withoutMoved[insertIndex]?.position ?? null;
-      // Concurrent creates can tie; use the same one-row append fallback as cards.
-      const newPosition = generateKeyBetween(prevPos, prevPos === nextPos ? null : nextPos);
-
-      sendMutation({
-        type: "column.move",
-        mutationId: crypto.randomUUID(),
-        id: columnId,
-        position: newPosition,
-      });
+      commands.moveColumn(columnId, overId);
       return;
     }
     const cardId = String(active.id);
     const drop = resolveCardDrop(state, hierarchy, cardId, keyboardCardTargetRef.current ?? String(over.id), pointerDropSideRef.current);
     keyboardCardTargetRef.current = null;
     if (!drop) return;
-    requestCardMove(cardId, drop.columnId, drop.position);
+    requestCardMove(cardId, drop);
   };
 
   // Membership and accessibility are verified before BoardView mounts; WebSocket
@@ -2090,7 +2027,7 @@ export function BoardView({
           cardLabels={cardLabelViews(state, openCard.id)}
           cards={state.cards}
           columns={columns}
-          onRequestMove={requestCardMove}
+          onRequestMove={(id, columnId, trigger) => requestCardMove(id, { columnId }, trigger)}
           onOpenCard={openFromCard}
           members={memberList}
           membersLoading={members.isPending}
