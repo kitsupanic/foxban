@@ -29,7 +29,6 @@ import { boardQueryKey } from "../lib/board-cache";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { generateKeyBetween } from "fractional-indexing";
 import {
   DESCRIPTION_MAX_BYTES,
   Title,
@@ -63,11 +62,10 @@ import {
 import type { SendMutation, MutationSettledCallback } from "../lib/socket";
 import { compressImage } from "../lib/compress-image";
 import { LABEL_COLORS, LABEL_COLOR_META } from "../lib/labels";
-import { byPosition, type BoardState, type CardLabelView } from "../lib/apply-mutation";
+import { type BoardState, type CardLabelView } from "../lib/apply-mutation";
+import { useBoardCommands } from "../lib/board-commands";
 import {
   RELATION_OPTIONS,
-  buildRelation,
-  alreadyLinked,
   relationViews,
   cardTitle,
   type RelationOptionValue,
@@ -206,7 +204,8 @@ export function CardModal({
   cards: Card[];
   /** The board's live columns in display order. */
   columns: Column[];
-  onRequestMove?: (id: string, columnId: string, position: string, trigger?: HTMLElement | null) => void;
+  /** Every status change goes through the board, which owns placement and the family-finish gate. */
+  onRequestMove: (id: string, columnId: string, trigger?: HTMLElement | null) => void;
   onOpenCard: (cardId: string) => void;
   members: Member[];
   membersLoading: boolean;
@@ -245,6 +244,7 @@ export function CardModal({
     retire: retireTrackedMutation ?? (() => {}),
     readBoard: () => queryClient.getQueryData<BoardState>(boardQueryKey(boardId)),
   });
+  const commands = useBoardCommands(boardId, send);
   const [title, setTitle] = useState(card.title);
   const [editingTitle, setEditingTitle] = useState(false);
   const editTitleButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -779,61 +779,36 @@ export function CardModal({
   // Assignment is its own mutation, not a `card.update` field: `null` has to
   // mean "unassign", which a partial update could not express.
   const assign = (value: string) => {
-    const assigneeId = value === "" ? null : value;
-    if (assigneeId === card.assigneeId) return;
-    send({ type: "card.assign", mutationId: crypto.randomUUID(), id: card.id, assigneeId });
+    commands.assign(card.id, value === "" ? null : value);
   };
 
   // Priority follows assignment rather than the draft: an instant-send field,
   // never unset (every card has one, new cards default to Medium).
   const prioritize = (value: string) => {
-    const priority = value as Priority;
-    if (priority === card.priority) return;
-    send({ type: "card.prioritize", mutationId: crypto.randomUUID(), id: card.id, priority });
+    commands.prioritize(card.id, value as Priority);
   };
   const retype = (taskType: Exclude<TaskType, "subtask">) => {
-    if (card.taskType === "subtask" || taskType === card.taskType) return;
-    send({ type: "card.retype", mutationId: crypto.randomUUID(), id: card.id, taskType });
+    commands.retype(card.id, taskType);
   };
   // Without a starting and a completed column (fewer than two columns) there is
   // no completion to change.
   const hasWorkflowRoles = columns.some(column => column.starting) && columns.some(column => column.completed);
   const changeColumn = (targetColumnId: string) => {
     if (targetColumnId === card.columnId) return;
-    const tail = cards
-      .filter((candidate) => candidate.columnId === targetColumnId)
-      .sort(byPosition)
-      .at(-1);
-    const position = generateKeyBetween(tail?.position ?? null, null);
-    if (onRequestMove) {
-      const trigger = document.activeElement?.closest('[role="dialog"]')?.querySelector<HTMLElement>('[aria-label="Status"]') ?? null;
-      onRequestMove(card.id, targetColumnId, position, trigger); return;
-    }
-    send({
-      type: "card.move",
-      mutationId: crypto.randomUUID(),
-      id: card.id,
-      columnId: targetColumnId,
-      position,
-    });
+    const trigger = document.activeElement?.closest('[role="dialog"]')?.querySelector<HTMLElement>('[aria-label="Status"]') ?? null;
+    onRequestMove(card.id, targetColumnId, trigger);
   };
 
   /** Completion is an ordinary instant mutation: optimistic, with board-reported errors. */
   const completeSubtask = (cardId: string, done: boolean) => {
     const target = columns.find(c => done ? c.completed : c.starting);
-    if (!target) return;
-    const tail = cards.filter(c => c.columnId === target.id && c.id !== cardId).sort(byPosition).at(-1);
-    const position = generateKeyBetween(tail?.position ?? null, null);
-    if (onRequestMove) onRequestMove(cardId, target.id, position);
-    else send({ type: "card.move", mutationId: crypto.randomUUID(), id: cardId, columnId: target.id, position });
+    if (target) onRequestMove(cardId, target.id);
   };
 
 
   // A cleared date input yields "", which maps to null — "no deadline".
   const schedule = (value: string) => {
-    const dueDate = value === "" ? null : value;
-    if (dueDate === card.dueDate) return;
-    send({ type: "card.schedule", mutationId: crypto.randomUUID(), id: card.id, dueDate });
+    commands.schedule(card.id, value === "" ? null : value);
   };
 
   const sendChecklistText = (lane: "add" | "edit", itemId?: string) => {
@@ -847,7 +822,7 @@ export function CardModal({
     (lane === "add" ? addOp : editOp).start({
       id: itemId ?? crypto.randomUUID(),
       text,
-      position: itemId ? undefined : generateKeyBetween(items.at(-1)?.position ?? null, null),
+      position: itemId ? undefined : commands.placeNewChecklistItem(card.id),
     });
   };
 
@@ -862,11 +837,8 @@ export function CardModal({
 
   const addItem = () => sendChecklistText("add");
 
-  /** The position at the tail of the column a new subtask lands in: the starting column, or this card's own on a board without roles. */
-  const subtaskTailPosition = (): string => {
-    const columnId = columns.find(c => c.starting)?.id ?? card.columnId;
-    return generateKeyBetween(cards.filter(c => c.columnId === columnId).sort(byPosition).at(-1)?.position ?? null, null);
-  };
+  /** A new subtask's key in the column it lands in: the starting column, or this card's own on a board without roles. */
+  const subtaskTailPosition = (): string => commands.placeNewCard(columns.find(c => c.starting)?.id ?? card.columnId);
 
   const addSubtask = () => {
     const rawDraft = subtaskDraftRef.current;
@@ -932,38 +904,10 @@ export function CardModal({
   // The picked card arrives straight from the autocomplete — no confirm button.
   // A duplicate pair is dropped silently; the DO does no referential checks.
   const addRelation = (otherCardId: string) => {
-    const { sourceCardId, targetCardId, kind } = buildRelation(relationKind, card.id, otherCardId);
-    if (alreadyLinked(relations, kind, card.id, otherCardId)) {
-      setRelationQuery("");
-      return;
-    }
-    const sent = send({
-      type: "relation.create",
-      mutationId: crypto.randomUUID(),
-      id: crypto.randomUUID(),
-      sourceCardId,
-      targetCardId,
-      kind,
-    });
-    if (sent) setRelationQuery("");
+    if (commands.createRelation(relationKind, card.id, otherCardId) !== "not-sent") setRelationQuery("");
   };
 
-  const toggleLabel = (labelId: string) => {
-    const join = cardLabels.find((view) => view.label.id === labelId);
-    if (join) {
-      for (const id of join.assignmentIds) {
-        send({ type: "label.unassign", mutationId: crypto.randomUUID(), id });
-      }
-      return;
-    }
-    send({
-      type: "label.assign",
-      mutationId: crypto.randomUUID(),
-      id: crypto.randomUUID(),
-      cardId: card.id,
-      labelId,
-    });
-  };
+  const toggleLabel = (labelId: string) => commands.toggleLabel(card.id, labelId);
 
   // Two ordinary mutations from one submit — define it, then hang it on this
   // card. A drop after the first leaves an unassigned definition in the picker:
@@ -971,22 +915,7 @@ export function CardModal({
   const createLabel = () => {
     const name = newLabelName.trim();
     if (!name) return;
-    const labelId = crypto.randomUUID();
-    const sent = send({
-      type: "label.create",
-      mutationId: crypto.randomUUID(),
-      id: labelId,
-      name,
-      color: createColor,
-    });
-    if (!sent) return;
-    send({
-      type: "label.assign",
-      mutationId: crypto.randomUUID(),
-      id: crypto.randomUUID(),
-      cardId: card.id,
-      labelId,
-    });
+    if (commands.createAndAssignLabel(card.id, name, createColor) === "not-sent") return;
     setNewLabelName("");
     setNewLabelColor(null);
     setCreatingLabel(false);
@@ -1024,20 +953,12 @@ export function CardModal({
     const name = labelNameDirtyRef.current && typed !== "" && typed !== baseline.name ? typed : undefined;
     const color =
       labelColorDirtyRef.current && editLabelColor !== baseline.color ? editLabelColor : undefined;
-    if (name !== undefined || color !== undefined) {
-      send({
-        type: "label.update",
-        mutationId: crypto.randomUUID(),
-        id: label.id,
-        ...(name !== undefined && { name }),
-        ...(color !== undefined && { color }),
-      });
-    }
+    commands.updateLabel(label.id, { name, color });
     exitLabelEdit();
   };
 
   const deleteLabel = (labelId: string) => {
-    send({ type: "label.delete", mutationId: crypto.randomUUID(), id: labelId });
+    commands.deleteLabel(labelId);
     exitLabelEdit();
   };
 
@@ -2262,14 +2183,7 @@ export function CardModal({
               aria-label={item.text}
               checked={item.done}
               disabled={editingId === item.id && checklistAttempts.edit.pending}
-              onChange={() =>
-                send({
-                  type: "checklist.update",
-                  mutationId: crypto.randomUUID(),
-                  id: item.id,
-                  done: !item.done,
-                })
-              }
+              onChange={() => commands.setChecklistDone(item.id, !item.done)}
               className="size-4 rounded border-input text-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             />
             {editingId === item.id ? (
@@ -2342,9 +2256,7 @@ export function CardModal({
               size="icon-sm"
               aria-label={`Delete item ${item.text}`}
               disabled={editingId === item.id && checklistAttempts.edit.pending}
-              onClick={() =>
-                send({ type: "checklist.delete", mutationId: crypto.randomUUID(), id: item.id })
-              }
+              onClick={() => commands.deleteChecklistItem(item.id)}
               className="opacity-0 pointer-coarse:opacity-100 size-7 pointer-coarse:size-11 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 text-muted-foreground hover:text-destructive"
             >
               <X aria-hidden className="size-3.5" />
@@ -2467,13 +2379,7 @@ export function CardModal({
             variant="ghost"
             size="icon-sm"
             aria-label={`Remove parent link ${cardTitle(cards, parentLink.sourceCardId)}`}
-            onClick={() =>
-              send({
-                type: "relation.delete",
-                mutationId: crypto.randomUUID(),
-                id: parentLink.id,
-              })
-            }
+            onClick={() => commands.deleteRelation(parentLink.id)}
             className="opacity-0 pointer-coarse:opacity-100 size-7 pointer-coarse:size-11 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 text-muted-foreground hover:text-destructive"
           >
             <X aria-hidden className="size-3.5" />
@@ -2502,8 +2408,7 @@ export function CardModal({
           actions={{
             onOpen: navigate,
             onComplete: hasWorkflowRoles ? completeSubtask : undefined,
-            onUnlink: (relationId: string) =>
-              send({ type: "relation.delete", mutationId: crypto.randomUUID(), id: relationId }),
+            onUnlink: (relationId: string) => commands.deleteRelation(relationId),
           }}
           // The child's own status, as plain text.
           statusLabel={(child: Card) =>
@@ -2676,13 +2581,7 @@ export function CardModal({
                 variant="ghost"
                 size="icon-sm"
                 aria-label={`Delete relation ${view.label} ${cardTitle(cards, view.otherCardId)}`}
-                onClick={() =>
-                  send({
-                    type: "relation.delete",
-                    mutationId: crypto.randomUUID(),
-                    id: view.relation.id,
-                  })
-                }
+                onClick={() => commands.deleteRelation(view.relation.id)}
                 className="opacity-0 pointer-coarse:opacity-100 size-7 pointer-coarse:size-11 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 text-muted-foreground hover:text-destructive"
               >
                 <X aria-hidden className="size-3.5" />
@@ -2833,12 +2732,7 @@ export function CardModal({
                     variant="destructive"
                     size="xs"
                     onClick={() => {
-                      const sent = send({
-                        type: "attachment.delete",
-                        mutationId: crypto.randomUUID(),
-                        id: attachment.id,
-                      });
-                      if (sent) setConfirmingAttachmentId(null);
+                      if (commands.deleteAttachment(attachment.id) === "sent") setConfirmingAttachmentId(null);
                     }}
                     className="h-6 px-1.5 py-0 text-xs"
                   >
@@ -3189,13 +3083,7 @@ export function CardModal({
                             size="icon-sm"
                             aria-label="Delete comment"
                             disabled={editingCommentId === c.id}
-                            onClick={() =>
-                              send({
-                                type: "comment.delete",
-                                mutationId: crypto.randomUUID(),
-                                id: c.id,
-                              })
-                            }
+                            onClick={() => commands.deleteComment(c.id)}
                             className="size-7 pointer-coarse:size-11 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
                           >
                             <X aria-hidden className="size-3.5" />
@@ -3811,16 +3699,9 @@ export function CardModal({
                     variant="destructive"
                     size="sm"
                     onClick={() => {
-                      // `send` is false when disconnected: nothing happened, so the
-                      // dialog stays open. On success the optimistic removal unmounts it.
-                      if (
-                        send({
-                          type: "card.delete",
-                          mutationId: crypto.randomUUID(),
-                          id: card.id,
-                        })
-                      )
-                        onClose();
+                      // Not sent when disconnected: nothing happened, so the dialog
+                      // stays open. On success the optimistic removal unmounts it.
+                      if (commands.deleteCard(card.id) === "sent") onClose();
                     }}
                   >
                     Delete

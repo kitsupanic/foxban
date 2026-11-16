@@ -70,3 +70,26 @@ test("concurrent equal keys retain the non-throwing one-row fallback", () => {
   const drop = resolveCardDrop(state, hierarchy, "return", "C2", "before")!;
   expect(drop.position > "a4").toBe(true);
 });
+
+// A peer-only tail ignores keys held by non-peers in the column (a parent, or a root's nested
+// children); every drop must still mint a key no other card in the destination holds.
+const uniqueIn = (state: BoardState, columnId: string, cardId: string, position: string) =>
+  !state.cards.some(other => other.id !== cardId && other.columnId === columnId && other.position === position);
+test("reopening children into their parent's column never ties the parent or a later root", () => {
+  const state: BoardState = { ...fixture().state, cards: [card("P", "a0"), card("X", "a1"), card("C1", "a0", "done"), card("C2", "a1", "done")], relations: [{ id: "r1", kind: "subtask", sourceCardId: "P", targetCardId: "C1" }, { id: "r2", kind: "subtask", sourceCardId: "P", targetCardId: "C2" }] };
+  for (const id of ["C1", "C2"]) {
+    const drop = resolveCardDrop(state, buildSubtaskHierarchy(state.cards, state.relations), id, "column-drop:todo")!;
+    expect(drop.hint).toEqual({ cardId: "P", placement: "inside" });
+    expect(uniqueIn(state, "todo", id, drop.position)).toBe(true);
+    state.cards.find(c => c.id === id)!.columnId = "todo";
+    state.cards.find(c => c.id === id)!.position = drop.position;
+  }
+  const keys = state.cards.filter(c => c.columnId === "todo").map(c => c.position);
+  expect(new Set(keys).size).toBe(keys.length);
+});
+test("a root dropped on a column body never ties the last root's nested child", () => {
+  const state: BoardState = { ...fixture().state, cards: [card("R", "a0"), card("K", "a1"), card("N", "a0", "work")], relations: [{ id: "r1", kind: "subtask", sourceCardId: "R", targetCardId: "K" }] };
+  const drop = resolveCardDrop(state, buildSubtaskHierarchy(state.cards, state.relations), "N", "column-drop:todo")!;
+  expect(drop.position > "a0").toBe(true);
+  expect(uniqueIn(state, "todo", "N", drop.position)).toBe(true);
+});

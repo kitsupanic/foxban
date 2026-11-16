@@ -6,7 +6,7 @@ import { CSS } from "@dnd-kit/utilities";
 import type { Card, Column, SubtaskHierarchy } from "@foxban/shared";
 import type { Member } from "../lib/api";
 import { boardAncestors, type BoardState } from "../lib/apply-mutation";
-import type { SendMutation } from "../lib/socket";
+import type { BoardCommands } from "../lib/board-commands";
 import { CardView, getCardFaceProps } from "./CardView";
 import { CardSubtaskFamily } from "./SubtaskList";
 import type { CardPullRequestBadge } from "../lib/card-development";
@@ -31,7 +31,7 @@ export function ColumnView({
   membersById,
   boardKey,
   pullRequestBadges,
-  send,
+  commands,
   onOpenCard,
   onToggleSubtasks,
   onRequestDelete,
@@ -61,7 +61,7 @@ export function ColumnView({
   boardKey?: string;
   /** The board's live pull request badges, by card id; absent ids show none. */
   pullRequestBadges: ReadonlyMap<string, CardPullRequestBadge>;
-  send: SendMutation;
+  commands: BoardCommands;
   onOpenCard: (cardId: string) => void;
   onToggleSubtasks: (cardId: string) => void;
   onRequestDelete: (trigger: HTMLButtonElement) => void;
@@ -141,15 +141,7 @@ export function ColumnView({
       closeTitleEditor(true);
       return;
     }
-    const sent = send({
-      type: "column.rename",
-      mutationId: crypto.randomUUID(),
-      id: column.id,
-      title,
-    });
-    if (sent) {
-      closeTitleEditor(true);
-    }
+    if (commands.renameColumn(column.id, title) === "sent") closeTitleEditor(true);
   };
 
   return (
