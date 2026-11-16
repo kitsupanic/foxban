@@ -29,7 +29,7 @@ MCP coverage uses the published `@modelcontextprotocol/client` 2.0.0 against
 `SELF.fetch`, real D1 migrations and real BoardDO SQLite. `mcp.test.ts` proves
 transport negotiation/discovery and the read/task/comment/subtask-completion/label-management paths;
 `agent-credentials.test.ts` covers session-only issuance/list/revocation and
-digest storage. BoardDO regressions protect schema v23 and the shared browser
+digest storage. BoardDO regressions protect the MCP receipt table (schema v23) and the shared browser
 mutation path.
 
 Races between two requests are tested by pausing one request's D1 binding rather than by hoping two `SELF.fetch` calls overlap: `workerWithPausedD1` in `paused-d1.ts` (shared by `workspace-delete.test.ts` and `workspace-roles.test.ts`) calls the Worker with `env.DB` wrapped so a hook runs before the n-th statement or batch, and the test runs the competing request (a board created or moved in, or the delete) at every gap in turn. A check-then-delete version of the workspace delete fails it at exactly the gap between the check and the delete. The same sweep runs a demotion of the inviter at every gap of an invite acceptance, and a second time as a direct write that skips the workspace lock, so the reservation's check and the commit's check are each shown to be needed.

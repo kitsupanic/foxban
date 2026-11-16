@@ -14,7 +14,7 @@
 
 ## Where things are
 
-- `docs/architecture.md` — how it works (components, data model, WS protocol)
+- `docs/architecture.md` — how it works; the hub, with parts in `docs/architecture/` (web, api, github, board-do, protocol)
 - `docs/testing.md` — test approach
 - `docs/mcp.md` — the MCP endpoint
 - `docs/decisions/` — why (ADRs)
@@ -22,6 +22,6 @@
 
 ## Process
 
-- Before coding: read `docs/architecture.md`.
+- Before coding: read `docs/architecture.md`, then the part under `docs/architecture/` for the area you touch.
 - Load-bearing choice made or reversed: add an ADR in `docs/decisions/`.
 - Run `pnpm typecheck` and `pnpm test` before you call a change done.

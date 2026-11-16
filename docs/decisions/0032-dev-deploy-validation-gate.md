@@ -1,7 +1,7 @@
 # 0032 — Dev deploy validation gate
 
 ## Status
-Accepted — 2026-09-05
+Accepted — 2026-09-05. Its GitHub Actions parts are superseded by ADR 0070.
 
 ## Context
 ADR 0031 required Chromium Playwright E2E tests before automatic dev deployment. This ADR supersedes only that validation-gate clause; ADR 0031's environment isolation, automatic dev deployment and manual production boundary remain accepted. Running browser installation and E2E suites on every push adds unnecessary CI latency to an already isolated development environment.

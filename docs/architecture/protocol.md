@@ -1,0 +1,70 @@
+# WebSocket protocol
+
+Part of [architecture](../architecture.md).
+
+JSON text frames validated with the shared Zod schemas from `packages/shared` (`ClientMessageSchema`, `ServerMessageSchema`; entities `Column`, `Card`). camelCase on the wire; snake_case only inside the DO's SQL.
+
+The authenticated, membership-checked Worker overwrites internal board/user headers and `x-foxban-can-manage-columns` before forwarding a board upgrade. It derives the capability from the already-authorized board's `ownerId` and authenticated user's `ADMIN_EMAILS` verdict, never from client headers or mutation fields. BoardDO validates identity and stores `{ userId, boardId, canManageColumns }` in the hibernating socket attachment; only the exact fresh header value `"true"` grants the capability, with missing or other values stored as false. Activity actors remain server-attributed.
+
+After identity and message-schema validation, BoardDO gates exactly `column.create`, `column.rename`, `column.move` and `column.delete`, before archived/locked-card checks, alarm scheduling, activity derivation or transaction entry. Boolean true continues through the existing mutation path. Boolean false returns a sender-only, mutation-correlated error (`"Only the board owner or an admin can change columns."`) and keeps the socket open for card collaboration. A denial changes no board state, archive, activity or alarm and emits no successful mutation or lifecycle broadcast.
+
+A missing or non-boolean capability in an existing socket attachment instead returns the correlated error `"Reconnect to change board columns."` and closes with code `1012`. The client rolls back the rejected operation; reconnect re-derives authority and the user must deliberately retry the operation, with no automatic replay. The existing bounded reconnect budget and manual connection **Retry** remain in force. Authority is connect-time scoped, like membership/session checks: no per-mutation D1 lookup or live role-revocation machinery. This internal capability adds no database field, public snapshot property or role, and does not change wire shapes or the public realtime protocol version.
+
+Entities:
+
+```ts
+Column = { id: string, title: string, position: string,
+           starting?: boolean, completed?: boolean }  // the BoardDO always sends both
+Card   = { id: string, columnId: string, title: string, description: string,
+           position: string, taskNumber: number, assigneeId: string | null, priority: Priority,
+           taskType: TaskType, dueDate: string | null, subtaskDone: boolean,
+           createdAt: number, updatedAt: number }
+ArchivedCard = Card & { archivedAt: number, archivedColumnTitle: string }
+Comment = { id: string, cardId: string, authorId: string, parentCommentId: string | null,
+            deleted: boolean, body: string, createdAt: number, updatedAt: number }
+Activity = { id: string, cardId: string, actorId: string,
+             sequence: number, createdAt: number, detail: ActivityDetail }
+```
+
+Client → server — `ClientMessageSchema` in `packages/shared/src/protocol.ts` is the full list; it is a discriminated union on `type`; every message carries a client-generated `mutationId` (uuid). Clients also generate entity `id`s (`crypto.randomUUID()`) and `position` keys (fractional indexing, client side); the DO trusts them (LWW between two trusted users, ADR 0007):
+
+- Columns: `column.create`, `column.rename`, `column.move`, `column.delete` (the DO archives its active cards).
+- Cards: `card.create` (optional `taskType`, `priority`, `assigneeId`), `card.update` (title, description), `card.move`, `card.retype`, `card.assign`, `card.prioritize`, `card.schedule` (due date), `card.finish` (ADR 0059), `card.delete` (archives), `card.restore`, `card.purge` (archived ids only; permanent).
+- Subtasks and relations: `subtask.create`, `relation.create`, `relation.delete`.
+- Comments: `comment.create`, `comment.update`, `comment.delete`.
+- Checklists: `checklist.create`, `checklist.update`, `checklist.delete`.
+- Labels: `label.create`, `label.update`, `label.delete`, `label.assign`, `label.unassign`.
+- Attachments: `attachment.create`, `attachment.delete`.
+- Workflow: `workflow.configure` (the starting and completed columns).
+
+Server → client:
+
+- `{ type: "snapshot", workflowRolesExplicit: boolean, columns: Column[], ..., cards: Card[], archivedCards: ArchivedCard[], activities: Activity[] }` — sent immediately after accept; entity arrays are unordered, active and archived cards are separate, and card activity is presented by `sequence`.
+- Mutation broadcast — the client message forwarded **verbatim** (byte-for-byte) to ALL sockets, sender included; the sender reconciles by `mutationId`.
+- `{ type: "card.numbered", mutationId, id, taskNumber }` — server-only authoritative reconciliation sent immediately after accepted verbatim `card.create` and before any activity frame.
+- `{ type: "activity.recorded", mutationId, activities: Activity[] }` — server-only, sent after the matching mutation when the accepted change produced history.
+- `{ type: "cards.archived", mutationId, cards: ArchivedCard[] }` — server-only authoritative reconciliation sent after the matching verbatim `card.delete` or `column.delete`.
+- `{ type: "archive.purged", cardIds: string[] }` — server-only authoritative reconciliation for retention alarms and accepted `card.purge` mutations.
+- `{ type: "github.invalidated", scope: "card", cardId: string, revision: null }`: server-only, emitted after an accepted webhook write, manual link or unlink to a card's development info. A hint, never data: the client marks the development caches stale and lets the next authoritative read install the truth. There is no client-side variant and no optimistic replay. (The repository scope, and card-scope hints that carried a link revision, ended with the per-board integration; `revision` stays in the frame only so older clients still parse it.)
+- `{ type: "error", mutationId: string | null, message: string }` — sender only; `mutationId` is null when the frame was unparseable.
+
+## Realtime protocol versioning and reconnection lifecycle
+
+- Both board (`/boards/:id/ws`) and presence (`/presence/ws`) WebSocket URLs require query parameter `?realtimeVersion=10` matching `REALTIME_PROTOCOL_VERSION = "10"`. Version `"4"` made `subtask` an immutable one-level type; `"5"` made parent deletion archive its complete active subtask family; `"6"` enriches `card.create` with optional `taskType`, `priority` and nullable `assigneeId`; `"10"` removes the inherited subtask mode (`subtask.complete` is gone and `workflow.configure` loses its `migration` field). Older clients strictly parse mutation broadcasts and cannot safely consume the enriched frame, so previous versions are rejected explicitly.
+- Development info (ADR 0064) adds no frame and no version: an accepted webhook write reuses the card-scope `github.invalidated` hint, which every deployed client already parses, and the client answers it with reads of `GET /boards/:id/cards/:cardId/development` and `GET /boards/:id/development`. A future frame that carries development data itself would need a bump.
+- The Worker validates `realtimeVersion` after authentication and board membership, but before acquiring a Durable Object stub. Incompatible or missing versions receive HTTP 409 `{ error: "realtime client update required" }`, preventing obsolete client bundles from querying DO SQLite storage.
+- Connection health is defined by a validated snapshot AND 10 seconds of continuous connection (`STABLE_CONNECTION_MS = 10_000`), not transport `onopen`. Retry backoff and failure counts reset only after surviving open for 10 seconds following a valid snapshot.
+- Unsynchronized or unstable closes (including unparseable/unsupported frames dropped by the client or immediate disconnects following snapshots) trip a circuit breaker at 3 consecutive failures (`MAX_FAILED_SYNCHRONIZATIONS = 3`), halting reconnection attempts. Unparseable board frames log a sanitized warning without raw payloads, drop immediately, and count toward the breaker. For an already-loaded board page, the UI keeps the board page, active card modals, and drafts mounted, displaying **Could not connect.** with a manual **Retry** action that restarts the 3-attempt budget; only an initial connection failure before a snapshot displays the full-page failure view. Presence reconnection stops silently with one console warning.
+- Live-socket timeout of an authored operation requiring authoritative settlement verification (`mutationSubscribersRef.has(mutationId)`) triggers a transport close with code 4000 (`"authored operation timeout resync"`), prompting an immediate reconnect and fresh snapshot fetch. Ordinary instant mutations (such as column moves, label toggles, drag-and-drop) or attachment deletions do not close the transport on timeout.
+- Closes that occur after achieving 10 seconds of stable connection continue bounded exponential backoff reconnection and require re-establishing stability on reconnect.
+- Operational analytics diagnostics use Cloudflare GraphQL datasets `durableObjectsPeriodicGroups` (summed `rowsRead`, `rowsWritten`, `outboundWebsocketMsgCount`) and `durableObjectsInvocationsAdaptiveGroups` (summed `requests`, `errors`), grouped by object name, hour, and invocation status/type.
+
+DO semantics: archived-target rejection runs before activity derivation. Pre-mutation activity derivation, the mutation, immutable activity inserts, and any card lifecycle result occur in one synchronous SQLite transaction. `card.create` accepts optional `taskType` (`epic`, `spike`, `task` or `bug`), optional `priority` (the shared Priority enum), and optional nullable `assigneeId` (Identifier or null). Omission preserves defaults: `task`, `medium` and null. Subtask is not a `card.create` type; it remains parent-created through `subtask.create`. After validating the destination column, `card.create` passes all selected fields to the shared `insertCard` path: one card INSERT binds `task_type`, `priority` and `assignee_id` alongside the title, placement and allocated task number. It records one `card.created` activity, not follow-up property-edit history, and retains the existing `card.numbered` frame. Creation writes board data only to DO SQLite, with no new migration or D1 board-data write. Archived cards reject every card-owned mutation except `card.restore` and `card.purge`; board-scoped `label.delete` still removes its definition and joins. `subtask.create` carries its own precise refusal (`Parent task is unavailable.`) and remains covered by the transfer fence. `subtask.create` writes the child (ordinary priority/assignee defaults, immutable subtask type, column from the workflow roles — the starting column, or the completed one for a done converted item, or the parent's own column on a board without roles) and the `subtask` relation in the same transaction, then returns the existing `card.numbered` frame and records `card.created` plus two-sided `relation.added` history (with `checklist.deleted` for a conversion) — all from one `insertCard`/`allocateTaskNumber` path shared with `card.create`, never a second counter. A deliberate retry that repeats the exact child, parent and relation is an idempotent replay: it returns the stored task number and writes no row and no history, while any other collision with those ids is refused with `Subtask identity is already in use.`. Destination column existence is validated transactionally in `card.create` and `card.move`: targeting a non-existent column throws an error and rejects the mutation before creation allocates a task number, allowing the client to roll back rather than stranding active cards in deleted columns (mutations matching no row remain accepted silent no-ops). `card.delete` archives the active card alone. `card.purge` permanently cascades only an archived row; an active or missing id is an accepted no-op, so a stale archive client cannot destroy active data. Manual and retention purges share the same dependent-row cascade, attachment trigger, `archive.purged` frame and R2 cleanup drain. Cross-board transfer preserves the source card's `taskType`.
+
+## Independent subtasks (ADR 0057, ADR 0067)
+
+BoardDO schema v25 added explicit starting/completed column roles; schema v29 converted every board to them and removed the inherited mode (see [Subtask families and independent status](board-do.md#subtask-families-and-independent-status)). Every card uses its stored column and derives completion from that column; same-column children nest, and progress counts all direct active children. Parent moves/archive leave children in place, restore chooses a destination, and unlink/purge promotes detached children. The realtime protocol version persists in hibernating attachments and fences incompatible sessions (version 10 is current). MCP moves accept any task; completion shortcuts move the child to the completed or starting column. The conversion is a one-way data change: BoardDO point-in-time recovery is the rollback, restoring data before the old binary.
+
+## Explicit independent-family completion
+
+See [ADR 0059](../decisions/0059-explicit-family-completion.md). A parent entering the explicitly completed column with active unfinished descendants opens an accessible choice before any mutation. `card.finish` in realtime protocol 9 explicitly chooses parent-only or the full unfinished family. Its expected parent placement and full descendant placement/parentage guard concurrent changes. BoardDO validates the exact move set and commits every placement plus activity in one SQLite transaction; already completed and archived descendants are excluded from movement. Ordinary `card.move` and all existing MCP moves remain single-card operations. Reopening never reopens children. No schema migration accompanies this change.

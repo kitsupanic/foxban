@@ -4,9 +4,9 @@ Foxban exposes an authenticated remote MCP endpoint at `/mcp`. It uses configure
 
 ## Issue and manage credentials
 
-Sign in through the normal Foxban login flow. The session cookie is httpOnly, so `document.cookie` cannot read it; obtain your own cookie through browser storage/developer tooling. Keep cookies and tokens in environment variables, never command arguments, source, tickets, or logs.
+Open **MCP server** (`/mcp-server`) while signed in. It issues, lists and revokes your credentials, and copies the token or a ready-made `mcpServers` / VS Code configuration.
 
-From the repository root:
+For scripted setup, the repository helper does the same through your session cookie. The cookie is httpOnly, so `document.cookie` cannot read it; copy it from browser developer tooling. Keep cookies and tokens in environment variables, never command arguments, source, tickets, or logs. From the repository root:
 
 ```bash
 export FOXBAN_ORIGIN='https://foxban.example.com'
@@ -76,4 +76,4 @@ Reuse the exact same operation key and arguments after an ambiguous mutation fai
 
 > Discover the authorized board and its current columns before acting. Read the task context. Move a task only when work actually starts. Create newly discovered work deliberately. Comment only with real test, deployment, or pull-request evidence. Move to the board's discovered review stage only after the work is complete. Preserve each mutation operationKey unchanged on every retry.
 
-MCP access does not run agents, track development automatically, reserve tasks, or make moves/assignments exclusive claims. Column names are board-specific. No Profile UI, scheduler, destructive task tools, board/column administration, attachment operations, cross-board transfer, GitHub action, or production deployment is included.
+MCP access does not run agents, track development automatically, reserve tasks, or make moves/assignments exclusive claims. Column names are board-specific. No scheduler, destructive task tools, board/column administration, attachment operations, cross-board transfer, GitHub action, or production deployment is included.

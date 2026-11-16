@@ -13,4 +13,4 @@ labels: bug
 1.
 2.
 
-**Where?** Browser and version, and whether you deployed with the button or `pnpm deploy`.
+**Where?** Browser and version, and whether you deployed with the button or `pnpm run deploy`.
