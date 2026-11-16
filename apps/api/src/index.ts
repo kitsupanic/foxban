@@ -14,9 +14,7 @@ import {
   isPreviewableImageContentType,
   newPasswordProblem,
   REALTIME_PROTOCOL_VERSION,
-  TRANSFER_TERMINAL_CODE,
   normalizeAttachmentContentType,
-  rewriteAttachmentUrls,
 } from "@foxban/shared";
 import {
   boardExists,
@@ -45,6 +43,7 @@ import {
   verifyUserPassword,
   BOARD_SELECT_COLS,
   boardManageSql,
+  boardMemberSql,
   boardOpenSql,
   toBoardRow,
   type AppEnv,
@@ -72,7 +71,6 @@ import {
   RECONCILE_ATTACHMENTS_PATH,
   STAGE_ATTACHMENT_PATH,
   attachmentObjectKey,
-  attachmentTransferObjectKey,
   parseAttachmentObjectKey,
   userAvatarObjectKey,
   parseAvatarObjectKey,
@@ -84,18 +82,11 @@ import {
   INTERNAL_USER_ID_HEADER,
   boardFetch,
 } from "./internal-headers";
+import { boardDestination, boardSource, run as runCardTransfer } from "./card-transfer";
 import {
   CARD_TRANSFER_OPTIONS_PATH,
-  CARD_TRANSFER_PREPARE_PATH,
-  CARD_TRANSFER_IMPORT_PATH,
-  CARD_TRANSFER_FINALIZE_PATH,
-  CARD_TRANSFER_RELEASE_PATH,
-  CARD_TRANSFER_RECEIPT_PATH,
-  CARD_TRANSFER_ABORT_PATH,
   WriteBackCardSchema,
   cardWriteBackPath,
-  type PreparedCardTransferBundle,
-  type CardTransferReceipt,
   type WriteBackCard,
 } from "./board-do";
 import {
@@ -1443,8 +1434,7 @@ const app = new Hono<AppEnv>()
               bm.role AS explicitRole,
               CASE WHEN b.access_mode='workspace' THEN wm.role ELSE NULL END AS workspaceRole
          FROM boards b
-         LEFT JOIN users u ON EXISTS(SELECT 1 FROM board_members x WHERE x.board_id=b.id AND x.user_id=u.id)
-              OR (b.access_mode='workspace' AND EXISTS(SELECT 1 FROM workspace_members x WHERE x.workspace_id=b.workspace_id AND x.user_id=u.id))
+         LEFT JOIN users u ON ${boardMemberSql("b", "u.id")}
          LEFT JOIN board_members bm ON bm.board_id=b.id AND bm.user_id=u.id
          LEFT JOIN workspace_members wm ON wm.workspace_id=b.workspace_id AND wm.user_id=u.id
         WHERE b.id=? AND ${boardOpenSql("b", "?", "?=1")}
@@ -1598,440 +1588,29 @@ const app = new Hono<AppEnv>()
       // destination is workspace-access. Explicit-only would drop an assignee the
       // destination board really does admit.
       const { results: destMembers } = await c.env.DB.prepare(
-        `SELECT board_members.user_id AS userId FROM board_members WHERE board_members.board_id = ?
-          UNION
-         SELECT wm.user_id AS userId FROM workspace_members wm
-           JOIN boards b ON b.id = ? AND b.access_mode='workspace' AND b.workspace_id = wm.workspace_id`,
+        `SELECT u.id AS userId FROM boards b JOIN users u ON ${boardMemberSql("b", "u.id")} WHERE b.id = ?`,
       )
-        .bind(destinationBoardId, destinationBoardId)
+        .bind(destinationBoardId)
         .all<{ userId: string }>();
       const destMemberSet = new Set(destMembers.map((m) => m.userId));
 
-
-      const destStub = c.env.BOARD_DO.get(c.env.BOARD_DO.idFromName(destinationBoardId));
-      const existingReceiptRes = await destStub.fetch(
-        `https://board.internal${CARD_TRANSFER_RECEIPT_PATH}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            [INTERNAL_BOARD_ID_HEADER]: destinationBoardId,
-          },
-          body: JSON.stringify({
-            transferId,
-            sourceBoardId: sourceBoard.id,
-            cardId: sourceCardId,
-          }),
-        },
+      const ids = { transferId, sourceBoardId: sourceBoard.id, cardId: sourceCardId, destinationBoardId };
+      const outcome = await runCardTransfer(
+        ids,
+        boardSource(c.env, ids, user.id),
+        boardDestination(c.env, ids, user.id),
+        destinationColumnId,
+        destMemberSet,
       );
-      if (existingReceiptRes.status === 409) {
-        return c.json(
-          {
-            error: "transfer id already used for another transfer",
-            code: TRANSFER_TERMINAL_CODE,
-          } as const,
-          409,
-        );
+      if (outcome.kind === "refused") {
+        const { status, error, code } = outcome;
+        return c.json({ error, ...(code ? { code } : {}) }, status, status === 503 ? { "Retry-After": "2" } : {});
       }
-      // The destination fenced this operation id as aborted: it can never commit,
-      // so the client must rotate rather than retry with the same id.
-      if (existingReceiptRes.status === 410) {
-        return c.json(
-          { error: "transfer operation was aborted", code: TRANSFER_TERMINAL_CODE } as const,
-          410,
-        );
-      }
-      if (existingReceiptRes.ok) {
-        const { receipt } = (await existingReceiptRes.json()) as { receipt: CardTransferReceipt };
-        if (
-          receipt.transferId !== transferId ||
-          receipt.sourceBoardId !== sourceBoard.id ||
-          receipt.cardId !== sourceCardId
-        ) {
-          return c.json(
-            { error: "transfer operation identity mismatch", code: TRANSFER_TERMINAL_CODE } as const,
-            409,
-          );
-        }
-        const sourceStub = c.env.BOARD_DO.get(c.env.BOARD_DO.idFromName(sourceBoard.id));
-        const finalizeRes = await sourceStub.fetch(`https://board.internal${CARD_TRANSFER_FINALIZE_PATH}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            [INTERNAL_BOARD_ID_HEADER]: sourceBoard.id,
-          },
-          body: JSON.stringify({ transferId, cardId: sourceCardId, destinationBoardId }),
-        });
-        if (!finalizeRes.ok) {
-          return c.json({ error: "transfer needs retry" } as const, 500);
-        }
-        return c.json({
-          boardId: destinationBoard.id,
-          boardKey: destinationBoard.key,
-          cardId: receipt.cardId,
-          taskNumber: receipt.taskNumber,
-        });
-      }
-      const sourceStub = c.env.BOARD_DO.get(c.env.BOARD_DO.idFromName(sourceBoard.id));
-      const prepareRes = await sourceStub.fetch(`https://board.internal${CARD_TRANSFER_PREPARE_PATH}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [INTERNAL_BOARD_ID_HEADER]: sourceBoard.id,
-          [INTERNAL_USER_ID_HEADER]: user.id,
-        },
-        body: JSON.stringify({ transferId, cardId: sourceCardId, destinationBoardId }),
-      });
-
-      if (!prepareRes.ok) {
-        const errData = (await prepareRes.json().catch(() => null)) as
-          | { error?: string; code?: string }
-          | null;
-        const status = prepareRes.status;
-        if (status === 404) return c.json({ error: "not found" } as const, 404);
-        if (status === 403) return c.json({ error: "forbidden" } as const, 403);
-        if (status === 503 && errData?.code === "access_change_pending") {
-          return c.json(
-            { code: "access_change_pending", error: "Board access is changing. Please retry." } as const,
-            503,
-            { "Retry-After": "2" },
-          );
-        }
-        if (status === 409) {
-          if (errData?.code === TRANSFER_TERMINAL_CODE) {
-            return c.json(
-              {
-                error: errData.error ?? "transfer operation is no longer usable",
-                code: TRANSFER_TERMINAL_CODE,
-              } as const,
-              409,
-            );
-          }
-          if (errData?.error === "remove card links before transferring") {
-            return c.json({ error: "remove card links before transferring" } as const, 409);
-          }
-          return c.json({ error: "card transfer already in progress" } as const, 409);
-        }
-        return c.json({ error: "could not prepare card transfer" } as const, 500);
-      }
-
-      const { bundle } = (await prepareRes.json()) as { bundle: PreparedCardTransferBundle };
-
-      const attachmentIds = bundle.attachments.map((a) => a.id);
-      if (attachmentIds.length > 0) {
-        bundle.card.description = rewriteAttachmentUrls(
-          bundle.card.description,
-          sourceBoard.id,
-          destinationBoardId,
-          attachmentIds,
-        );
-        for (const comment of bundle.comments) {
-          comment.body = rewriteAttachmentUrls(
-            comment.body,
-            sourceBoard.id,
-            destinationBoardId,
-            attachmentIds,
-          );
-        }
-      }
-
-      const validAssigneeId =
-        bundle.card.assigneeId !== null && destMemberSet.has(bundle.card.assigneeId)
-          ? bundle.card.assigneeId
-          : null;
-
-      const copiedDestKeys: string[] = [];
-      let copyFailed = false;
-
-      for (const att of bundle.attachments) {
-        const destKey = attachmentTransferObjectKey(destinationBoardId, transferId, att.id);
-        const stageRes = await destStub.fetch(`https://board.internal${STAGE_ATTACHMENT_PATH}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            [INTERNAL_BOARD_ID_HEADER]: destinationBoardId,
-            [INTERNAL_USER_ID_HEADER]: user.id,
-          },
-          body: JSON.stringify({
-            id: att.id,
-            contentType: att.contentType,
-            size: att.size,
-            objectKey: destKey,
-          }),
-        });
-        if (!stageRes.ok) {
-          copyFailed = true;
-          break;
-        }
-      }
-      if (!copyFailed) {
-        for (const att of bundle.attachments) {
-          const sourceKey = att.objectKey;
-          const destKey = attachmentTransferObjectKey(destinationBoardId, transferId, att.id);
-          try {
-            const sourceObj = await c.env.ATTACHMENTS.get(sourceKey);
-            if (sourceObj === null) {
-              copyFailed = true;
-              break;
-            }
-            const httpMetadata = sourceObj.httpMetadata;
-            await c.env.ATTACHMENTS.put(destKey, sourceObj.body, {
-              httpMetadata: httpMetadata
-                ? {
-                    contentType: httpMetadata.contentType,
-                    contentLanguage: httpMetadata.contentLanguage,
-                    contentDisposition: httpMetadata.contentDisposition,
-                    contentEncoding: httpMetadata.contentEncoding,
-                    cacheControl: httpMetadata.cacheControl,
-                    cacheExpiry: httpMetadata.cacheExpiry,
-                  }
-                : undefined,
-              customMetadata: sourceObj.customMetadata,
-            });
-            copiedDestKeys.push(destKey);
-          } catch {
-            copyFailed = true;
-            break;
-          }
-        }
-      }
-
-      if (copyFailed) {
-        let abortCommittedReceipt: CardTransferReceipt | null = null;
-        let compensationFailed = false;
-        try {
-          const abortRes = await destStub.fetch(`https://board.internal${CARD_TRANSFER_ABORT_PATH}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_BOARD_ID_HEADER]: destinationBoardId,
-            },
-            body: JSON.stringify({
-              transferId,
-              sourceBoardId: sourceBoard.id,
-              cardId: sourceCardId,
-            }),
-          });
-          if (!abortRes.ok) {
-            compensationFailed = true;
-          } else {
-            const abortData = (await abortRes.json()) as {
-              committed?: boolean;
-              aborted?: boolean;
-              receipt?: CardTransferReceipt;
-            };
-            if (
-              !abortData.receipt ||
-              abortData.receipt.transferId !== transferId ||
-              abortData.receipt.sourceBoardId !== sourceBoard.id ||
-              abortData.receipt.cardId !== sourceCardId
-            ) {
-              compensationFailed = true;
-            } else if (abortData.committed) {
-              abortCommittedReceipt = abortData.receipt;
-            }
-          }
-        } catch {
-          compensationFailed = true;
-        }
-
-        if (abortCommittedReceipt) {
-          const finalizeRes = await sourceStub.fetch(`https://board.internal${CARD_TRANSFER_FINALIZE_PATH}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_BOARD_ID_HEADER]: sourceBoard.id,
-            },
-            body: JSON.stringify({ transferId, cardId: sourceCardId, destinationBoardId }),
-          });
-          if (!finalizeRes.ok) {
-            return c.json({ error: "transfer needs retry" } as const, 500);
-          }
-          return c.json({
-            boardId: destinationBoard.id,
-            boardKey: destinationBoard.key,
-            cardId: abortCommittedReceipt.cardId,
-            taskNumber: abortCommittedReceipt.taskNumber,
-          });
-        }
-
-        if (compensationFailed) {
-          return c.json(
-            { error: "transfer compensation failed; retry required" } as const,
-            500,
-          );
-        }
-
-        const releaseRes = await sourceStub.fetch(
-          `https://board.internal${CARD_TRANSFER_RELEASE_PATH}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_BOARD_ID_HEADER]: sourceBoard.id,
-            },
-            body: JSON.stringify({ transferId, cardId: sourceCardId, destinationBoardId }),
-          },
-        );
-        if (!releaseRes.ok) {
-          return c.json(
-            { error: "transfer compensation failed; retry required" } as const,
-            500,
-          );
-        }
-        return c.json({ error: "could not transfer attachments" } as const, 500);
-      }
-
-      const importRes = await destStub.fetch(`https://board.internal${CARD_TRANSFER_IMPORT_PATH}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [INTERNAL_BOARD_ID_HEADER]: destinationBoardId,
-          [INTERNAL_USER_ID_HEADER]: user.id,
-        },
-        body: JSON.stringify({
-          transferId,
-          sourceBoardId: sourceBoard.id,
-          destinationColumnId,
-          assigneeId: validAssigneeId,
-          bundle,
-        }),
-      });
-
-      if (!importRes.ok) {
-        const importErrData = (await importRes.json().catch(() => null)) as
-          | { error?: string; code?: string }
-          | null;
-        let abortCommittedReceipt: CardTransferReceipt | null = null;
-        let compensationFailed = false;
-        try {
-          const abortRes = await destStub.fetch(`https://board.internal${CARD_TRANSFER_ABORT_PATH}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_BOARD_ID_HEADER]: destinationBoardId,
-            },
-            body: JSON.stringify({
-              transferId,
-              sourceBoardId: sourceBoard.id,
-              cardId: sourceCardId,
-            }),
-          });
-          if (!abortRes.ok) {
-            compensationFailed = true;
-          } else {
-            const abortData = (await abortRes.json()) as {
-              committed?: boolean;
-              aborted?: boolean;
-              receipt?: CardTransferReceipt;
-            };
-            if (
-              !abortData.receipt ||
-              abortData.receipt.transferId !== transferId ||
-              abortData.receipt.sourceBoardId !== sourceBoard.id ||
-              abortData.receipt.cardId !== sourceCardId
-            ) {
-              compensationFailed = true;
-            } else if (abortData.committed) {
-              abortCommittedReceipt = abortData.receipt;
-            }
-          }
-        } catch {
-          compensationFailed = true;
-        }
-
-        if (abortCommittedReceipt) {
-          const finalizeRes = await sourceStub.fetch(`https://board.internal${CARD_TRANSFER_FINALIZE_PATH}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_BOARD_ID_HEADER]: sourceBoard.id,
-            },
-            body: JSON.stringify({ transferId, cardId: sourceCardId, destinationBoardId }),
-          });
-          if (!finalizeRes.ok) {
-            return c.json({ error: "transfer needs retry" } as const, 500);
-          }
-          return c.json({
-            boardId: destinationBoard.id,
-            boardKey: destinationBoard.key,
-            cardId: abortCommittedReceipt.cardId,
-            taskNumber: abortCommittedReceipt.taskNumber,
-          });
-        }
-
-        if (compensationFailed) {
-          return c.json(
-            { error: "transfer compensation failed; retry required" } as const,
-            500,
-          );
-        }
-
-        const releaseRes = await sourceStub.fetch(
-          `https://board.internal${CARD_TRANSFER_RELEASE_PATH}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_BOARD_ID_HEADER]: sourceBoard.id,
-            },
-            body: JSON.stringify({ transferId, cardId: sourceCardId, destinationBoardId }),
-          },
-        );
-        if (!releaseRes.ok) {
-          return c.json(
-            { error: "transfer compensation failed; retry required" } as const,
-            500,
-          );
-        }
-        if (importRes.status === 403) return c.json({ error: "forbidden" } as const, 403);
-        if (importRes.status === 503 && importErrData?.code === "access_change_pending") {
-          return c.json(
-            { code: "access_change_pending", error: "Board access is changing. Please retry." } as const,
-            503,
-            { "Retry-After": "2" },
-          );
-        }
-        if (importRes.status === 400) {
-          return c.json({ error: importErrData?.error ?? "destination column not found" } as const, 400);
-        }
-        if (importRes.status === 409) {
-          if (importErrData?.code === TRANSFER_TERMINAL_CODE) {
-            return c.json(
-              {
-                error: importErrData.error ?? "transfer operation is no longer usable",
-                code: TRANSFER_TERMINAL_CODE,
-              } as const,
-              409,
-            );
-          }
-          return c.json({ error: importErrData?.error ?? "card transfer conflict" } as const, 409);
-        }
-        return c.json({ error: "could not import card" } as const, 500);
-      }
-
-      const { receipt } = (await importRes.json()) as {
-        receipt: CardTransferReceipt;
-      };
-
-      const finalizeRes = await sourceStub.fetch(`https://board.internal${CARD_TRANSFER_FINALIZE_PATH}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [INTERNAL_BOARD_ID_HEADER]: sourceBoard.id,
-        },
-        body: JSON.stringify({ transferId, cardId: sourceCardId, destinationBoardId }),
-      });
-
-      if (!finalizeRes.ok) {
-        return c.json({ error: "transfer needs retry" } as const, 500);
-      }
-
       return c.json({
         boardId: destinationBoard.id,
         boardKey: destinationBoard.key,
-        cardId: receipt.cardId,
-        taskNumber: receipt.taskNumber,
+        cardId: outcome.receipt.cardId,
+        taskNumber: outcome.receipt.taskNumber,
       });
     },
   )
