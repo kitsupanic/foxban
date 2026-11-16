@@ -4,7 +4,7 @@
 Accepted — 2026-11-16. Supersedes ADR 0051 (inherited subtask placement). Supersedes the activation, per-child review and before-change export parts of ADR 0057. ADR 0059's "legacy unconfigured boards retain inherited behavior" no longer applies.
 
 ## Context
-ADR 0057 kept two modes: legacy boards, where a subtask inherits its parent's column and completion is a stored boolean, and configured boards, where each subtask has its own column. A board switched over only when an owner/admin reviewed every subtask, downloaded a JSON backup and ticked a box. That ceremony was built for converting one busy board by hand, and it was never run. Meanwhile every board, even an empty one, showed the full migration panel, and both modes were kept alive across the BoardDO, the reducer and the board view.
+ADR 0057 kept two modes: legacy boards, where a subtask inherits its parent's column and completion is a stored boolean, and configured boards, where each subtask has its own column. A board switched over only when an owner/admin reviewed every subtask, downloaded a JSON backup and ticked a box. That ceremony was built for converting one busy board by hand. Meanwhile every board, even an empty one, showed the full migration panel, and both modes were kept alive across the BoardDO, the reducer and the board view.
 
 The reference model is Jira: each subtask has its own status, a parent can be done while subtasks stay open, and new subtasks start in the workflow's first status.
 

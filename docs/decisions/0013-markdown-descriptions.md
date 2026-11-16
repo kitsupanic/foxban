@@ -6,7 +6,7 @@ Accepted — 2026-09-01
 UI wording clarified 2026-10-20: Preview names the existing uncommitted-view action; Save title & description names its unchanged persistence boundary.
 
 ## Context
-M8 wanted Trello-style rich text in the card description, which was a bare
+foxban wanted Trello-style rich text in the card description, which was a bare
 textarea. The choice: a WYSIWYG editor storing HTML (Tiptap) versus storing
 Markdown and rendering it on read.
 

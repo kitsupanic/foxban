@@ -6,7 +6,6 @@
 
 Free, real-time Kanban for Cloudflare.
 
-[![CI](https://github.com/kitsupanic/foxban/actions/workflows/ci.yml/badge.svg)](https://github.com/kitsupanic/foxban/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 foxban is a Kanban board that you run on your own Cloudflare account. When a teammate moves a card, you see it move right away. The free Cloudflare plan is enough for a small team.
@@ -28,13 +27,12 @@ foxban is a Kanban board that you run on your own Cloudflare account. When a tea
 
 ## Pick how to deploy
 
-There are three ways to deploy. Pick one.
+There are two ways to deploy. Pick one.
 
 | Way | Good for |
 |---|---|
 | [1. The Deploy button](#1-the-deploy-button) | The fastest start. You click and type your email. |
 | [2. From your computer](#2-from-your-computer) | You want to run one command when you want to update. |
-| [3. From GitHub Actions](#3-from-github-actions) | You want each push to your fork to update your foxban. |
 
 ### 1. The Deploy button
 
@@ -90,23 +88,6 @@ git pull && pnpm install && pnpm run deploy
 
 Your `.env.deploy` file stays on your computer. Git does not send it anywhere.
 
-### 3. From GitHub Actions
-
-1. Fork this repo on GitHub.
-2. In Cloudflare, make an API token. Use the **Edit Cloudflare Workers** template, and add **D1 Edit** to it.
-3. In your fork, go to **Settings → Environments**. Make an environment called `production`.
-4. In that environment, add this **secret**:
-   - `CLOUDFLARE_API_TOKEN`: the token from step 2.
-5. In that environment, add these **variables**:
-   - `CLOUDFLARE_ACCOUNT_ID`: your Cloudflare account ID. You can find it on your Cloudflare dashboard.
-   - `ADMIN_EMAILS`: your email.
-   - `APP_URL`: the link to your foxban, like `https://foxban.your-name.workers.dev`. This one is optional. After each deploy, GitHub checks that this link works.
-6. Go to **Actions → Deploy → Run workflow**. Type `production` and run it.
-
-Do you want each push to `main` to deploy? Add a repo variable called `DEPLOY_ON_PUSH` with the value `production`. If you do not add it, foxban only deploys when you run the workflow yourself.
-
-You can have more than one foxban, like a test one and a real one. Make one environment for each, with its own variables.
-
 ## Your first login
 
 1. Open your foxban.
@@ -121,7 +102,7 @@ Does foxban say that it has no admin yet? Then `ADMIN_EMAILS` is not set. Set it
 
 ## Settings
 
-You set these in `.env.deploy` or in GitHub variables. Only `ADMIN_EMAILS` is needed.
+You set these in `.env.deploy`. Only `ADMIN_EMAILS` is needed.
 
 | Name | What it does | If you leave it out |
 |---|---|---|
@@ -162,7 +143,6 @@ Each update can change the database. You do not need to do anything for that. Ev
   git pull https://github.com/kitsupanic/foxban.git main && git push
   ```
 - **From your computer:** run `git pull && pnpm install && pnpm run deploy`.
-- **GitHub Actions:** sync your fork. Then run the workflow, or let a push to `main` run it.
 
 ## How it is built
 

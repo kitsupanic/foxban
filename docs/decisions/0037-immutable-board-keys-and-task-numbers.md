@@ -9,7 +9,7 @@ Tasks in Foxban needed stable, human-friendly Jira-style identifiers (`<BOARD_KE
 ## Decision
 1. **Globally Unique Editable Board Keys**:
    - Each board receives a globally unique uppercase key (`/^[A-Z][A-Z0-9]{1,9}$/`).
-   - Existing boards were migrated deterministically with `FB1`, `FB2`, ... ordered by `created_at, id`.
+   - Existing boards were migrated deterministically with `KEY1`, `KEY2`, ... ordered by `created_at, id`.
    - The key is specified at board creation, validated and uppercased by the API, stored in D1 `boards.board_key`, backed by a unique index, and returned with all board queries.
    - Board owners and configured account administrators can edit a board's display name and key via `PATCH /boards/:id`. The change is an atomic D1 metadata update (`UPDATE boards SET name = ?, board_key = ? WHERE id = ?`).
    - Ordinary board members cannot edit board metadata (403 `forbidden`).

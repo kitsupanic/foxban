@@ -46,7 +46,7 @@ Prior to this decision, the only GitHub integration in Foxban was user-level pro
   8. If no existing installation matches the requested repository, recreate the pending state and redirect into GitHub App installation (`/apps/<slug>/installations/new?state=...`), which continues through `/auth/github-app/setup` once the new installation is created.
   9. If a verified candidate matches, verify repository owner and name case-insensitively, and atomically bind the installation ID and canonical repository metadata to the board in D1.
 ### 4. Immutable Task-Key Branches and Pull Requests
-- **Branch Naming**: Derived strictly as `<lowercase-board-key>-<task-number>` (e.g. `KR-42` becomes `kr-42`), independent of mutable card titles.
+- **Branch Naming**: Derived strictly as `<lowercase-board-key>-<task-number>` (e.g. `EX-42` becomes `ex-42`), independent of mutable card titles.
 - **Current authority before writes**: After preparatory GitHub reads, branch and pull request creation recheck current board access, pending access changes, access version, repository binding and active card identity before writing. A completed revocation, disconnect or identity change refuses the request. This narrows the external-write race; D1 and GitHub do not share a transaction.
 - **Pull Requests**:
   - Targets the repository's live `default_branch`.

@@ -7,7 +7,7 @@ Accepted — 2026-11-10
 foxban is being prepared for open source as a free Kanban anyone can run on
 their own Cloudflare account. `wrangler.jsonc` held one instance's values:
 admin email, custom domains, D1 ids, GitHub App ids. Those can't ship in a
-public repo, and the owner's own instance must keep deploying.
+public repo.
 
 ## Decision
 - The committed `wrangler.jsonc` holds only safe defaults that deploy to
@@ -24,7 +24,6 @@ public repo, and the owner's own instance must keep deploying.
   instance values never become public.
 
 ## Consequences
-The owner's instance deploys from the public code like any other. Rejected:
+Every instance deploys from the public code. Rejected:
 a private fork holding the real config (drifts from upstream), rewriting
-history to scrub values (slow, easy to miss one), publishing history as is
-(leaks the original instance's ids and email).
+history to scrub values (slow, easy to miss one), publishing history as is.

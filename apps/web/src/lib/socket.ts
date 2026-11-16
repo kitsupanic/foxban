@@ -503,7 +503,7 @@ export function useBoardSocket(
     (msg) => {
       const ws = socketRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
-        // Disconnected mutations fail fast; nothing is queued (design.md).
+        // Disconnected mutations fail fast; nothing is queued.
         console.warn("board socket: not connected, dropping", msg.type);
         return false;
       }

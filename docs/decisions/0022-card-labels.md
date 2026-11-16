@@ -4,7 +4,7 @@
 Accepted — 2026-09-02
 
 ## Context
-M21 adds Trello-style labels: a small named, coloured tag reused across a board's cards. A label is the first board-level entity with a cardinality no card column can hold — one label belongs to many cards, and renaming or recolouring it must move every card that carries it at once.
+This ADR adds Trello-style labels: a small named, coloured tag reused across a board's cards. A label is the first board-level entity with a cardinality no card column can hold — one label belongs to many cards, and renaming or recolouring it must move every card that carries it at once.
 
 ## Decision
 - Two tables rather than one, the codebase's first: `labels` holds the board-scoped definitions `{ id, name, color }`, and `card_labels` holds the assignments `{ id, cardId, labelId }`. A join row carries its own id, so unassigning stays `DELETE ... WHERE id = ?` like every other child entity and never needs a composite key.
@@ -16,4 +16,4 @@ M21 adds Trello-style labels: a small named, coloured tag reused across a board'
 - Removing that pill or toggling the selected picker entry unassigns every matching join id already present in the client snapshot, so one action clears concurrent duplicate assignments.
 
 ## Consequences
-Board-level filtering by label is deliberately not part of this milestone: the entity and its UI land first, and the board view keeps rendering every card. Because definitions outlive assignments, unassigning the last card from a label leaves it in the picker rather than deleting it — removing a label from the board is the explicit, confirmed Delete in its edit pane.
+Board-level filtering by label is deliberately not part of this change: the entity and its UI land first, and the board view keeps rendering every card. Because definitions outlive assignments, unassigning the last card from a label leaves it in the picker rather than deleting it — removing a label from the board is the explicit, confirmed Delete in its edit pane.

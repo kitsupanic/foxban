@@ -4,7 +4,7 @@
 Superseded by 0024 — 2026-09-02
 
 ## Context
-M23 wants real faces instead of initials circles. The only identity foxban stores is the email/password row from ADR 0011, gated by the invites of ADR 0012, and ADR 0008 already rejected third-party identity providers. So the question is narrow: where does an avatar image come from, given that the user table is the whole of the profile.
+foxban wants real faces instead of initials circles. The only identity foxban stores is the email/password row from ADR 0011, gated by the invites of ADR 0012, and ADR 0008 already rejected third-party identity providers. So the question is narrow: where does an avatar image come from, given that the user table is the whole of the profile.
 
 ## Decision
 - One nullable column, `users.github_login` (migration 0003), unverified: it is a key for an image URL, not a credential, and nothing else in the product reads it. A user claims one, or has none.

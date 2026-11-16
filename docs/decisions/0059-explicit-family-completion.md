@@ -1,7 +1,7 @@
 # 0059 — Explicit family completion choices
 
 Date: 2026-10-02
-Status: Accepted. Dev deployment explicitly authorized on 2026-10-02; live KRD activation remains a separate reviewed operation.
+Status: Accepted.
 
 ## Context
 
@@ -19,4 +19,4 @@ The nested dialog traps focus, makes underlying UI inert, handles Escape without
 
 ## Consequences
 
-Bulk completion is a deliberate exceptional family operation, not new status inheritance. It costs one confirmation when open work remains and rejects stale family changes rather than guessing. No schema migration is required. Legacy unconfigured boards retain inherited behavior. Protocol fencing prevents old clients from consuming an unknown mutation. Local implementation and fixtures do not authorize live activation or deployment.
+Bulk completion is a deliberate exceptional family operation, not new status inheritance. It costs one confirmation when open work remains and rejects stale family changes rather than guessing. No schema migration is required. Legacy unconfigured boards retain inherited behavior. Protocol fencing prevents old clients from consuming an unknown mutation.

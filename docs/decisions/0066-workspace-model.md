@@ -1,7 +1,7 @@
 # 0066 — Workspace model
 
 ## Status
-Accepted — 2026-11-14. Built on branch `feat/workspace-model`, 2026-11-15. Changes the model shipped in "add shared workspaces" (migration `0012_workspaces.sql`), which had no ADR.
+Accepted — 2026-11-14. Changes the model shipped in "add shared workspaces" (migration `0012_workspaces.sql`), which had no ADR.
 
 ## Context
 Workspaces shipped without the idea being written down, and felt wrong in use. The word meant three things (the space that owns boards, the app shell, a board page). Every user had a hidden personal workspace with the id `personal_<userId>`. `/` redirected to the last workspace kept in `localStorage`. Guests and Operators appeared in the workspace switcher next to members. A workspace had one owner who could never change. Terms are in `GLOSSARY.md`.

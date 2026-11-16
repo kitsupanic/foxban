@@ -5,8 +5,8 @@ Date: 2026-09-08
 ## Context
 
 Two architectural evolutions were required to improve user experience and identity:
-1. **User-Uploaded Profile Avatars (FB-14)**: Previously, user avatars were derived exclusively from verified GitHub OAuth accounts or local initials. Users without GitHub accounts or desiring custom profile pictures had no mechanism to upload avatars.
-2. **Human-Readable Board URLs (FB-13)**: Previously, public board navigation routes used internal UUIDs (`/board/$boardId`), while cards within boards already used human-readable task keys (`?card=<BOARD_KEY>-<TASK_NUMBER>`). This created inconsistent URLs and exposed raw storage UUIDs in browser history.
+1. **User-Uploaded Profile Avatars**: Previously, user avatars were derived exclusively from verified GitHub OAuth accounts or local initials. Users without GitHub accounts or desiring custom profile pictures had no mechanism to upload avatars.
+2. **Human-Readable Board URLs**: Previously, public board navigation routes used internal UUIDs (`/board/$boardId`), while cards within boards already used human-readable task keys (`?card=<BOARD_KEY>-<TASK_NUMBER>`). This created inconsistent URLs and exposed raw storage UUIDs in browser history.
 
 ## Decisions
 
@@ -31,4 +31,4 @@ Two architectural evolutions were required to improve user experience and identi
 ## Consequences
 
 - Users can upload PNG, JPEG, GIF, or WebP profile pictures up to 10 MB, resized client-side to WebP 512px at quality 0.8.
-- Board URLs match Jira-style readable patterns (`/board/FOX?card=FOX-1`), eliminating UUID leak in URLs while preserving strong internal UUID referential integrity.
+- Board URLs match Jira-style readable patterns (`/board/EX?card=EX-1`), eliminating UUID leak in URLs while preserving strong internal UUID referential integrity.

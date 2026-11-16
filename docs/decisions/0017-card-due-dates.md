@@ -4,7 +4,7 @@
 Accepted — 2026-09-01
 
 ## Context
-M12 wanted deadlines on cards. The user chose a date only (no time of day) and,
+foxban wanted deadlines on cards. We chose a date only (no time of day) and,
 unlike priority, an optional and clearable field — the Assignee shape rather
 than the Jira always-set one. The card front is to colour the deadline red once
 it has passed and amber on the day itself.
@@ -36,8 +36,8 @@ that is the chosen behaviour, since "overdue" is a statement about the viewer's
 day. Existing boards gain the nullable column when their DO runs the v6 batch on
 first access after deploy. During a rolling deploy an old-bundle tab receiving a
 `card.schedule` broadcast fails its `ServerMessageSchema` parse and
-reconnect-loops until refreshed (the M9–M11 window); the new snapshot key is
+reconnect-loops until refreshed; the new snapshot key is
 stripped harmlessly by the old non-strict `CardSchema`. Ordering stays manual
 fractional-index — no sorting, filtering or notifications by due date. Rejected:
-an epoch-ms datetime (the user chose date-only, and milliseconds invite
+an epoch-ms datetime (we chose date-only, and milliseconds invite
 cross-timezone day-shift bugs), and the due date as a `card.update` field.

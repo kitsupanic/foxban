@@ -4,7 +4,7 @@
 Accepted — 2026-08-30
 
 ## Context
-`typescript@latest` is 7.x, the native Go port. It ships no `lib/tsserver.js`, so `typescript-language-server` hard-fails on initialize ("provides no tsserver.js"), breaking editor/agent LSP auto-detection — an M1 acceptance criterion. TS 7's built-in `--lsp` mode exists but isn't wired into our tooling.
+`typescript@latest` is 7.x, the native Go port. It ships no `lib/tsserver.js`, so `typescript-language-server` hard-fails on initialize ("provides no tsserver.js"), breaking editor/agent LSP auto-detection. TS 7's built-in `--lsp` mode exists but isn't wired into our tooling.
 
 ## Decision
 Root devDep `typescript` pinned to `^6` (resolves 6.0.3), keeping `typescript-language-server` functional. All packages typecheck identically under 6 and 7.

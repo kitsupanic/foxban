@@ -6,7 +6,7 @@ Accepted — 2026-09-01
 Amended by ADR 0047 for topmost cross-portal update-prompt modality and Escape ownership.
 
 ## Context
-The card modal claimed `aria-modal="true"` without earning it: Tab reached the board behind it, closing dropped focus on `<body>`, and Escape in the description editor threw the whole draft away — as did a relation row, which remounts the modal on another card. Two design reviews put both defects at the top.
+The card modal claimed `aria-modal="true"` without earning it: Tab reached the board behind it, closing dropped focus on `<body>`, and Escape in the description editor threw the whole draft away — as did a relation row, which remounts the modal on another card.
 
 ## Decision
 - Modality comes from `inert` on the board content while a card is open, plus a focus restore to `[data-card-id]` on close. The custom overlay stays: it carries the press-origin backdrop guard and the three-layer Escape model where descendants `stopPropagation` before the modal's window listener.

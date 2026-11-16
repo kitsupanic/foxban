@@ -4,7 +4,7 @@
 Accepted — 2026-09-01
 
 ## Context
-M13 adds Jira-style links between cards without crossing the one-BoardDO snapshot boundary. A relation must describe either a symmetric association or which card blocks the other without storing two rows that can drift apart.
+This ADR adds Jira-style links between cards without crossing the one-BoardDO snapshot boundary. A relation must describe either a symmetric association or which card blocks the other without storing two rows that can drift apart.
 
 ## Decision
 - One link is `{ id, sourceCardId, targetCardId, kind }`, where `kind` is `relates` or `blocks`; `relates` is symmetric, while “blocked by” is always the reverse read of one `blocks` row and is never stored as a kind.

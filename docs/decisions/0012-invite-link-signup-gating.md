@@ -4,7 +4,7 @@
 Accepted — 2026-08-31
 
 ## Context
-ADR 0011 made gating signup a blocker for the public URL. The user chose
+ADR 0011 made gating signup a blocker for the public URL. We chose
 single-use invite links generated from an admin panel over a shared invite
 code, an email allowlist, or Cloudflare Access.
 
