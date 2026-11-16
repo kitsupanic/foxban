@@ -92,9 +92,7 @@ local application stack. Full validation is root `pnpm test` **plus** the manual
 
 ## Deploy
 
-`.github/workflows/deploy.yml` deploys one GitHub Environment per run (ADR 0063). A push to `main` deploys the environment named by the `DEPLOY_ON_PUSH` repo variable and does nothing when it is unset; a manual run takes the environment name as input. Each run executes `pnpm typecheck`, `pnpm test` and `pnpm test:scripts`, then `pnpm run deploy` (`scripts/deploy.mjs`) with that environment's variables and secrets, and finishes with root HTTP 200 and unauthenticated `/me` HTTP 401 health checks against `vars.APP_URL`.
-
-E2E tests are not part of the automatic deploy gate and there is no git pre-push hook; run Playwright E2E manually with `pnpm --filter @foxban/web test:e2e`.
+There is no CI or deploy workflow for now (ADR 0070). Before you open a pull request, run `pnpm typecheck` and `pnpm test` yourself, and `pnpm --filter @foxban/web test:e2e` for UI changes. Deploy with `pnpm run deploy` (`scripts/deploy.mjs`) or the Deploy to Cloudflare button.
 
 ## Playwright lanes
 

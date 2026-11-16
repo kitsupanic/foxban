@@ -77,3 +77,4 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0067 — One subtask mode](0067-one-subtask-mode.md)
 - [0068 — Remove the subtask trial page](0068-remove-subtask-trial-page.md)
 - [0069 — One settlement module for authored operations](0069-authored-operation-settlement.md)
+- [0070 — No CI or deploy workflow for now](0070-no-ci-for-now.md)
