@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-On 2026-09-09, Cloudflare analytics identified an incident on one production BoardDO: 8,539,722 rows read, 67,168 outbound WebSocket messages, and only 118 writes. Invocation telemetry confirmed an intense reconnect storm rather than mutation load: at 14:00 UTC alone, the authoritative late-aggregated metrics reached 9,052 `responseStreamDisconnected` HTTP invocations and 9,060 hibernation events (surpassing prior preliminary samples of 9,002 and 9,025 before complete aggregation settled) while repeatedly reading ~128 snapshot rows per connection.
+A reconnect storm against one production BoardDO showed up in Cloudflare analytics: millions of rows read and tens of thousands of outbound WebSocket messages against only a handful of writes. Invocation telemetry confirmed reconnects rather than mutation load: thousands of `responseStreamDisconnected` invocations and hibernation events per hour, each reconnect re-reading the full snapshot.
 
 The root cause was two-fold:
 1. Client connection health was defined by transport `onopen` rather than a validated snapshot. Any client that opened a WebSocket, failed to parse a tagged frame (or disconnected immediately after receiving a valid snapshot), and closed the socket immediately reset its retry attempts and reconnected indefinitely.

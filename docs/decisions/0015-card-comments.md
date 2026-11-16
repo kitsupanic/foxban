@@ -4,10 +4,10 @@
 Superseded by 0029 — 2026-09-04
 
 ## Context
-M10 wanted Jira-style comments on cards: a thread in the card modal, live for
+foxban wanted Jira-style comments on cards: a thread in the card modal, live for
 every member, with bodies "the same as the description" — full Markdown parity,
 composing affordances included. Comments are card content, so they follow
-checklist items (M7) and attachments (M9) rather than growing a D1 table.
+checklist items and attachments rather than growing a D1 table.
 
 ## Decision
 - Comments are protocol entities: `comment.create` / `comment.update` /

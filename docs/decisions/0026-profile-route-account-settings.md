@@ -4,7 +4,7 @@
 Accepted — 2026-09-03. Its "GitHub is never authentication" clause is reversed by ADR 0065.
 
 ## Context
-ADR 0024 left the GitHub link/disconnect control in a Boards-page header disclosure and pointed the OAuth callback at `/`. M27 adds real account settings — display name, sign-in email, password — and a disclosure on one page cannot hold four sections, so profile needs a home. Emails also gate admin status (`ADMIN_EMAILS`, ADR 0012's configured-not-stored rule) and there is no email-delivery service to verify ownership with, so the email and password actions need an authorization story of their own.
+ADR 0024 left the GitHub link/disconnect control in a Boards-page header disclosure and pointed the OAuth callback at `/`. This ADR adds real account settings — display name, sign-in email, password — and a disclosure on one page cannot hold four sections, so profile needs a home. Emails also gate admin status (`ADMIN_EMAILS`, ADR 0012's configured-not-stored rule) and there is no email-delivery service to verify ownership with, so the email and password actions need an authorization story of their own.
 
 ## Decision
 - Profile is a dedicated authenticated `/profile` route behind the existing root session check; Boards and Profile are the only two top-level pages, sharing one header of URL-backed links (no ARIA tab widgets), the avatar/email, and sign out. The board workspace keeps its own header.

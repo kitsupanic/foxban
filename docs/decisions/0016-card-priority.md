@@ -4,9 +4,9 @@
 Accepted — 2026-09-01
 
 ## Context
-M11 wanted task priority "like in Jira": five levels — Highest, High, Medium,
+foxban wanted task priority "like in Jira": five levels — Highest, High, Medium,
 Low, Lowest — and, crucially, Jira's always-set field. Every issue has a
-priority, new issues default to Medium, and none can be cleared. The user chose
+priority, new issues default to Medium, and none can be cleared. We chose
 that over a nullable field with a "None" entry, so priority is part of every
 card's state rather than an optional decoration.
 
@@ -37,8 +37,8 @@ icon (ADR 0042) — the chosen Jira behaviour, not noise. Existing boards gain
 `'medium'` on every card when their DO runs the v5 batch on first access after
 deploy.
 rolling deploy an old-bundle tab receiving a `card.prioritize` broadcast fails
-its `ServerMessageSchema` parse and reconnect-loops until refreshed (the M9/M10
-window); the new snapshot key is stripped harmlessly by the old non-strict
+its `ServerMessageSchema` parse and reconnect-loops until refreshed; the
+new snapshot key is stripped harmlessly by the old non-strict
 `CardSchema`. Ordering stays manual fractional-index — no sorting or filtering by
-priority. Rejected: a nullable priority with a "None" option (the user chose
+priority. Rejected: a nullable priority with a "None" option (we chose
 Jira's semantics), and priority as a `card.update` field.

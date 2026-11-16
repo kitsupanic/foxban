@@ -22,7 +22,7 @@ Every MCP mutation requires a UUID operation key. A BoardDO receipt keyed by cre
 
 - Browser clients converge immediately with MCP writes without a second board-data path.
 - Revocation, expiry, user deletion, or membership removal affects the next tool call.
-- Receipt storage grows with successful MCP mutations for the board lifetime; low private-studio traffic makes this preferable to silent duplicate writes after pruning.
+- Receipt storage grows with successful MCP mutations for the board lifetime; low traffic makes this preferable to silent duplicate writes after pruning.
 - A new credential is a new retry namespace. An uncertain operation must not be transplanted blindly.
 - Configured Bearer tokens support compatible clients but are not interoperable MCP OAuth.
 - Movement and assignment remain last-write-wins collaboration signals, not exclusive claims.

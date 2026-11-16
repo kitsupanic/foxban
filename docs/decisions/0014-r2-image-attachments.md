@@ -4,7 +4,7 @@
 Superseded by 0027 — 2026-09-03
 
 ## Context
-M9 wanted Jira-style image attachments: an upload both embedded in the Markdown
+foxban wanted Jira-style image attachments: an upload both embedded in the Markdown
 description and listed on the card. Blobs need object storage; their metadata is
 board content, and board content never lives in D1.
 

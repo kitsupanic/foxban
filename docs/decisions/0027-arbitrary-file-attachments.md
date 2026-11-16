@@ -4,7 +4,7 @@
 Superseded by 0028 — 2026-09-04
 
 ## Context
-ADR 0014 limited attachments to four raster image MIME types so uploaded bytes could be rendered safely on the application origin. M29 needs arbitrary project files without moving card metadata into D1 or exposing active uploaded content.
+ADR 0014 limited attachments to four raster image MIME types so uploaded bytes could be rendered safely on the application origin. foxban needs arbitrary project files without moving card metadata into D1 or exposing active uploaded content.
 
 ## Decision
 - Keep membership-checked private R2 routes, `boardId/uuid` keys, BoardDO-only metadata, client-side raster compression, and deliberately orphaned blobs from ADR 0014.

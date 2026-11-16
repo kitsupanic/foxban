@@ -1,7 +1,7 @@
 # 0058 — Body-sized, family-aware board dragging
 
 Date: 2026-10-02
-Status: Accepted. Dev deployment explicitly authorized on 2026-10-02; live KRD activation remains a separate reviewed operation.
+Status: Accepted.
 
 ## Context
 

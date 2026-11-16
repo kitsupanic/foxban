@@ -4,7 +4,7 @@
 Accepted — 2026-09-01
 
 ## Context
-M14 wants Jira-style subtasks: a checklist item that outgrows its row should become a real card that still reads as belonging to its parent. A separate child-card entity would mean a new table, new messages, and a second parent/child code path beside the M13 links that already store exactly this shape.
+foxban wants Jira-style subtasks: a checklist item that outgrows its row should become a real card that still reads as belonging to its parent. A separate child-card entity would mean a new table, new messages, and a second parent/child code path beside the relation links that already store exactly this shape.
 
 ## Decision
 - A subtask is a `card_relations` row with `kind: "subtask"`, read as “source is the parent of target”. No new entity, table, message, or DO migration — `kind` is passthrough TEXT and both cascades are kind-agnostic, so the schema stays at v7.
