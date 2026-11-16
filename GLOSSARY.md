@@ -78,6 +78,14 @@ _Avoid_: Save, edit, write
 A one-click change, like a move, an assignee, a label or a delete, that shows at once and is not held for retry. If the board refuses it, the change is rolled back. Every one goes out through the board commands module (`apps/web/src/lib/board-commands.ts`), which makes its ids and picks where a card lands.
 _Avoid_: Quick edit, fire-and-forget
 
+**Attachment lifecycle**:
+Everything that happens to a file on a card after it is picked: the upload, the board taking it in, and its removal. When a removal is confirmed, its image or link is taken out of open descriptions too. It all lives in one module (`apps/web/src/lib/attachments.ts`), which the board socket feeds with what it hears.
+_Avoid_: Attachment state, upload flow
+
+**Pending attachment delete**:
+A removal this person sent that the board has not answered yet. Until it is answered, that card's description cannot be saved.
+_Avoid_: Unresolved delete
+
 **Family-finish gate**:
 The check that stops a parent with open subtasks from moving into the completed column on its own. The person is asked to finish the parent alone or the whole family. Every move goes through it, a drag or a status change alike.
 _Avoid_: Completion check

@@ -34,10 +34,8 @@ import {
   Title,
   type ClientMessage,
   descriptionByteLength,
-  attachmentMaxBytes,
   isPreviewableImageContentType,
   normalizeAttachmentContentType,
-  removeAttachmentReferences,
   type Activity,
   type Attachment,
   type Card,
@@ -60,7 +58,7 @@ import {
   type ActivityTimelineItem,
 } from "../lib/activity";
 import type { SendMutation, MutationSettledCallback } from "../lib/socket";
-import { compressImage } from "../lib/compress-image";
+import { useAttachmentView, type BoardAttachments } from "../lib/attachments";
 import { LABEL_COLORS, LABEL_COLOR_META } from "../lib/labels";
 import { type BoardState, type CardLabelView } from "../lib/apply-mutation";
 import { useBoardCommands } from "../lib/board-commands";
@@ -87,7 +85,7 @@ import { SubtaskList } from "./SubtaskList";
 import { buildSubtaskNodes, directSubtaskCounts } from "../lib/subtask-nodes";
 import { TASK_TYPE_META } from "../lib/task-type";
 import { restoreFocusSoon } from "../lib/focus";
-import { useAuthoredOperation, useAuthoredScope, type AuthoredState } from "../lib/authored-operation";
+import { useAuthoredOperation, useAuthoredScope, type AuthoredScope, type AuthoredState } from "../lib/authored-operation";
 import { usePickerMenuStyle } from "../lib/picker-menu";
 import "./card-detail.css";
 /** Which shell the card details render in: the overlay modal or full screen. */
@@ -141,9 +139,8 @@ export function CardModal({
   items,
   attachments,
   comments,
-  confirmedAttachmentDeletes,
-  pendingAttachmentDeletes,
-  seedDescriptionDraft,
+  boardAttachments,
+  uploadScope,
   activities,
   relations,
   hierarchy,
@@ -181,10 +178,10 @@ export function CardModal({
   items: ChecklistItem[];
   /** This card's attachments in display order; the live cache, not a draft. */
   attachments: Attachment[];
-  confirmedAttachmentDeletes: ReadonlyMap<string, string>;
-  pendingAttachmentDeletes: ReadonlyMap<string, string>;
-  /** Mount-only seed; never replaces an already-open draft on live updates. */
-  seedDescriptionDraft: (cardId: string, description: string) => string;
+  /** The board's attachment lifecycle: mount seed, deleted-embed cleanup, delete gate, upload. */
+  boardAttachments: BoardAttachments;
+  /** Board-lived, not this modal's scope: a card closed mid-upload still publishes the finished attachment. */
+  uploadScope: AuthoredScope;
   /** This card's comments, oldest first; the live cache, not a draft. */
   comments: Comment[];
   /** This card's immutable history in server sequence order. */
@@ -248,9 +245,11 @@ export function CardModal({
   const [title, setTitle] = useState(card.title);
   const [editingTitle, setEditingTitle] = useState(false);
   const editTitleButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Mount-only seed; never replaces an already-open draft on live updates.
   const [descriptionDraft, setDescriptionDraft] = useState(() =>
-    seedDescriptionDraft(card.id, card.description),
+    boardAttachments.seedDescription(card.id, card.description),
   );
+  const attachmentView = useAttachmentView(boardAttachments);
   // Only the "Description must be…" refusal; a failed send is the save operation's own error.
   const [saveValidationError, setSaveValidationError] = useState<string | null>(null);
   const [descriptionUploading, setDescriptionUploading] = useState(false);
@@ -458,21 +457,11 @@ export function CardModal({
   const convertError = convertEmptyError ?? convertOpError;
   // Typing dismisses an inline error; a retained recovery stays until retried or discarded.
   const clearSubtaskError = () => { if (subtaskError !== null) subtaskOp.discard(); };
-  const description = useMemo(() => {
-    let next = descriptionDraft;
-    for (const [attachmentId, ownerId] of confirmedAttachmentDeletes) {
-      if (ownerId === card.id) {
-        next = removeAttachmentReferences(next, boardId, attachmentId);
-      }
-    }
-    return next;
-  }, [descriptionDraft, boardId, card.id, confirmedAttachmentDeletes]);
-  const attachmentDeletePending = useMemo(() => {
-    for (const ownerId of pendingAttachmentDeletes.values()) {
-      if (ownerId === card.id) return true;
-    }
-    return false;
-  }, [card.id, pendingAttachmentDeletes]);
+  const description = useMemo(
+    () => attachmentView.descriptionFor(card.id, descriptionDraft),
+    [attachmentView, card.id, descriptionDraft],
+  );
+  const attachmentDeletePending = attachmentView.isDeletePending(card.id);
   // Inline item editor: the id being edited plus its own draft text.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -636,7 +625,6 @@ export function CardModal({
   const subtaskGenerationRef = useRef(0);
   const convertRecoveryRef = useRef(convertRecovery);
   convertRecoveryRef.current = convertRecovery;
-  const activeUnsubsRef = useRef(new Set<() => void>());
   // Below `md` the card is a full-viewport surface over a board page that scrolls
   // the document. Fixing the body removes that overflow for as long as the card is
   // open — `overflow: hidden` alone still lets the page be scrolled
@@ -656,15 +644,6 @@ export function CardModal({
       body.style.width = previous.width;
       body.style.overflow = previous.overflow;
       window.scrollTo(0, offset);
-    };
-  }, []);
-  // Only the upload flow's subscriptions; authored operations are released by `authoredScope`.
-  useEffect(() => {
-    return () => {
-      for (const unsub of activeUnsubsRef.current) {
-        unsub();
-      }
-      activeUnsubsRef.current.clear();
     };
   }, []);
   const replyButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -1136,81 +1115,10 @@ export function CardModal({
       draftDescription: descriptionRef.current,
     });
   };
-  /**
-   * The one upload path, shared by the panel and the image-only Markdown
-   * entry points. Raw `fetch` rather than `hc`: the body is binary, which the
-   * RPC client cannot type. Same-origin, so the session cookie rides along.
-   */
+  /** The one upload path, shared by the panel and the image-only Markdown entry points. */
   const upload = useMutation({
-    mutationFn: async ({ file, rasterizeSvg }: { file: File; rasterizeSvg?: boolean }) => {
-      const prepared = await compressImage(file, { rasterizeSvg });
-      // Same bound as the shared `Title` the server applies to `fileName`:
-      // refuse before the bytes are spent rather than after they are stored.
-      const trimmedName = prepared.fileName.trim();
-      if (trimmedName === "" || prepared.fileName.length > 200) {
-        throw new Error("File name must be 200 characters or fewer.");
-      }
-      const maxBytes = attachmentMaxBytes(prepared.contentType);
-      if (prepared.blob.size > maxBytes) {
-        throw new Error(
-          isPreviewableImageContentType(prepared.contentType)
-            ? "Image is too large (max 10 MB)."
-            : "File is too large (max 50 MB).",
-        );
-      }
-      const response = await fetch(`/boards/${boardId}/attachments`, {
-        method: "POST",
-        headers: { "Content-Type": prepared.contentType },
-        body: prepared.blob,
-      });
-      if (!response.ok) throw new Error("Could not upload the attachment.");
-      const uploaded = (await response.json()) as {
-        id: string;
-        contentType: string;
-        size: number;
-      };
-      const mutationId = crypto.randomUUID();
-      const message = {
-        type: "attachment.create",
-        mutationId,
-        id: uploaded.id,
-        cardId: card.id,
-        fileName: prepared.fileName,
-        contentType: uploaded.contentType,
-        size: uploaded.size,
-      } as const;
-      const result = {
-        url: `/boards/${boardId}/attachments/${uploaded.id}`,
-        // Brackets and parens would break out of the `![alt](url)` markup.
-        alt: prepared.fileName.replace(/[[\]()]/g, ""),
-      };
-      // If the socket is closed or the server refuses, the upload's
-      // provisional lease remains in the BoardDO and its alarm removes the
-      // unclaimed R2 object after one hour.
-      if (!subscribeMutation) {
-        if (!send(message)) throw new Error("Not connected — try again.");
-        return result;
-      }
-      // The URL only exists once the server has accepted the metadata, so
-      // nothing is inserted into a draft for an attachment that never lands.
-      return await new Promise<{ url: string; alt: string }>((resolve, reject) => {
-        const unsub = subscribeMutation(mutationId, ({ status, error }: { status: string; error?: string }) => {
-          if (status === "accepted") resolve(result);
-          else if (status === "rejected") reject(new Error(error || "Could not attach the upload."));
-          else if (status === "timeout" || status === "uncertain" || status === "verified-retry") {
-            reject(new Error("Could not confirm the upload — try again."));
-          } else return;
-          unsub();
-          activeUnsubsRef.current.delete(unsub);
-        });
-        activeUnsubsRef.current.add(unsub);
-        if (!send(message)) {
-          unsub();
-          activeUnsubsRef.current.delete(unsub);
-          reject(new Error("Not connected — try again."));
-        }
-      });
-    },
+    mutationFn: ({ file, rasterizeSvg }: { file: File; rasterizeSvg?: boolean }) =>
+      boardAttachments.upload({ file, cardId: card.id, scope: uploadScope, rasterizeSvg }),
   });
 
   const uploadImageFor = (
