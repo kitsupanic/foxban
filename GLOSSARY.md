@@ -73,3 +73,13 @@ _Avoid_: Dev status, GitHub status
 **Authored operation**:
 A change a person wrote out, like a title, a comment or a checklist item, whose text is kept until the board confirms it. If the board refuses it or the connection drops, the text is still there to retry. A drag is not one.
 _Avoid_: Save, edit, write
+
+## Moving cards
+
+**Card transfer**:
+Moving a card to another board. The source board keeps the card locked until the destination either commits it, and the source deletes its copy, or records that the move was aborted, and the source unlocks it.
+_Avoid_: Copy, migrate
+
+**Card transfer coordinator**:
+The one module (`apps/api/src/card-transfer.ts`) that runs a card transfer step by step and settles a stuck one. It talks to the two boards as the source and the destination participant.
+_Avoid_: Saga route, recovery
