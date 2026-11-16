@@ -88,7 +88,7 @@ import {
 } from "./development-info";
 import { syncBranchRoute } from "./github-branch-routes";
 import { syncPullRequestRoute } from "./github-pr-routes";
-import { canManageBoard, canOpenBoard, isAdminEmail } from "./auth";
+import { boardMemberSql, canManageBoard, canOpenBoard, isAdminEmail } from "./auth";
 import { generateKeyBetween } from "fractional-indexing";
 import {
   MCP_BOARD_READ_PATH,
@@ -117,13 +117,27 @@ import {
 } from "./mcp-contract";
 
 export const DELETE_BOARD_PATH = "/internal/board/delete";
-export const CARD_TRANSFER_OPTIONS_PATH = "/internal/card-transfer/options";
-export const CARD_TRANSFER_PREPARE_PATH = "/internal/card-transfer/prepare";
-export const CARD_TRANSFER_IMPORT_PATH = "/internal/card-transfer/import";
-export const CARD_TRANSFER_FINALIZE_PATH = "/internal/card-transfer/finalize";
-export const CARD_TRANSFER_RELEASE_PATH = "/internal/card-transfer/release";
-export const CARD_TRANSFER_RECEIPT_PATH = "/internal/card-transfer/receipt";
-export const CARD_TRANSFER_ABORT_PATH = "/internal/card-transfer/abort";
+import {
+  CARD_TRANSFER_ABORT_PATH,
+  CARD_TRANSFER_FINALIZE_PATH,
+  CARD_TRANSFER_IMPORT_PATH,
+  CARD_TRANSFER_OPTIONS_PATH,
+  CARD_TRANSFER_PREPARE_PATH,
+  CARD_TRANSFER_RECEIPT_PATH,
+  CARD_TRANSFER_RELEASE_PATH,
+  boardDestination,
+  settle,
+  type SourceParticipant,
+} from "./card-transfer";
+export {
+  CARD_TRANSFER_ABORT_PATH,
+  CARD_TRANSFER_FINALIZE_PATH,
+  CARD_TRANSFER_IMPORT_PATH,
+  CARD_TRANSFER_OPTIONS_PATH,
+  CARD_TRANSFER_PREPARE_PATH,
+  CARD_TRANSFER_RECEIPT_PATH,
+  CARD_TRANSFER_RELEASE_PATH,
+};
 export const CARD_PATH_PREFIX = "/internal/cards/";
 /** The identity the write-back routes (create a branch or pull request from a card) read before and after talking to GitHub. */
 export function cardWriteBackPath(cardId: string): string {
@@ -1129,11 +1143,7 @@ export class BoardDO extends DurableObject<Env> {
    */
   private async currentAssigneeEligible(boardId: string, assigneeId: string): Promise<boolean> {
     const row = await this.env.DB.prepare(
-      `SELECT 1 AS present FROM boards b
-        WHERE b.id=?
-          AND (EXISTS(SELECT 1 FROM board_members x WHERE x.board_id=b.id AND x.user_id=?)
-               OR (b.access_mode='workspace'
-                   AND EXISTS(SELECT 1 FROM workspace_members x WHERE x.workspace_id=b.workspace_id AND x.user_id=?)))`,
+      `SELECT 1 AS present FROM boards b WHERE b.id=? AND ${boardMemberSql("b", "?")}`,
     )
       .bind(boardId, assigneeId, assigneeId)
       .first();
@@ -1979,132 +1989,36 @@ export class BoardDO extends DurableObject<Env> {
         .toArray()[0];
 
       if (existingLock && existingLock.transfer_id !== transferId) {
-        if (existingLock.expires_at <= now) {
-          if (!existingLock.destination_board_id) {
-            await this.recoverExpiredTransferLocks(now);
-            const recheckLock = this.ctx.storage.sql
-              .exec<{ transfer_id: string }>(
-                "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
-                cardId,
-              )
-              .toArray()[0];
-            if (recheckLock && recheckLock.transfer_id !== transferId) {
-              return Response.json({ error: "card transfer already in progress" }, { status: 409 });
-            }
-          } else {
-            let committed = false;
-            let aborted = false;
-          try {
-            const destStub = this.env.BOARD_DO.get(this.env.BOARD_DO.idFromName(existingLock.destination_board_id));
-            const abortRes = await destStub.fetch(`https://board.internal${CARD_TRANSFER_ABORT_PATH}`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                [INTERNAL_BOARD_ID_HEADER]: existingLock.destination_board_id,
-              },
-              body: JSON.stringify({
-                transferId: existingLock.transfer_id,
-                sourceBoardId: boardId,
-                cardId,
-              }),
-            });
-            if (abortRes.ok) {
-              const data = (await abortRes.json()) as {
-                committed?: boolean;
-                aborted?: boolean;
-                receipt?: CardTransferReceipt;
-              };
-              if (
-                data.receipt &&
-                data.receipt.transferId === existingLock.transfer_id &&
-                data.receipt.sourceBoardId === boardId &&
-                data.receipt.cardId === cardId
-              ) {
-                committed = !!data.committed;
-                aborted = !!data.aborted;
-              }
-            }
-          } catch {
-            // Destination unreachable
+        // Another operation holds the card. Only an expired lock may be taken over,
+        // and only once its destination settles it.
+        if (existingLock.expires_at > now) {
+          return Response.json({ error: "card transfer already in progress" }, { status: 409 });
+        }
+        if (!existingLock.destination_board_id) {
+          await this.recoverExpiredTransferLocks(now);
+          const recheckLock = this.ctx.storage.sql
+            .exec<{ transfer_id: string }>(
+              "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
+              cardId,
+            )
+            .toArray()[0];
+          if (recheckLock && recheckLock.transfer_id !== transferId) {
+            return Response.json({ error: "card transfer already in progress" }, { status: 409 });
           }
-          if (committed) {
-            let finalized = false;
-            this.ctx.storage.transactionSync(() => {
-              const cur = this.ctx.storage.sql
-                .exec<{ transfer_id: string; destination_board_id: string }>(
-                  "SELECT transfer_id, destination_board_id FROM card_transfer_locks WHERE card_id = ?",
-                  cardId,
-                )
-                .toArray()[0];
-              if (
-                cur &&
-                cur.transfer_id === existingLock.transfer_id &&
-                cur.destination_board_id === existingLock.destination_board_id
-              ) {
-                this.deleteCardAggregate([cardId]);
-                this.ctx.storage.sql.exec(
-                  "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-                  cardId,
-                  existingLock.transfer_id,
-                );
-                this.ctx.storage.sql.exec(
-                  "UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?",
-                  Date.now(),
-                  existingLock.transfer_id,
-                );
-                finalized = true;
-              }
-            });
-            if (finalized) {
-              const snapshotMessage = this.snapshot();
-              for (const socket of this.ctx.getWebSockets()) {
-                try {
-                  this.send(socket, snapshotMessage);
-                } catch {
-                  // Ignore closed sockets
-                }
-              }
-              this.ctx.waitUntil(this.drainAttachmentCleanup());
-            }
-            return Response.json({ error: "not found" }, { status: 404 });
-          } else if (aborted) {
-            let cleared = false;
-            this.ctx.storage.transactionSync(() => {
-              const cur = this.ctx.storage.sql
-                .exec<{ transfer_id: string; destination_board_id: string }>(
-                  "SELECT transfer_id, destination_board_id FROM card_transfer_locks WHERE card_id = ?",
-                  cardId,
-                )
-                .toArray()[0];
-              if (
-                cur &&
-                cur.transfer_id === existingLock.transfer_id &&
-                cur.destination_board_id === existingLock.destination_board_id
-              ) {
-                this.ctx.storage.sql.exec(
-                  "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-                  cardId,
-                  existingLock.transfer_id,
-                );
-                this.ctx.storage.sql.exec(
-                  "UPDATE card_transfer_operations SET state = 'aborted', updated_at = ? WHERE transfer_id = ?",
-                  Date.now(),
-                  existingLock.transfer_id,
-                );
-                cleared = true;
-              }
-            });
-            if (!cleared) {
-              return Response.json({ error: "card transfer already in progress" }, { status: 409 });
-            }
-          } else {
+        } else {
+          const heldIds = { transferId: existingLock.transfer_id, sourceBoardId: boardId, cardId };
+          const outcome = await settle(
+            heldIds,
+            this.localTransferSource(cardId, existingLock.transfer_id, existingLock.destination_board_id, true),
+            [boardDestination(this.env, { ...heldIds, destinationBoardId: existingLock.destination_board_id })],
+          );
+          // The earlier operation moved the card: there is nothing left to transfer.
+          if (outcome.kind === "finalized") return Response.json({ error: "not found" }, { status: 404 });
+          if (outcome.kind !== "released" || !outcome.cleared) {
             return Response.json({ error: "card transfer already in progress" }, { status: 409 });
           }
         }
-      } else {
-        return Response.json({ error: "card transfer already in progress" }, { status: 409 });
       }
-    }
 
       const expiresAt = now + TRANSFER_LOCK_TTL_MS;
       // Schedule before persisting the lock to durably arrange alarm recovery.
@@ -2816,93 +2730,21 @@ export class BoardDO extends DurableObject<Env> {
           { status: 409 },
         );
       }
-      let abortRes: Response;
-        try {
-          const destStub = this.env.BOARD_DO.get(this.env.BOARD_DO.idFromName(targetDestBoardId));
-          abortRes = await destStub.fetch(`https://board.internal${CARD_TRANSFER_ABORT_PATH}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [INTERNAL_BOARD_ID_HEADER]: targetDestBoardId,
-            },
-            body: JSON.stringify({
-              transferId,
-              sourceBoardId: boardId,
-              cardId,
-            }),
-          });
-        } catch {
-          return Response.json({ error: "destination unreachable; lock retained" }, { status: 500 });
-        }
-
-        if (!abortRes.ok) {
-          return Response.json({ error: "destination abort fence failed; lock retained" }, { status: 500 });
-        }
-
-        const abortData = (await abortRes.json()) as {
-          committed?: boolean;
-          aborted?: boolean;
-          receipt?: CardTransferReceipt;
-        };
-
-        if (
-          !abortData.receipt ||
-          abortData.receipt.transferId !== transferId ||
-          abortData.receipt.sourceBoardId !== boardId ||
-          abortData.receipt.cardId !== cardId
-        ) {
-          return Response.json({ error: "destination abort receipt mismatch; lock retained", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-        }
-
-        if (abortData.committed) {
-          let finalized = false;
-          this.ctx.storage.transactionSync(() => {
-            const recheckLock = this.ctx.storage.sql
-              .exec<{ transfer_id: string }>(
-                "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
-                cardId,
-              )
-              .toArray()[0];
-            if (recheckLock && recheckLock.transfer_id === transferId) {
-              this.deleteCardAggregate([cardId]);
-              this.ctx.storage.sql.exec("DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?", cardId, transferId);
-              this.ctx.storage.sql.exec("UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?", Date.now(), transferId);
-              finalized = true;
-            }
-          });
-          if (finalized) {
-            const snapshotMessage = this.snapshot();
-            for (const socket of this.ctx.getWebSockets()) {
-              try {
-                this.send(socket, snapshotMessage);
-              } catch {}
-            }
-            this.ctx.waitUntil(this.drainAttachmentCleanup());
-          }
-          return Response.json({ ok: true, committed: true });
-        }
-
-      this.ctx.storage.transactionSync(() => {
-        const recheckLock = this.ctx.storage.sql
-          .exec<{ transfer_id: string }>(
-            "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
-            cardId,
-          )
-          .toArray()[0];
-        if (recheckLock && recheckLock.transfer_id === transferId) {
-          this.ctx.storage.sql.exec(
-            "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-            cardId,
-            transferId,
-          );
-          this.ctx.storage.sql.exec(
-            "UPDATE card_transfer_operations SET state = 'aborted', updated_at = ? WHERE transfer_id = ?",
-            Date.now(),
-            transferId,
-          );
-        }
-      });
-      return Response.json({ ok: true });
+      const releaseIds = { transferId, sourceBoardId: boardId, cardId };
+      const outcome = await settle(
+        releaseIds,
+        this.localTransferSource(cardId, transferId, null, true),
+        [boardDestination(this.env, { ...releaseIds, destinationBoardId: targetDestBoardId })],
+      );
+      if (outcome.kind === "finalized") return Response.json({ ok: true, committed: true });
+      if (outcome.kind === "released") return Response.json({ ok: true });
+      if (outcome.why === "unreachable") {
+        return Response.json({ error: "destination unreachable; lock retained" }, { status: 500 });
+      }
+      if (outcome.why === "mismatch") {
+        return Response.json({ error: "destination abort receipt mismatch; lock retained", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
+      }
+      return Response.json({ error: "destination abort fence failed; lock retained" }, { status: 500 });
     }
 
     if (url.pathname === CARD_TRANSFER_RECEIPT_PATH) {
@@ -3179,312 +3021,70 @@ export class BoardDO extends DurableObject<Env> {
     now: number,
     broadcast = true,
   ): Promise<"settled" | "retry"> {
-    if (!lock.destinationBoardId) {
-      // Legacy lock without destination board ID.
-      // Search candidate boards in D1 for receipt without silent outcome guessing.
-      try {
-        const candidateBoards = await this.env.DB.prepare(
-          "SELECT id FROM boards WHERE id != ?",
-        )
-          .bind(thisBoardId)
-          .all<{ id: string }>();
-
-        let committedDestBoardId: string | null = null;
-        let checkFailed = false;
-
-        for (const cand of candidateBoards.results ?? []) {
-          try {
-            const destStub = this.env.BOARD_DO.get(this.env.BOARD_DO.idFromName(cand.id));
-            const res = await destStub.fetch(`https://board.internal${CARD_TRANSFER_RECEIPT_PATH}`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                [INTERNAL_BOARD_ID_HEADER]: cand.id,
-              },
-              body: JSON.stringify({
-                transferId: lock.transferId,
-                sourceBoardId: thisBoardId,
-                cardId: lock.cardId,
-              }),
-            });
-            if (res.ok) {
-              const data = (await res.json()) as { receipt?: CardTransferReceipt };
-              if (
-                data.receipt &&
-                data.receipt.transferId === lock.transferId &&
-                data.receipt.sourceBoardId === thisBoardId &&
-                data.receipt.cardId === lock.cardId &&
-                data.receipt.taskNumber >= 0
-              ) {
-                committedDestBoardId = cand.id;
-                break;
-              }
-            } else if (res.status !== 404 && res.status !== 410) {
-              checkFailed = true;
-              break;
-            }
-          } catch {
-            checkFailed = true;
-            break;
-          }
-        }
-
-        if (checkFailed) {
-          // Unreachable or error: bounded retry delay
-          this.ctx.storage.sql.exec(
-            "UPDATE card_transfer_locks SET expires_at = ? WHERE card_id = ? AND transfer_id = ?",
-            now + TRANSFER_RETRY_DELAY_MS,
-            lock.cardId,
-            lock.transferId,
-          );
-          return "retry";
-        }
-
-        if (committedDestBoardId) {
-          // Committed on destination board! Finalize source
-          let finalized = false;
-          this.ctx.storage.transactionSync(() => {
-            const cur = this.ctx.storage.sql
-              .exec<{ transfer_id: string }>(
-                "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
-                lock.cardId,
-              )
-              .toArray()[0];
-            if (cur && cur.transfer_id === lock.transferId) {
-              this.deleteCardAggregate([lock.cardId]);
-              this.ctx.storage.sql.exec(
-                "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-                lock.cardId,
-                lock.transferId,
-              );
-              this.ctx.storage.sql.exec(
-                "UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?",
-                Date.now(),
-                lock.transferId,
-              );
-              finalized = true;
-            }
-          });
-          if (finalized) {
-            if (broadcast) {
-              const snapshotMessage = this.snapshot();
-              for (const socket of this.ctx.getWebSockets()) {
-                try {
-                  this.send(socket, snapshotMessage);
-                } catch {}
-              }
-            }
-            this.ctx.waitUntil(this.drainAttachmentCleanup());
-          }
-        } else {
-          // Not committed on any candidate board. Durably fence on all candidate boards before aborting.
-          let fenceFailed = false;
-          let lateCommittedCandId: string | null = null;
-          for (const cand of candidateBoards.results ?? []) {
-            try {
-              const destStub = this.env.BOARD_DO.get(this.env.BOARD_DO.idFromName(cand.id));
-              const abortRes = await destStub.fetch(`https://board.internal${CARD_TRANSFER_ABORT_PATH}`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  [INTERNAL_BOARD_ID_HEADER]: cand.id,
-                },
-                body: JSON.stringify({
-                  transferId: lock.transferId,
-                  sourceBoardId: thisBoardId,
-                  cardId: lock.cardId,
-                }),
-              });
-              if (!abortRes.ok) {
-                fenceFailed = true;
-                break;
-              }
-              const abortData = (await abortRes.json()) as {
-                committed?: boolean;
-                aborted?: boolean;
-                receipt?: CardTransferReceipt;
-              };
-              if (
-                !abortData.receipt ||
-                abortData.receipt.transferId !== lock.transferId ||
-                abortData.receipt.sourceBoardId !== thisBoardId ||
-                abortData.receipt.cardId !== lock.cardId
-              ) {
-                fenceFailed = true;
-                break;
-              }
-              if (abortData.committed) {
-                lateCommittedCandId = cand.id;
-                break;
-              }
-            } catch {
-              fenceFailed = true;
-              break;
-            }
-          }
-
-          if (lateCommittedCandId) {
-            let finalized = false;
-            this.ctx.storage.transactionSync(() => {
-              const cur = this.ctx.storage.sql
-                .exec<{ transfer_id: string }>(
-                  "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
-                  lock.cardId,
-                )
-                .toArray()[0];
-              if (cur && cur.transfer_id === lock.transferId) {
-                this.deleteCardAggregate([lock.cardId]);
-                this.ctx.storage.sql.exec(
-                  "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-                  lock.cardId,
-                  lock.transferId,
-                );
-                this.ctx.storage.sql.exec(
-                  "UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?",
-                  Date.now(),
-                  lock.transferId,
-                );
-                finalized = true;
-              }
-            });
-            if (finalized) {
-              if (broadcast) {
-                const snapshotMessage = this.snapshot();
-                for (const socket of this.ctx.getWebSockets()) {
-                  try {
-                    this.send(socket, snapshotMessage);
-                  } catch {}
-                }
-              }
-              this.ctx.waitUntil(this.drainAttachmentCleanup());
-            }
-            return "settled";
-          }
-
-          if (fenceFailed) {
-            this.ctx.storage.sql.exec(
-              "UPDATE card_transfer_locks SET expires_at = ? WHERE card_id = ? AND transfer_id = ?",
-              now + TRANSFER_RETRY_DELAY_MS,
-              lock.cardId,
-              lock.transferId,
-            );
-            return "retry";
-          }
-
-          // Durably fenced on all candidate boards. Safely delete lock on source
-          this.ctx.storage.transactionSync(() => {
-            const cur = this.ctx.storage.sql
-              .exec<{ transfer_id: string }>(
-                "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
-                lock.cardId,
-              )
-              .toArray()[0];
-            if (cur && cur.transfer_id === lock.transferId) {
-              this.ctx.storage.sql.exec(
-                "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-                lock.cardId,
-                lock.transferId,
-              );
-              this.ctx.storage.sql.exec(
-                "UPDATE card_transfer_operations SET state = 'aborted', updated_at = ? WHERE transfer_id = ?",
-                Date.now(),
-                lock.transferId,
-              );
-            }
-          });
-        }
-      } catch {
-        // DB error: retry with bounded delay
-        this.ctx.storage.sql.exec(
-          "UPDATE card_transfer_locks SET expires_at = ? WHERE card_id = ? AND transfer_id = ?",
-          now + TRANSFER_RETRY_DELAY_MS,
-          lock.cardId,
-          lock.transferId,
-        );
-        return "retry";
-      }
-      return "settled";
-    }
-
-    // Normal lock with destinationBoardId
+    const ids = { transferId: lock.transferId, sourceBoardId: thisBoardId, cardId: lock.cardId };
     try {
-      const destStub = this.env.BOARD_DO.get(this.env.BOARD_DO.idFromName(lock.destinationBoardId));
-      const res = await destStub.fetch(`https://board.internal${CARD_TRANSFER_ABORT_PATH}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [INTERNAL_BOARD_ID_HEADER]: lock.destinationBoardId,
-        },
-        body: JSON.stringify({
-          transferId: lock.transferId,
-          sourceBoardId: thisBoardId,
-          cardId: lock.cardId,
-        }),
+      // A legacy lock has no destination: every other board is a candidate, and their
+      // receipts are read before any of them is fenced.
+      const destinationIds = lock.destinationBoardId
+        ? [lock.destinationBoardId]
+        : ((await this.env.DB.prepare("SELECT id FROM boards WHERE id != ?").bind(thisBoardId).all<{ id: string }>()).results ?? []).map((b) => b.id);
+      const outcome = await settle(
+        ids,
+        this.localTransferSource(lock.cardId, lock.transferId, lock.destinationBoardId || null, broadcast),
+        destinationIds.map((destinationBoardId) => boardDestination(this.env, { ...ids, destinationBoardId })),
+        !lock.destinationBoardId,
+      );
+      if (outcome.kind !== "retry") return "settled";
+    } catch {
+      // D1 or local storage error: fall through to the bounded retry.
+    }
+    // Unresolved: keep the lock and try again after a bounded delay.
+    this.ctx.storage.sql.exec(
+      "UPDATE card_transfer_locks SET expires_at = ? WHERE card_id = ? AND transfer_id = ?",
+      now + TRANSFER_RETRY_DELAY_MS,
+      lock.cardId,
+      lock.transferId,
+    );
+    return "retry";
+  }
+
+  /**
+   * This board as the source participant of `settle`: finalize and release run on
+   * local storage, and act only while `transferId` still holds the card's lock (and,
+   * when `destinationBoardId` is given, still names that destination). A lock that
+   * moved on answers 409 and nothing changes.
+   */
+  private localTransferSource(
+    cardId: string,
+    transferId: string,
+    destinationBoardId: string | null,
+    broadcast: boolean,
+  ): Pick<SourceParticipant, "finalize" | "release"> {
+    const settleLock = (state: "finalized" | "aborted") =>
+      this.ctx.storage.transactionSync(() => {
+        const cur = this.ctx.storage.sql
+          .exec<{ transfer_id: string; destination_board_id: string }>(
+            "SELECT transfer_id, destination_board_id FROM card_transfer_locks WHERE card_id = ?",
+            cardId,
+          )
+          .toArray()[0];
+        if (!cur || cur.transfer_id !== transferId) return false;
+        if (destinationBoardId !== null && cur.destination_board_id !== destinationBoardId) return false;
+        if (state === "finalized") this.deleteCardAggregate([cardId]);
+        this.ctx.storage.sql.exec("DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?", cardId, transferId);
+        this.ctx.storage.sql.exec(
+          "UPDATE card_transfer_operations SET state = ?, updated_at = ? WHERE transfer_id = ?",
+          state,
+          Date.now(),
+          transferId,
+        );
+        return true;
       });
-
-      if (!res.ok) {
-        // Unreachable or error: bounded retry delay, do NOT unlock
-        this.ctx.storage.sql.exec(
-          "UPDATE card_transfer_locks SET expires_at = ? WHERE card_id = ? AND transfer_id = ?",
-          now + TRANSFER_RETRY_DELAY_MS,
-          lock.cardId,
-          lock.transferId,
-        );
-        return "retry";
-      }
-
-      const data = (await res.json()) as {
-        committed?: boolean;
-        aborted?: boolean;
-        receipt?: CardTransferReceipt;
-      };
-
-      if (
-        !data.receipt ||
-        data.receipt.transferId !== lock.transferId ||
-        data.receipt.sourceBoardId !== thisBoardId ||
-        data.receipt.cardId !== lock.cardId
-      ) {
-        this.ctx.storage.sql.exec(
-          "UPDATE card_transfer_locks SET expires_at = ? WHERE card_id = ? AND transfer_id = ?",
-          now + TRANSFER_RETRY_DELAY_MS,
-          lock.cardId,
-          lock.transferId,
-        );
-        return "retry";
-      }
-
-      if (data.committed) {
-        // Committed at destination! Revalidate lock ownership before deleting aggregate
-        let finalized = false;
-        this.ctx.storage.transactionSync(() => {
-          const cur = this.ctx.storage.sql
-            .exec<{ transfer_id: string; destination_board_id: string }>(
-              "SELECT transfer_id, destination_board_id FROM card_transfer_locks WHERE card_id = ?",
-              lock.cardId,
-            )
-            .toArray()[0];
-          if (
-            cur &&
-            cur.transfer_id === lock.transferId &&
-            cur.destination_board_id === lock.destinationBoardId
-          ) {
-            this.deleteCardAggregate([lock.cardId]);
-            this.ctx.storage.sql.exec(
-              "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-              lock.cardId,
-              lock.transferId,
-            );
-            this.ctx.storage.sql.exec(
-              "UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?",
-              Date.now(),
-              lock.transferId,
-            );
-            finalized = true;
-          }
-        });
-
-        if (finalized) {
+    const answer = (done: boolean) => ({ status: done ? 200 : 409, body: {} });
+    return {
+      finalize: async () => {
+        const done = settleLock("finalized");
+        if (done) {
           if (broadcast) {
             const snapshotMessage = this.snapshot();
             for (const socket of this.ctx.getWebSockets()) {
@@ -3495,46 +3095,10 @@ export class BoardDO extends DurableObject<Env> {
           }
           this.ctx.waitUntil(this.drainAttachmentCleanup());
         }
-      } else if (data.aborted) {
-        // Durably fenced at destination. Revalidate lock ownership before unlocking
-        this.ctx.storage.transactionSync(() => {
-          const cur = this.ctx.storage.sql
-            .exec<{ transfer_id: string; destination_board_id: string }>(
-              "SELECT transfer_id, destination_board_id FROM card_transfer_locks WHERE card_id = ?",
-              lock.cardId,
-            )
-            .toArray()[0];
-          if (
-            cur &&
-            cur.transfer_id === lock.transferId &&
-            cur.destination_board_id === lock.destinationBoardId
-          ) {
-            this.ctx.storage.sql.exec(
-              "DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?",
-              lock.cardId,
-              lock.transferId,
-            );
-            this.ctx.storage.sql.exec(
-              "UPDATE card_transfer_operations SET state = 'aborted', updated_at = ? WHERE transfer_id = ?",
-              Date.now(),
-              lock.transferId,
-            );
-          }
-        });
-      } else {
-        return "retry";
-      }
-    } catch {
-      // Destination unreachable; leave locked for bounded retry
-      this.ctx.storage.sql.exec(
-        "UPDATE card_transfer_locks SET expires_at = ? WHERE card_id = ? AND transfer_id = ?",
-        now + TRANSFER_RETRY_DELAY_MS,
-        lock.cardId,
-        lock.transferId,
-      );
-      return "retry";
-    }
-    return "settled";
+        return answer(done);
+      },
+      release: async () => answer(settleLock("aborted")),
+    };
   }
 
   private async scheduleAlarmAt(at: number): Promise<void> {

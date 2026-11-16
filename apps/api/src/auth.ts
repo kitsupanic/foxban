@@ -122,6 +122,21 @@ export function boardManageSql(board: string, viewer: string, operator?: string)
     OR EXISTS(SELECT 1 FROM workspace_members manage_wm WHERE manage_wm.workspace_id=${board}.workspace_id AND manage_wm.user_id=${viewer} AND manage_wm.role='admin'))`;
 }
 
+/**
+ * Effective board membership as one SQL condition: `member` has a board_members
+ * row on `board`, or is a member of its workspace while it is a Workspace board.
+ * The member list, assignee eligibility and transfer assignee preservation all
+ * read this relation. Unlike `boardOpenSql`, an admin of the workspace is not a
+ * member of a Restricted board, and owner and operator do not count.
+ *
+ * `board` is the boards alias in scope. `member` is a SQL expression for the user
+ * id (`?` or a column); it appears 2 times, so `?` takes 2 binds of the same id.
+ */
+export function boardMemberSql(board: string, member: string): string {
+  return `(EXISTS(SELECT 1 FROM board_members member_bm WHERE member_bm.board_id=${board}.id AND member_bm.user_id=${member})
+    OR (${board}.access_mode='workspace' AND EXISTS(SELECT 1 FROM workspace_members member_wm WHERE member_wm.workspace_id=${board}.workspace_id AND member_wm.user_id=${member})))`;
+}
+
 export function toBoardRow(raw: RawBoardRecord): BoardRow {
   const canManage = canManageBoard({
     operator: raw.operatorAccess === 1,

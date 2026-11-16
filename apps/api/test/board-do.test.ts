@@ -10250,3 +10250,94 @@ describe("transfer collection validation", () => {
     expect(PreparedCardTransferBundleSchema.safeParse({ ...bundle, checklistItems: [{ ...bundle.checklistItems[0], cardId: "another-card" }] }).success).toBe(false);
   });
 });
+
+describe("transfer settlement on the source board", () => {
+  type LocalSource = { finalize(): Promise<{ status: number }>; release(): Promise<{ status: number }> };
+  type WithLocalSource = { localTransferSource(cardId: string, transferId: string, destinationBoardId: string | null, broadcast: boolean): LocalSource };
+
+  /** A source board with one card held by `transferId` toward `destination`. */
+  async function lockedCard(board: string, transferId: string, destination: string) {
+    const client = await connect(board);
+    await snapshotOf(client);
+    client.send({ type: "column.create", mutationId: "settle-col", id: `${board}-col`, title: "Col", position: "a0" });
+    await awaitBroadcast(client, "settle-col");
+    client.send({ type: "card.create", mutationId: "settle-card", id: `${board}-card`, columnId: `${board}-col`, title: "Card", position: "a0" });
+    await awaitBroadcast(client, "settle-card");
+    const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
+    const now = Date.now();
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO card_transfer_locks(card_id, transfer_id, destination_board_id, phase, expires_at) VALUES (?, ?, ?, 'prepared', ?)`,
+        `${board}-card`, transferId, destination, now + 300_000,
+      );
+      state.storage.sql.exec(
+        `INSERT INTO card_transfer_operations(transfer_id, card_id, destination_board_id, generation, state, created_at, updated_at) VALUES (?, ?, ?, 1, 'prepared', ?, ?)`,
+        transferId, `${board}-card`, destination, now, now,
+      );
+    });
+    const facts = () =>
+      runInDurableObject(stub, (_instance, state) => ({
+        card: state.storage.sql.exec("SELECT 1 FROM cards WHERE id = ?", `${board}-card`).toArray().length === 1,
+        lock: state.storage.sql.exec("SELECT 1 FROM card_transfer_locks WHERE card_id = ?", `${board}-card`).toArray().length === 1,
+        op: state.storage.sql.exec<{ state: string }>("SELECT state FROM card_transfer_operations WHERE transfer_id = ?", transferId).toArray()[0]?.state,
+      }));
+    const release = () =>
+      stub.fetch("https://board.internal/internal/card-transfer/release", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", [INTERNAL_BOARD_ID_HEADER]: board },
+        body: JSON.stringify({ transferId, cardId: `${board}-card`, destinationBoardId: destination }),
+      });
+    return { client, stub, cardId: `${board}-card`, facts, release };
+  }
+
+  const receiptAt = (destination: string, transferId: string, sourceBoardId: string, cardId: string, taskNumber: number) =>
+    runInDurableObject(env.BOARD_DO.get(env.BOARD_DO.idFromName(destination)), (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO card_transfer_receipts(transfer_id, source_board_id, card_id, task_number) VALUES (?, ?, ?, ?)`,
+        transferId, sourceBoardId, cardId, taskNumber,
+      );
+    });
+
+  it("release: an uncommitted destination is fenced and the lock is released", async () => {
+    const s = await lockedCard("settle-rel-abort", "x-rel-abort", "settle-rel-abort-dst");
+    const res = await s.release();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(await s.facts()).toEqual({ card: true, lock: false, op: "aborted" });
+    s.client.close();
+  });
+
+  it("release: a committed destination finalizes the source instead", async () => {
+    const s = await lockedCard("settle-rel-commit", "x-rel-commit", "settle-rel-commit-dst");
+    await receiptAt("settle-rel-commit-dst", "x-rel-commit", "settle-rel-commit", s.cardId, 5);
+    const res = await s.release();
+    expect(await res.json()).toEqual({ ok: true, committed: true });
+    expect(await s.facts()).toEqual({ card: false, lock: false, op: "finalized" });
+    s.client.close();
+  });
+
+  it("release: a destination that refuses the fence keeps the lock", async () => {
+    const s = await lockedCard("settle-rel-refused", "x-rel-refused", "settle-rel-refused-dst");
+    await receiptAt("settle-rel-refused-dst", "x-rel-refused", "some-other-board", "other-card", 3);
+    const res = await s.release();
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "destination abort fence failed; lock retained" });
+    expect(await s.facts()).toEqual({ card: true, lock: true, op: "prepared" });
+    s.client.close();
+  });
+
+  it("local source acts only while the same operation and destination hold the lock", async () => {
+    const s = await lockedCard("settle-local", "x-local", "settle-local-dst");
+    const answer = (transferId: string, destination: string | null, step: "finalize" | "release") =>
+      runInDurableObject(s.stub, (instance) =>
+        (instance as unknown as WithLocalSource).localTransferSource(s.cardId, transferId, destination, false)[step](),
+      );
+    expect((await answer("x-local", "another-dst", "finalize")).status).toBe(409);
+    expect((await answer("x-other", null, "release")).status).toBe(409);
+    expect(await s.facts()).toEqual({ card: true, lock: true, op: "prepared" });
+    expect((await answer("x-local", "settle-local-dst", "finalize")).status).toBe(200);
+    expect(await s.facts()).toEqual({ card: false, lock: false, op: "finalized" });
+    expect((await answer("x-local", null, "release")).status).toBe(409);
+    s.client.close();
+  });
+});
