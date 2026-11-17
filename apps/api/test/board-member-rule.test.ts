@@ -1,9 +1,9 @@
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { boardMemberSql } from "../src/auth";
+import { boardMemberIdsSql, boardMemberSql } from "../src/auth";
 
 /**
- * Effective board membership (`boardMemberSql`) over every access mode, workspace
+ * Effective board membership (`boardMemberSql`, and its listing form `boardMemberIdsSql`) over every access mode, workspace
  * role and explicit role, run against real D1 rows. The board's owner and a
  * workspace admin get no membership from those facts alone.
  */
@@ -56,8 +56,8 @@ describe("effective board membership", () => {
     expect(bound !== null).toBe(member);
   });
 
-  it.each(MODES)("lists the same members through a column expression, and not the owner, on a %s board", async (mode) => {
-    const { results } = await env.DB.prepare(`SELECT u.id FROM boards b JOIN users u ON ${boardMemberSql("b", "u.id")} WHERE b.id=?`)
+  it.each(MODES)("lists the same members through the id subquery, and not the owner, on a %s board", async (mode) => {
+    const { results } = await env.DB.prepare(`SELECT u.id FROM boards b JOIN users u ON u.id IN (${boardMemberIdsSql("b")}) WHERE b.id=?`)
       .bind(`member-rule-${mode}`)
       .all<{ id: string }>();
     const expected = cases.filter((c) => c.mode === mode && c.member).map((c) => userId(c.ws, c.ex));

@@ -1,7 +1,7 @@
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { appOrigin, mcpOrigin, isAdminEmail, boardMemberSql, boardOpenSql, findAccessibleBoard, findAccessibleBoardByKey, toBoardRow, type BoardRow } from "./auth";
+import { appOrigin, mcpOrigin, isAdminEmail, boardMemberIdsSql, boardOpenSql, findAccessibleBoard, findAccessibleBoardByKey, toBoardRow, type BoardRow } from "./auth";
 import {
   agentCredentialsRouter,
   authenticateAgentCredential,
@@ -267,7 +267,7 @@ function createServer(env: Env, authorization: string, base: string): McpServer 
       }
       const { results } = await env.DB.prepare(
         `SELECT b.pending_access_operation_id AS pendingAccessOperationId, users.id AS id, users.name AS name
-           FROM boards b LEFT JOIN users ON users.id > ? AND ${boardMemberSql("b", "users.id")}
+           FROM boards b LEFT JOIN users ON users.id > ? AND users.id IN (${boardMemberIdsSql("b")})
           WHERE b.id = ? AND ${boardOpenSql("b", "?", "?=1")}
           ORDER BY users.id LIMIT ?`,
       ).bind(after, board.id, isAdminEmail(env, principal.user.email) ? 1 : 0,

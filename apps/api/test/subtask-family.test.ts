@@ -136,9 +136,23 @@ describe("subtask family", () => {
       },
       (sql) => {
         expect(() => checkSubtaskLink(sql, "c", "d")).not.toThrow();
-        for (const [source, target] of [["a", "a"], ["c", "kid"], ["kid", "c"], ["c", "a"], ["a", "b"], ["c", "b"], ["old", "c"], ["c", "missing"]]) {
-          expect(() => checkSubtaskLink(sql, source!, target!), `${source}→${target}`).toThrow("Invalid subtask hierarchy.");
+        // Each case breaks exactly one rule, so each rule is proven on its own. A self link
+        // or a cycle always also breaks another rule (a cycle's target is already a parent),
+        // and a repeated pair's child already has a parent, so those have no case of their own.
+        const cases: [source: string, target: string, rule: string][] = [
+          ["missing", "c", "source missing"],
+          ["c", "missing", "target missing"],
+          ["old", "c", "source archived"],
+          ["c", "old", "target archived"],
+          ["kid", "c", "source is a subtask"],
+          ["c", "b", "target is already a parent"],
+          ["c", "kid", "target already has a parent"],
+        ];
+        for (const [source, target, rule] of cases) {
+          expect(() => checkSubtaskLink(sql, source, target), `${source}→${target}: ${rule}`).toThrow("Invalid subtask hierarchy.");
         }
+        expect(() => checkSubtaskLink(sql, "d", "d"), "self link").toThrow("Invalid subtask hierarchy.");
+        expect(() => checkSubtaskLink(sql, "a", "b"), "cycle").toThrow("Invalid subtask hierarchy.");
       },
     ));
 });
