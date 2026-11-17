@@ -52,6 +52,7 @@ import { WorkflowSettings } from "./WorkflowSettings";
 import { CardSubtaskFamily } from "./SubtaskList";
 import { LABEL_COLOR_META } from "../lib/labels";
 import { useBoardSocket, useBoardState } from "../lib/socket";
+import { useBoardAttachments } from "../lib/attachments";
 import { useAuthoredOperation, useAuthoredScope } from "../lib/authored-operation";
 import { boardQueryKey } from "../lib/board-cache";
 import { cardForTaskKey, taskKey } from "../lib/task-key";
@@ -128,20 +129,19 @@ export function BoardView({
   /** When that read last succeeded, so a stale success cannot claim the board is ready. */
   accessCheckedAt: number;
 }) {
+  const boardAttachments = useBoardAttachments(boardId);
   const {
     accessState,
     connected,
     handshakeFailed,
     retry,
     sendMutation,
-    confirmedAttachmentDeletes,
-    seedDescriptionDraft,
     subscribeMutation,
     retireTrackedMutation,
-    pendingAttachmentDeletes,
   } = useBoardSocket(boardId, {
     accessChangePending,
     accessCheckedAt,
+    events: boardAttachments.events,
   });
   const state = useBoardState(boardId);
   const stateRef = useRef(state);
@@ -2016,9 +2016,8 @@ export function BoardView({
           boardKey={meta.key}
           items={cardChecklist(state, openCard.id)}
           attachments={cardAttachments(state, openCard.id)}
-          confirmedAttachmentDeletes={confirmedAttachmentDeletes}
-          pendingAttachmentDeletes={pendingAttachmentDeletes}
-          seedDescriptionDraft={seedDescriptionDraft}
+          boardAttachments={boardAttachments}
+          uploadScope={authored}
           comments={cardComments(state, openCard.id)}
           activities={cardActivities(state, openCard.id)}
           relations={cardRelations(state, openCard.id, activeCardIds)}

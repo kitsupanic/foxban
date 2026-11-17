@@ -4,6 +4,7 @@ import {
   REALTIME_PROTOCOL_VERSION,
   ServerMessageSchema,
   type ClientMessage,
+  type ServerMessage,
 } from "@foxban/shared";
 import { requestAppUpdateCheck } from "./app-update";
 import { boardQueryKey, clearBoardAccessCaches } from "./board-cache";
@@ -55,12 +56,21 @@ export function useBoardState(boardId: string): BoardState | undefined {
   return data;
 }
 
-
-type UnresolvedAttachmentDelete = {
-  attachmentId: string;
-  ownerId: string;
-  descriptionBefore: string | undefined;
-  descriptionAfter: string | undefined;
+/**
+ * Board events for a domain module that tracks more than the cache (the attachment
+ * lifecycle). Each is called where the socket itself acts on the same fact.
+ */
+export type BoardEventObserver = {
+  /** A snapshot is about to replace the base; it supersedes all earlier evidence. */
+  snapshot?(msg: Extract<ServerMessage, { type: "snapshot" }>): void;
+  /** An accepted broadcast, before the reconciler applies it. `own`: an echo of a mutation this client sent. */
+  message?(msg: ServerMessage, own: boolean): void;
+  /** An optimistic mutation went out; the cache before and after it. */
+  sent?(msg: ClientMessage, before: BoardState, after: BoardState): void;
+  /** An own pending mutation left the pending set: acked, rejected, timed out or rolled back. A transport close is not one. */
+  resolved?(mutationId: string): void;
+  /** The socket stopped reconnecting (access denied, or the reconnect budget ran out); nothing settles until a manual retry. */
+  halted?(): void;
 };
 
 export type MutationSettledStatus = "accepted" | "rejected" | "timeout" | "uncertain" | "verified-retry";
@@ -88,6 +98,8 @@ export function useBoardSocket(
     accessChangePending?: boolean;
     /** `dataUpdatedAt` of that read, so a stale success cannot claim the board is ready. */
     accessCheckedAt?: number;
+    /** Read through a ref, so a new observer never restarts the connection. */
+    events?: BoardEventObserver;
   } = {},
 ): {
   connected: boolean;
@@ -95,9 +107,6 @@ export function useBoardSocket(
   handshakeFailed: boolean;
   retry: () => void;
   sendMutation: SendMutation;
-  confirmedAttachmentDeletes: ReadonlyMap<string, string>;
-  pendingAttachmentDeletes: ReadonlyMap<string, string>;
-  seedDescriptionDraft: (cardId: string, description: string) => string;
   subscribeMutation: (mutationId: string, callback: MutationSettledCallback) => () => void;
   retireTrackedMutation: (mutationId: string) => void;
 } {
@@ -107,6 +116,8 @@ export function useBoardSocket(
     pending: handlers.accessChangePending ?? false,
     checkedAt: handlers.accessCheckedAt ?? 0,
   };
+  const eventsRef = useRef(handlers.events);
+  eventsRef.current = handlers.events;
   const [connected, setConnected] = useState(false);
   const [handshakeFailed, setHandshakeFailed] = useState(false);
   const [accessState, setAccessState] = useState<"ready" | "transitioning" | "denied">("transitioning");
@@ -115,15 +126,6 @@ export function useBoardSocket(
   const socketRef = useRef<WebSocket | null>(null);
   const reconcilerRef = useRef(new BoardReconciler(boardId));
   const pendingTimersRef = useRef(new Map<string, number>());
-  const knownAttachmentOwners = useRef(new Map<string, string>());
-  // In send order; unlike rollback timers these survive a transport close.
-  const unresolvedAttachmentDeletes = useRef(new Map<string, UnresolvedAttachmentDelete>());
-  const [confirmedAttachmentDeletes, setConfirmedAttachmentDeletes] = useState<
-    ReadonlyMap<string, string>
-  >(() => new Map());
-  const [pendingAttachmentDeletes, setPendingAttachmentDeletes] = useState<
-    ReadonlyMap<string, string>
-  >(() => new Map());
   const mutationSubscribersRef = useRef(new Map<string, Set<MutationSettledCallback>>());
   const pendingSentMutationsRef = useRef(new Map<string, ClientMessage>());
 
@@ -161,47 +163,16 @@ export function useBoardSocket(
     [],
   );
 
-  const clearPendingAttachmentDelete = useCallback((mutationId: string) => {
-    unresolvedAttachmentDeletes.current.delete(mutationId);
-    setPendingAttachmentDeletes((current) => {
-      if (!current.has(mutationId)) return current;
-      const next = new Map(current);
-      next.delete(mutationId);
-      return next;
-    });
-  }, []);
-
-  const seedDescriptionDraft = useCallback((cardId: string, description: string) => {
-    let seed = description;
-    const deletes = [...unresolvedAttachmentDeletes.current.values()];
-    for (let index = deletes.length - 1; index >= 0; index -= 1) {
-      const deletion = deletes[index];
-      if (
-        deletion.ownerId === cardId &&
-        deletion.descriptionBefore !== undefined &&
-        seed === deletion.descriptionAfter
-      ) {
-        seed = deletion.descriptionBefore;
-      }
-    }
-    return seed;
-  }, []);
-
-  // A retry restarts the transport, not the board session's deletion evidence.
   useEffect(() => {
-    setConfirmedAttachmentDeletes((current) => (current.size ? new Map() : current));
-    setPendingAttachmentDeletes((current) => (current.size ? new Map() : current));
     return () => {
       for (const timer of pendingTimersRef.current.values()) clearTimeout(timer);
       pendingTimersRef.current.clear();
-      knownAttachmentOwners.current.clear();
-      unresolvedAttachmentDeletes.current.clear();
     };
   }, [boardId]);
 
   const rollback = useCallback(
     (mutationId: string, reason: "timeout" | "rejected" = "timeout", error?: string) => {
-      clearPendingAttachmentDelete(mutationId);
+      eventsRef.current?.resolved?.(mutationId);
       const timer = pendingTimersRef.current.get(mutationId);
       if (timer !== undefined) {
         clearTimeout(timer);
@@ -215,7 +186,7 @@ export function useBoardSocket(
 
       // On live-socket timeout of an authored operation requiring authoritative settlement verification,
       // initiate resync by closing the transport so the subsequent reconnect snapshot resolves it.
-      // Do NOT close transport for ordinary instant or attachment mutations.
+      // Unsubscribed instant mutations keep the socket open; subscribed ones, attachment uploads included, close it on purpose (ADR 0069).
       if (reason === "timeout" && mutationSubscribersRef.current.has(mutationId)) {
         const ws = socketRef.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -223,7 +194,7 @@ export function useBoardSocket(
         }
       }
     },
-    [boardId, queryClient, clearPendingAttachmentDelete, notifyMutation],
+    [boardId, queryClient, notifyMutation],
   );
   const retry = useCallback(() => {
     setHandshakeFailed(false);
@@ -295,36 +266,10 @@ export function useBoardSocket(
         }, STABLE_CONNECTION_MS);
         for (const timer of pendingTimersRef.current.values()) clearTimeout(timer);
         pendingTimersRef.current.clear();
-        const snapshotOwners = new Map(
-          msg.attachments.map((attachment) => [attachment.id, attachment.cardId]),
-        );
-        const presentIds = new Set(snapshotOwners.keys());
-        const missingOwners = [...knownAttachmentOwners.current].filter(
-          ([id]) => !presentIds.has(id),
-        );
-        setConfirmedAttachmentDeletes((current) => {
-          let next: Map<string, string> | undefined;
-          for (const id of presentIds) {
-            if (current.has(id)) {
-              next ??= new Map(current);
-              next.delete(id);
-            }
-          }
-          for (const [id, ownerId] of missingOwners) {
-            if (current.get(id) !== ownerId) {
-              next ??= new Map(current);
-              next.set(id, ownerId);
-            }
-          }
-          return next ?? current;
-        });
-        knownAttachmentOwners.current = snapshotOwners;
-        unresolvedAttachmentDeletes.current.clear();
-        setPendingAttachmentDeletes((current) => (current.size ? new Map() : current));
+        eventsRef.current?.snapshot?.(msg);
         const { cacheState: snapshotState, settledPending } = reconcilerRef.current.applySnapshot(msg);
         queryClient.setQueryData<BoardState>(boardQueryKey(boardId), snapshotState);
         for (const { entry, presentInSnapshot } of settledPending) {
-          clearPendingAttachmentDelete(entry.msg.mutationId);
           if (presentInSnapshot) {
             notifyMutation(entry.msg.mutationId, "accepted");
           } else {
@@ -347,37 +292,10 @@ export function useBoardSocket(
         if (msg.mutationId) rollback(msg.mutationId, "rejected", msg.message);
         return;
       }
-      // Lifecycle frames must settle drafts even for an own echo.
-      if (msg.type === "attachment.create") {
-        knownAttachmentOwners.current.set(msg.id, msg.cardId);
-        setConfirmedAttachmentDeletes((current) => {
-          if (!current.has(msg.id)) return current;
-          const next = new Map(current);
-          next.delete(msg.id);
-          return next;
-        });
-      } else if (msg.type === "attachment.delete") {
-        const ownerId = knownAttachmentOwners.current.get(msg.id);
-        if (ownerId !== undefined) {
-          setConfirmedAttachmentDeletes((current) => {
-            if (current.get(msg.id) === ownerId) return current;
-            const next = new Map(current);
-            next.set(msg.id, ownerId);
-            return next;
-          });
-          knownAttachmentOwners.current.delete(msg.id);
-        }
-        const deleteMsg = msg;
-        const isOwn = pendingSentMutationsRef.current.has(deleteMsg.mutationId);
-        if (isOwn) {
-          clearPendingAttachmentDelete(deleteMsg.mutationId);
-        } else {
-          for (const [mutationId, deletion] of unresolvedAttachmentDeletes.current) {
-            if (deletion.attachmentId !== deleteMsg.id) continue;
-            clearPendingAttachmentDelete(mutationId);
-          }
-        }
-      }
+      eventsRef.current?.message?.(
+        msg,
+        "mutationId" in msg && typeof msg.mutationId === "string" && pendingSentMutationsRef.current.has(msg.mutationId),
+      );
       const outcome = reconcilerRef.current.applyServerMessage(msg);
       // Settle any acknowledged mutations (including late echoes)
       const ackedIds = new Set(outcome.ackedMutationIds);
@@ -399,7 +317,7 @@ export function useBoardSocket(
           clearTimeout(timer);
           pendingTimersRef.current.delete(id);
         }
-        clearPendingAttachmentDelete(id);
+        eventsRef.current?.resolved?.(id);
         notifyMutation(id, "accepted");
       }
       if (outcome.rolledBackMutationId) {
@@ -408,7 +326,7 @@ export function useBoardSocket(
           clearTimeout(timer);
           pendingTimersRef.current.delete(outcome.rolledBackMutationId);
         }
-        clearPendingAttachmentDelete(outcome.rolledBackMutationId);
+        eventsRef.current?.resolved?.(outcome.rolledBackMutationId);
       }
       if (outcome.cacheState) {
         queryClient.setQueryData<BoardState>(boardQueryKey(boardId), outcome.cacheState);
@@ -450,6 +368,7 @@ export function useBoardSocket(
         if (plan.mode === "denied") {
           setAccessState("denied");
           setHandshakeFailed(true);
+          eventsRef.current?.halted?.();
           clearBoardAccessCaches(queryClient, { boardId });
           return;
         }
@@ -471,6 +390,7 @@ export function useBoardSocket(
         if (plan.mode === "stopped" || plan.delayMs === null) {
           console.warn("board socket: stopped reconnecting after unsynchronized failures");
           setHandshakeFailed(true);
+          eventsRef.current?.halted?.();
           return;
         }
         retryTimer = window.setTimeout(() => {
@@ -497,7 +417,7 @@ export function useBoardSocket(
         ws.close();
       }
     };
-  }, [attemptEpoch, boardId, queryClient, rollback, clearPendingAttachmentDelete]);
+  }, [attemptEpoch, boardId, queryClient, rollback]);
 
   const sendMutation = useCallback<SendMutation>(
     (msg) => {
@@ -517,25 +437,7 @@ export function useBoardSocket(
       if (!outcome) {
         return false;
       }
-      if (msg.type === "attachment.delete") {
-        const attachment = current.attachments.find((attachment) => attachment.id === msg.id);
-        const ownerId = attachment?.cardId ?? knownAttachmentOwners.current.get(msg.id);
-        if (ownerId !== undefined) {
-          knownAttachmentOwners.current.set(msg.id, ownerId);
-          unresolvedAttachmentDeletes.current.set(msg.mutationId, {
-            attachmentId: msg.id,
-            ownerId,
-            descriptionBefore: current.cards.find((card) => card.id === ownerId)?.description,
-            descriptionAfter: outcome.cacheState.cards.find((card) => card.id === ownerId)?.description,
-          });
-          setPendingAttachmentDeletes((pending) => {
-            if (pending.get(msg.mutationId) === ownerId) return pending;
-            const next = new Map(pending);
-            next.set(msg.mutationId, ownerId);
-            return next;
-          });
-        }
-      }
+      eventsRef.current?.sent?.(msg, current, outcome.cacheState);
       pendingSentMutationsRef.current.set(msg.mutationId, msg);
       queryClient.setQueryData<BoardState>(boardQueryKey(boardId), outcome.cacheState);
       const timer = window.setTimeout(() => rollback(msg.mutationId), PENDING_TIMEOUT_MS);
@@ -552,9 +454,6 @@ export function useBoardSocket(
     handshakeFailed,
     retry,
     sendMutation,
-    confirmedAttachmentDeletes,
-    pendingAttachmentDeletes,
-    seedDescriptionDraft,
     subscribeMutation,
     retireTrackedMutation,
   };
