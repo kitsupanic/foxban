@@ -7,7 +7,6 @@ import {
   ChevronDown,
   File,
   GitBranch,
-  Network,
   MessageSquare,
   Link,
   Paperclip,
@@ -78,12 +77,12 @@ import { DescriptionEditor } from "./DescriptionEditor";
 import { MarkdownContent, MarkdownEditor } from "./MarkdownEditor";
 import { CardDevelopment } from "./CardDevelopment";
 import { CardChecklist } from "./CardChecklist";
+import { CardSubtasks } from "./CardSubtasks";
 import { cardDevelopmentQueryOptions, connectedReposQueryOptions, usePullRequestLink } from "../lib/card-development";
-import { SubtaskList } from "./SubtaskList";
-import { buildSubtaskNodes, directSubtaskCounts } from "../lib/subtask-nodes";
 import { TASK_TYPE_META } from "../lib/task-type";
 import { restoreFocusSoon } from "../lib/focus";
 import { useChecklist } from "../lib/checklist";
+import { useSubtaskComposer } from "../lib/subtask-composer";
 import { composerLane, useAuthoredOperation, useAuthoredScope, type AuthoredScope } from "../lib/authored-operation";
 import { usePickerMenuStyle } from "../lib/picker-menu";
 import "./card-detail.css";
@@ -372,75 +371,11 @@ export function CardModal({
     setSaveValidationError(null);
     if (saveLane.error !== null) saveOp.discard();
   };
-  // The subtask composer and the checklist conversion are authored operations (ADR 0069), one
-  // lineage each: the entity and relation ids are chosen at submit and survive retries, so a retry
-  // is the same creation rather than a second child. One `subtask.create` frame is the whole
-  // creation (child, parent link and, for conversion, the source item's removal), so settling one
-  // lane never speaks for the other. The conversion lane is single-slot: while it is pending or
-  // holds a recovery it is the whole lane's state, not just the source item's.
-  const [composingSubtask, setComposingSubtask] = useState(false);
-  const [subtaskDraft, setSubtaskDraft] = useState("");
-  // Only the "Checklist item is empty." refusal; a failed send is the operation's own error.
-  const [convertEmptyError, setConvertEmptyError] = useState<string | null>(null);
-  type SubtaskSent = { entityId: string; relationId: string; position: string; rawDraft: string };
-  type ConvertSent = SubtaskSent & { checklistItemId: string };
-  const subtaskCopy = (rejected: string, unverified: string) => ({
-    rejected,
-    unverified,
-    "not-connected": "Not connected — try again.",
-    "accepted-gone": rejected, // unreachable: no `confirm`
+  const subtasks = useSubtaskComposer(authoredScope, {
+    cardId: card.id,
+    isSubtask: card.taskType === "subtask",
+    placeTail: () => commands.placeNewCard(columns.find(c => c.starting)?.id ?? card.columnId),
   });
-  // The composer generation the running attempt is compared against, bumped by every submit and retry.
-  const subtaskAcceptGenRef = useRef(0);
-  const subtaskRetriedRef = useRef(false);
-  const convertRetriedRef = useRef(false);
-  const subtaskRecoveryErrorRef = useRef("");
-  const convertRecoveryErrorRef = useRef("");
-  const subtaskOp = useAuthoredOperation<SubtaskSent>(authoredScope, {
-    // The composer trims its draft; conversion sends the stored item text as is.
-    build: (mutationId, { entityId, relationId, position, rawDraft }): ClientMessage => ({
-      type: "subtask.create",
-      mutationId,
-      id: entityId,
-      parentCardId: cardRef.current.id,
-      relationId,
-      title: rawDraft.trim(),
-      position,
-    }),
-    // Acceptance is the only thing that clears the draft, and only while this lane's own
-    // submission is still what the field holds.
-    onAccepted: ({ rawDraft }) => {
-      if (subtaskGenerationRef.current === subtaskAcceptGenRef.current && subtaskDraftRef.current === rawDraft) {
-        setSubtaskDraft("");
-        setComposingSubtask(false);
-      }
-    },
-    copy: subtaskCopy("Server rejected the subtask.", "Sync could not verify the subtask. You can retry sending."),
-  });
-  // Conversion carries the item's EXACT stored text (a stored " Write docs " is legal, and the
-  // server compares it byte for byte) plus its id: the BoardDO re-reads the item inside the
-  // transaction and refuses only a real change.
-  const convertOp = useAuthoredOperation<ConvertSent>(authoredScope, {
-    build: (mutationId, { entityId, relationId, position, rawDraft, checklistItemId }): ClientMessage => ({
-      type: "subtask.create",
-      mutationId,
-      id: entityId,
-      parentCardId: cardRef.current.id,
-      relationId,
-      title: rawDraft,
-      position,
-      checklistItemId,
-    }),
-    copy: subtaskCopy("Server rejected the conversion.", "Sync could not verify the conversion. You can retry the same item."),
-  });
-  const subtaskLane = composerLane(subtaskOp, subtaskRetriedRef.current, subtaskRecoveryErrorRef);
-  const convertLane = composerLane(convertOp, convertRetriedRef.current, convertRecoveryErrorRef);
-  const { pendingId: pendingSubtaskId, uncertain: subtaskUncertain, error: subtaskError, recovery: subtaskRecovery } = subtaskLane;
-  const { uncertain: convertUncertain, error: convertOpError, recovery: convertRecovery } = convertLane;
-  const pendingConvertItemId = convertLane.pendingId === null ? null : convertOp.sent?.checklistItemId ?? null;
-  const convertError = convertEmptyError ?? convertOpError;
-  // Typing dismisses an inline error; a retained recovery stays until retried or discarded.
-  const clearSubtaskError = () => { if (subtaskError !== null) subtaskOp.discard(); };
   const description = useMemo(
     () => attachmentView.descriptionFor(card.id, descriptionDraft),
     [attachmentView, card.id, descriptionDraft],
@@ -551,19 +486,6 @@ export function CardModal({
   commentUncertainRef.current = commentUncertain;
   const replyUncertainRef = useRef(replyUncertain);
   replyUncertainRef.current = replyUncertain;
-  const composingSubtaskRef = useRef(composingSubtask);
-  composingSubtaskRef.current = composingSubtask;
-  const subtaskDraftRef = useRef(subtaskDraft);
-  subtaskDraftRef.current = subtaskDraft;
-  const pendingSubtaskIdRef = useRef(pendingSubtaskId);
-  pendingSubtaskIdRef.current = pendingSubtaskId;
-  const subtaskUncertainRef = useRef(subtaskUncertain);
-  subtaskUncertainRef.current = subtaskUncertain;
-  const subtaskRecoveryRef = useRef(subtaskRecovery);
-  subtaskRecoveryRef.current = subtaskRecovery;
-  const subtaskGenerationRef = useRef(0);
-  const convertRecoveryRef = useRef(convertRecovery);
-  convertRecoveryRef.current = convertRecovery;
   // Below `md` the card is a full-viewport surface over a board page that scrolls
   // the document. Fixing the body removes that overflow for as long as the card is
   // open — `overflow: hidden` alone still lets the page be scrolled
@@ -708,89 +630,15 @@ export function CardModal({
   const retype = (taskType: Exclude<TaskType, "subtask">) => {
     commands.retype(card.id, taskType);
   };
-  // Without a starting and a completed column (fewer than two columns) there is
-  // no completion to change.
-  const hasWorkflowRoles = columns.some(column => column.starting) && columns.some(column => column.completed);
   const changeColumn = (targetColumnId: string) => {
     if (targetColumnId === card.columnId) return;
     const trigger = document.activeElement?.closest('[role="dialog"]')?.querySelector<HTMLElement>('[aria-label="Status"]') ?? null;
     onRequestMove(card.id, targetColumnId, trigger);
   };
 
-  /** Completion is an ordinary instant mutation: optimistic, with board-reported errors. */
-  const completeSubtask = (cardId: string, done: boolean) => {
-    const target = columns.find(c => done ? c.completed : c.starting);
-    if (target) onRequestMove(cardId, target.id);
-  };
-
-
   // A cleared date input yields "", which maps to null — "no deadline".
   const schedule = (value: string) => {
     commands.schedule(card.id, value === "" ? null : value);
-  };
-
-  /** A new subtask's key in the column it lands in: the starting column, or this card's own on a board without roles. */
-  const subtaskTailPosition = (): string => commands.placeNewCard(columns.find(c => c.starting)?.id ?? card.columnId);
-
-  const addSubtask = () => {
-    const rawDraft = subtaskDraftRef.current;
-    if (rawDraft.trim() === "" || pendingSubtaskId !== null || subtaskUncertain || subtaskRecovery !== null) return;
-    subtaskRetriedRef.current = false;
-    subtaskAcceptGenRef.current = ++subtaskGenerationRef.current;
-    // Stable per submitted draft: this click's ids are the creation's identity.
-    subtaskOp.start({ entityId: crypto.randomUUID(), relationId: crypto.randomUUID(), position: subtaskTailPosition(), rawDraft });
-  };
-
-  const retrySubtask = () => {
-    if (!subtaskRecovery || pendingSubtaskId !== null || subtaskUncertain) return;
-    subtaskRetriedRef.current = true;
-    subtaskAcceptGenRef.current = ++subtaskGenerationRef.current;
-    subtaskOp.retry();
-  };
-
-  const cancelSubtaskComposer = (force = false) => {
-    if (
-      !force &&
-      (pendingSubtaskIdRef.current !== null ||
-        subtaskUncertainRef.current ||
-        subtaskRecoveryRef.current !== null)
-    ) {
-      return;
-    }
-    ++subtaskGenerationRef.current;
-    setSubtaskDraft("");
-    subtaskOp.discard();
-    setComposingSubtask(false);
-  };
-
-  // The conversion lane is single-slot: one pending write or one retained
-  // recovery owns every Convert action until it settles or is discarded, so no
-  // second conversion can start beside it and mint fresh ids behind its back.
-  const convertLaneBusy =
-    pendingConvertItemId !== null || convertUncertain || convertRecovery !== null;
-
-  const convertItem = (item: ChecklistItem) => {
-    if (cardRef.current.taskType === "subtask" || convertLaneBusy) return;
-    if (item.text.trim() === "") {
-      setConvertEmptyError("Checklist item is empty.");
-      return;
-    }
-    setConvertEmptyError(null);
-    convertRetriedRef.current = false;
-    convertOp.start({
-      entityId: crypto.randomUUID(),
-      relationId: crypto.randomUUID(),
-      position: subtaskTailPosition(),
-      rawDraft: item.text,
-      checklistItemId: item.id,
-    });
-  };
-
-  /** Retries the same conversion with its retained ids, so it cannot duplicate. */
-  const retryConvert = () => {
-    if (cardRef.current.taskType === "subtask" || !convertRecovery || pendingConvertItemId !== null || convertUncertain) return;
-    convertRetriedRef.current = true;
-    convertOp.retry();
   };
 
   // The picked card arrives straight from the autocomplete — no confirm button.
@@ -1002,11 +850,7 @@ export function CardModal({
     // A pull request draft, or a link request still in flight, is work Save does
     // not own: the card stays open so it is not thrown away by closing.
     pullRequestWorkRef.current ||
-    // Save never commits an open subtask composer, so an unaccepted child
-    // being written (or a conversion landing) must not close the card either.
-    (composingSubtaskRef.current && subtaskDraftRef.current.trim() !== "") ||
-    subtaskRecoveryRef.current !== null ||
-    convertRecoveryRef.current !== null;
+    subtasks.current().keepsCardOpen;
   const save = () => {
     if (attachmentDeletePendingRef.current || descriptionUploadingRef.current || pendingSaveId !== null || saveUncertain || saveRecoveryRef.current !== null) return;
     if (descriptionByteLength(description) > DESCRIPTION_MAX_BYTES) {
@@ -1170,17 +1014,7 @@ export function CardModal({
     saveRecovery !== null ||
     (composingComment && (commentDraft.trim() !== "" || commentUploading)) ||
     (replyingCommentId !== null && (replyDraft.trim() !== "" || replyUploading)) ||
-    // The subtask composer is authored work too: a typed title is a draft, and a
-    // submitted one is a write still to be verified.
-    (composingSubtask && subtaskDraft.trim() !== "") ||
-    pendingSubtaskId !== null ||
-    subtaskUncertain ||
-    subtaskRecovery !== null ||
-    // A conversion in flight is authored work too: closing before it settles
-    // would drop its recovery and retire its ownership behind the user's back.
-    pendingConvertItemId !== null ||
-    convertUncertain ||
-    convertRecovery !== null;
+    subtasks.hasWork;
   // The pull request link is unsaved work too — it just belongs to Link pull
   // request, not Save — so closing is guarded the same way.
   const dirty = draftingDirty || pullRequestLink.hasWork;
@@ -1328,19 +1162,16 @@ export function CardModal({
         // collapse an empty composer. Pending or uncertain work is never erased
         // here — it falls through to the guarded close below.
         if (pullRequestLink.handleEscape()) return;
-        if (
-          composingSubtaskRef.current &&
-          pendingSubtaskIdRef.current === null &&
-          !subtaskUncertainRef.current
-        ) {
+        const { composing, draft, composer } = subtasks.current();
+        if (composing && !composer.pending) {
           // An idle empty composer just collapses; a typed title goes through the
           // same discard strip as every other draft, and a submitted one is left
           // strictly alone until it settles.
-          if (subtaskDraftRef.current.trim() === "") {
-            cancelSubtaskComposer();
+          if (draft.trim() === "") {
+            subtasks.cancel();
             return;
           }
-          requestClose(() => cancelSubtaskComposer(true));
+          requestClose(() => subtasks.cancel(true));
           return;
         }
         requestClose(onClose);
@@ -1397,6 +1228,8 @@ export function CardModal({
     pendingClose,
     dirty,
     pullRequestLink.handleEscape,
+    subtasks.current,
+    subtasks.cancel,
     onClose,
   ]);
 
@@ -1477,28 +1310,6 @@ export function CardModal({
   const pressedBackdrop = useRef(false);
 
   const views = relationViews(relations, card.id);
-  // The guarded forest decides whether this card is a subtask at all: a stored
-  // child with two parents (or inside a cycle) is a root here, exactly as the
-  // board and the server read it.
-  const effectiveParentId = hierarchy.parentByChild.get(card.id);
-  const parentLink =
-    effectiveParentId === undefined
-      ? undefined
-      : relations.find(
-          (relation) =>
-            relation.kind === "subtask" &&
-            relation.targetCardId === card.id &&
-            relation.sourceCardId === effectiveParentId,
-        );
-  /** The card's direct children, with the link each row can unlink. */
-  const childNodes = buildSubtaskNodes({ cards, relations }, hierarchy, card.id, {
-    directOnly: true,
-  });
-  const subtaskCounts = directSubtaskCounts(cards, hierarchy, card.id);
-  const subtaskPercent =
-    subtaskCounts.total > 0
-      ? Math.round((subtaskCounts.done / subtaskCounts.total) * 100)
-      : 0;
   const matches = relationCardMatches(cards, card.id, boardKey ?? "", relationQuery);
   // The picker lists the whole board, name-sorted; the pills above it are
   // already sorted the same way by `cardLabelViews`.
@@ -1959,223 +1770,28 @@ export function CardModal({
       taskType={card.taskType}
       commands={commands}
       conversion={{
-        busy: convertLaneBusy,
-        convert: convertItem,
-        error: convertError,
-        recovery: convertRecovery,
-        pendingItemId: pendingConvertItemId,
-        uncertain: convertUncertain,
-        retry: retryConvert,
-        discard: convertOp.discard,
+        ...subtasks.conversion,
+        convert: subtasks.convert,
+        retry: subtasks.retryConversion,
+        discard: subtasks.discardConversion,
       }}
     />
   );
   const subtasksSection = (
-    // Also a `div`, for the same reason as the checklist above. The section is
-    // always present: `Add subtask` is the only place a child can be created
-    // directly, so it cannot be hidden behind already having one.
-    <div data-testid="card-subtasks-section" data-empty={subtaskCounts.total === 0 && parentLink === undefined && !composingSubtask} className="card-subtasks-section flex flex-col gap-2 py-4 first:pt-0 last:pb-0">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="card-section-title text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          <Network aria-hidden="true" className="card-section-icon" />Subtasks
-        </h3>
-        {subtaskCounts.total > 0 && (
-          <span className="text-xs text-muted-foreground">
-            {subtaskCounts.done} of {subtaskCounts.total} done
-          </span>
-        )}
-      </div>
-      {parentLink !== undefined && (
-        <div className="group flex items-center gap-2 text-sm text-foreground">
-          <button
-            type="button"
-            aria-label={`Open parent ${cardTitle(cards, parentLink.sourceCardId)}`}
-            onClick={() => navigate(parentLink.sourceCardId)}
-            className="min-w-0 flex-1 truncate text-left hover:underline"
-          >
-            <span className="text-muted-foreground">Subtask of</span>{" "}
-            <span className="font-medium text-foreground">{cardTitle(cards, parentLink.sourceCardId)}</span>
-          </button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label={`Remove parent link ${cardTitle(cards, parentLink.sourceCardId)}`}
-            onClick={() => commands.deleteRelation(parentLink.id)}
-            className="opacity-0 pointer-coarse:opacity-100 size-7 pointer-coarse:size-11 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 text-muted-foreground hover:text-destructive"
-          >
-            <X aria-hidden className="size-3.5" />
-          </Button>
-        </div>
-      )}
-      {subtaskCounts.total > 0 && (
-        <div
-          role="progressbar"
-          aria-label="Subtask progress"
-          aria-valuemin={0}
-          aria-valuemax={subtaskCounts.total}
-          aria-valuenow={subtaskCounts.done}
-          className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-        >
-          <div
-            className="h-full bg-success transition-[width] duration-200"
-            style={{ width: `${subtaskPercent}%` }}
-          />
-        </div>
-      )}
-      {childNodes.length > 0 && (
-        <SubtaskList
-          nodes={childNodes}
-          boardKey={boardKey}
-          actions={{
-            onOpen: navigate,
-            onComplete: hasWorkflowRoles ? completeSubtask : undefined,
-            onUnlink: (relationId: string) => commands.deleteRelation(relationId),
-          }}
-          // The child's own status, as plain text.
-          statusLabel={(child: Card) =>
-            columns.find((column) => column.id === child.columnId)?.title
-          }
-        />
-      )}
-      {card.taskType !== "subtask" && (
-        composingSubtask ? (
-        <form
-          className="flex flex-col gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            addSubtask();
-          }}
-        >
-          <Input
-            autoFocus
-            aria-label="Subtask title"
-            maxLength={200}
-            placeholder="Subtask title…"
-            value={subtaskDraft}
-            readOnly={pendingSubtaskId !== null || subtaskUncertain}
-            onChange={(event) => {
-              // A submitted draft is held read-only until it settles; the title
-              // the server received must not drift while it is in flight.
-              if (pendingSubtaskId !== null || subtaskUncertain) return;
-              setSubtaskDraft(event.target.value);
-              clearSubtaskError();
-              cancelPendingClose();
-            }}
-            onKeyDown={(event) => {
-              // The modal's Escape listener sits on `window`; stopping here keeps
-              // a cancelled composer from also closing the card.
-              if (event.key === "Escape") {
-                event.preventDefault();
-                event.stopPropagation();
-                if (subtaskDraft.trim() === "" && pendingSubtaskId === null && !subtaskUncertain) {
-                  cancelSubtaskComposer();
-                } else if (pendingSubtaskId === null && !subtaskUncertain) {
-                  requestClose(() => cancelSubtaskComposer(true));
-                }
-                return;
-              }
-              if (event.key === "Enter") {
-                event.preventDefault();
-                addSubtask();
-              }
-            }}
-            className="h-8 bg-background text-base sm:text-sm"
-          />
-          <div className="flex gap-2">
-            <Button
-              type="submit"
-              variant="default"
-              size="sm"
-              disabled={
-                subtaskDraft.trim() === "" ||
-                pendingSubtaskId !== null ||
-                subtaskUncertain ||
-                subtaskRecovery !== null
-              }
-              className="pointer-coarse:min-h-11 pointer-coarse:px-4"
-            >
-              {pendingSubtaskId !== null ? "Adding…" : "Add"}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={pendingSubtaskId !== null}
-              onClick={() => cancelSubtaskComposer()}
-              className="text-muted-foreground hover:text-foreground pointer-coarse:min-h-11 pointer-coarse:px-4"
-            >
-              Cancel
-            </Button>
-          </div>
-        </form>
-      ) : (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={subtaskRecovery !== null}
-          onClick={() => setComposingSubtask(true)}
-          className="card-subtask-add self-start border-border text-foreground hover:bg-accent pointer-coarse:min-h-11 pointer-coarse:px-4"
-        >
-          <Plus aria-hidden="true" className="size-4" />Add subtask
-        </Button>
-        )
-      )}
-      {subtaskRecovery !== null && (
-        <div
-          role="alert"
-          className="flex flex-col gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-xs text-destructive"
-        >
-          <div className="flex items-center justify-between gap-2 font-medium">
-            <span>{subtaskRecovery.error}</span>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="xs"
-                onClick={retrySubtask}
-                disabled={pendingSubtaskId !== null || subtaskUncertain}
-                className="h-6 px-2 text-xs font-semibold text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-              >
-                {pendingSubtaskId !== null ? "Retrying…" : "Retry unsent subtask"}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                disabled={pendingSubtaskId !== null || subtaskUncertain}
-                onClick={() => {
-                  if (pendingSubtaskId !== null || subtaskUncertain) return;
-                  subtaskOp.discard();
-                }}
-                className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:px-3"
-              >
-                Discard unsent subtask
-              </Button>
-            </div>
-          </div>
-          <div className="rounded border border-border/50 bg-background/50 p-2 font-mono text-[11px] whitespace-pre-wrap break-words text-foreground">
-            <span className="font-semibold text-muted-foreground">Unsent subtask: </span>
-            {subtaskRecovery.rawDraft}
-          </div>
-        </div>
-      )}
-      {subtaskError !== null && (
-        <div role="alert" className="flex items-center justify-between gap-2 text-xs text-destructive">
-          <span>{subtaskError}</span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            onClick={addSubtask}
-            className="h-6 px-2 text-xs text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-          >
-            Retry
-          </Button>
-        </div>
-      )}
-    </div>
+    <CardSubtasks
+      subtasks={subtasks}
+      card={card}
+      relations={relations}
+      hierarchy={hierarchy}
+      cards={cards}
+      columns={columns}
+      boardKey={boardKey}
+      commands={commands}
+      navigate={navigate}
+      onRequestMove={onRequestMove}
+      requestClose={requestClose}
+      cancelPendingClose={cancelPendingClose}
+    />
   );
   // Keep secondary forms mounted so collapsing never drops their drafts.
   const relationsSection = (
