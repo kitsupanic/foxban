@@ -14,7 +14,6 @@ import {
   REALTIME_PROTOCOL_VERSION,
   LabelColorSchema,
   Title,
-  familyCompletionRows,
   buildSubtaskHierarchy,
   descriptionByteLength,
   removeAttachmentReferences,
@@ -53,6 +52,16 @@ import {
   INTERNAL_USER_ID_HEADER,
 } from "./internal-headers";
 import { activityDrafts, insertActivities, readActivities } from "./activity";
+import {
+  checkFinish,
+  checkSubtaskLink,
+  checkSubtaskParent,
+  completionFor,
+  isCompleted,
+  loadFamily,
+  placementFor,
+  roleColumn,
+} from "./subtask-family";
 import {
   MutationRefusal,
   checkCardWritable,
@@ -903,49 +912,6 @@ type MutationRequest =
     };
 
 const NO_LIFECYCLE_CHANGES: ApplyResult = { archivedCards: [], purgedCardIds: [] };
-
-/** The column holding a workflow role, or undefined while the board has none (fewer than two columns). */
-function roleColumn(sql: SqlStorage, role: "starting" | "completed"): string | undefined {
-  return sql.exec<{ id: string }>(`SELECT id FROM columns WHERE ${role} = 1 LIMIT 1`).toArray()[0]?.id;
-}
-function completedColumn(sql: SqlStorage, columnId: string): boolean {
-  return sql.exec<{ completed: number }>("SELECT completed FROM columns WHERE id = ?", columnId).toArray()[0]?.completed === 1;
-}
-
-/**
- * Active cards plus every stored relation, resolved by the shared forest rules;
- * the same resolver runs in the web reducer, so both sides agree on who parents whom.
- */
-function activeHierarchyOf(sql: SqlStorage): SubtaskHierarchy {
-  const cards = sql
-    .exec<Pick<Card, "id" | "columnId" | "position">>(
-      "SELECT id, column_id AS columnId, position FROM cards WHERE archived_at IS NULL",
-    )
-    .toArray();
-  const relations = sql
-    .exec<CardRelation>(
-      `SELECT id, source_card_id AS sourceCardId, target_card_id AS targetCardId, kind
-         FROM card_relations`,
-    )
-    .toArray();
-  return buildSubtaskHierarchy(cards, relations);
-}
-
-/** Retained family links for MCP context include archived cards as well as active cards. */
-function familyHierarchyOf(sql: SqlStorage): SubtaskHierarchy {
-  const cards = sql
-    .exec<Pick<Card, "id" | "columnId" | "position">>(
-      "SELECT id, column_id AS columnId, position FROM cards",
-    )
-    .toArray();
-  const relations = sql
-    .exec<CardRelation>(
-      `SELECT id, source_card_id AS sourceCardId, target_card_id AS targetCardId, kind
-         FROM card_relations`,
-    )
-    .toArray();
-  return buildSubtaskHierarchy(cards, relations);
-}
 
 /**
  * SQLite has no boolean type: `subtask_done` reads back as 0/1 exactly like
@@ -2047,7 +2013,7 @@ export class BoardDO extends DurableObject<Env> {
           if (!cardRow) {
             return { status: 404, error: "not found" } as const;
           }
-          const card: Card = { ...cardRow, subtaskDone: completedColumn(sql, cardRow.columnId) };
+          const card: Card = { ...cardRow, subtaskDone: isCompleted(sql, cardRow.columnId) };
 
           const relationRow = sql
             .exec<{ id: string }>(
@@ -3450,7 +3416,7 @@ export class BoardDO extends DurableObject<Env> {
       taskType: row.taskType,
       assigneeId: row.assigneeId,
       dueDate: row.dueDate,
-      subtaskDone: row.archivedAt === null ? completedColumn(sql, row.columnId) : row.subtaskDone === 1,
+      subtaskDone: row.archivedAt === null ? isCompleted(sql, row.columnId) : row.subtaskDone === 1,
       position: row.position,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -3488,7 +3454,7 @@ export class BoardDO extends DurableObject<Env> {
     return TaskSummarySchema.parse({
       id: row.id, boardId: board.id, taskNumber: row.taskNumber, key, url: url.toString(),
       title: row.title, priority: row.priority, taskType: row.taskType,
-      assigneeId: row.assigneeId, dueDate: row.dueDate, subtaskDone: row.archivedAt === null ? completedColumn(sql, row.columnId) : row.subtaskDone === 1,
+      assigneeId: row.assigneeId, dueDate: row.dueDate, subtaskDone: row.archivedAt === null ? isCompleted(sql, row.columnId) : row.subtaskDone === 1,
       position: row.position, createdAt: row.createdAt, updatedAt: row.updatedAt,
       storedColumnId: row.columnId, effectiveColumnId: row.columnId, archivedAt: row.archivedAt,
       archivedColumnTitle: row.archivedColumnTitle,
@@ -3619,7 +3585,7 @@ export class BoardDO extends DurableObject<Env> {
     const task = this.taskRecord(cardId, input.board);
     if (task === null) throw new MutationRefusal("task_not_found", "Task not found.");
     const sql = this.ctx.storage.sql;
-    const hierarchy = familyHierarchyOf(sql);
+    const hierarchy = loadFamily(sql, "retained");
     const parentId = hierarchy.parentByChild.get(cardId);
     const parent = parentId ? this.taskRecord(parentId, input.board) : null;
     const parentSummary = parent === null ? null : (({ description: _description, column: _column, ...summary }) => summary)(parent);
@@ -3942,13 +3908,7 @@ export class BoardDO extends DurableObject<Env> {
           break;
         case "complete_subtask": {
           checkCardWritable(sql, targetId!);
-          // Completion is the child's own column and it needs a live parent: a root
-          // has no subtask state to show, and an archived parent leaves the link inactive.
-          if (!activeHierarchyOf(sql).parentByChild.has(targetId!)) {
-            throw new MutationRefusal("subtask_unavailable", "Subtask is unavailable.");
-          }
-          const destination = roleColumn(sql, request.command.done ? "completed" : "starting");
-          if (destination === undefined) throw new MutationRefusal("column_not_found", "The board has no starting and completed columns yet.");
+          const destination = completionFor(sql, targetId!, request.command.done);
           message = ClientMessageSchema.parse({ type: "card.move", mutationId, id: targetId, columnId: destination, position: this.positionForMcpMove(targetId, destination, undefined, request.board) });
           break;
         }
@@ -4343,17 +4303,7 @@ export class BoardDO extends DurableObject<Env> {
 
     switch (message.type) {
       case "card.finish": {
-        if (!completedColumn(sql, message.columnId)) throw new Error("Completed status changed. Review the move again.");
-        const cards = sql.exec<Pick<Card, "id" | "columnId" | "position">>("SELECT id, column_id AS columnId, position FROM cards WHERE archived_at IS NULL").toArray();
-        const parent = cards.find(card => card.id === message.id);
-        if (!parent || parent.columnId !== message.expectedParentColumnId || parent.position !== message.expectedParentPosition) throw new Error("Parent changed. Review the move again.");
-        const relations = sql.exec<CardRelation>("SELECT id, source_card_id AS sourceCardId, target_card_id AS targetCardId, kind FROM card_relations").toArray();
-        const family = familyCompletionRows(cards, relations, message.id);
-        if (JSON.stringify(family) !== JSON.stringify([...message.expectedFamily].sort((a,b) => a.id.localeCompare(b.id)))) throw new Error("Subtasks changed. Review the completion choices again.");
-        const open = family.filter(card => !completedColumn(sql, card.columnId));
-        const childIds = message.children.map(card => card.id).sort();
-        const expected = message.scope === "family" ? open.map(card => card.id).sort() : [];
-        if (new Set(childIds).size !== childIds.length || JSON.stringify(childIds) !== JSON.stringify(expected)) throw new Error("Review every unfinished subtask before finishing the family.");
+        checkFinish(sql, message);
         // executeMutation owns the surrounding SQLite transaction: no partial
         // family movement, activity insertion, or broadcast can escape a refusal.
         for (const move of [{ id: message.id, position: message.position }, ...message.children]) {
@@ -4403,7 +4353,7 @@ export class BoardDO extends DurableObject<Env> {
 
         // Archived completion is frozen as history, so the derived value is
         // stored before the cards leave with their column.
-        sql.exec("UPDATE cards SET subtask_done = ? WHERE column_id = ? AND archived_at IS NULL", completedColumn(sql, message.id) ? 1 : 0, message.id);
+        sql.exec("UPDATE cards SET subtask_done = ? WHERE column_id = ? AND archived_at IS NULL", isCompleted(sql, message.id) ? 1 : 0, message.id);
         sql.exec(
           `UPDATE cards
               SET archived_at = ?, archived_column_title = ?
@@ -4427,7 +4377,7 @@ export class BoardDO extends DurableObject<Env> {
             now,
           )
           .toArray()
-          .map((row) => ({ ...row, subtaskDone: completedColumn(sql, row.columnId) }));
+          .map((row) => ({ ...row, subtaskDone: isCompleted(sql, row.columnId) }));
 
         sql.exec("DELETE FROM columns WHERE id = ?", message.id);
         syncAutoRoles(sql);
@@ -4544,7 +4494,7 @@ export class BoardDO extends DurableObject<Env> {
           .toArray()[0];
         sql.exec(
           "UPDATE cards SET subtask_done = ?, archived_at = ?, archived_column_title = ? WHERE id = ?",
-          completedColumn(sql, target.columnId) ? 1 : 0,
+          isCompleted(sql, target.columnId) ? 1 : 0,
           now,
           column?.title ?? "(deleted column)",
           message.id,
@@ -4786,18 +4736,7 @@ export class BoardDO extends DurableObject<Env> {
         return NO_LIFECYCLE_CHANGES;
       }
       case "subtask.create": {
-        const parent = sql
-          .exec<{ archivedAt: number | null; taskType: Card["taskType"] }>(
-            "SELECT archived_at AS archivedAt, task_type AS taskType FROM cards WHERE id = ?",
-            message.parentCardId,
-          )
-          .toArray()[0];
-        if (!parent || parent.archivedAt !== null) {
-          throw new Error("Parent task is unavailable.");
-        }
-        if (parent.taskType === "subtask") {
-          throw new Error("Subtasks cannot have subtasks.");
-        }
+        checkSubtaskParent(sql, message.parentCardId);
 
         const existingChild = sql
           .exec<{ taskNumber: number; title: string }>(
@@ -4865,12 +4804,7 @@ export class BoardDO extends DurableObject<Env> {
           subtaskDone = item.done === 1;
         }
 
-        // The child never takes a column from the client. It starts in the starting
-        // column, or in the completed one when a done checklist item became it; a
-        // board without roles has no such column, so it joins its parent's.
-        const columnId =
-          roleColumn(sql, subtaskDone ? "completed" : "starting") ??
-          sql.exec<{ columnId: string }>("SELECT column_id AS columnId FROM cards WHERE id = ?", message.parentCardId).toArray()[0]!.columnId;
+        const columnId = placementFor(sql, message.parentCardId, subtaskDone);
         const taskNumber = this.insertCard(
           sql,
           {
@@ -4896,69 +4830,7 @@ export class BoardDO extends DurableObject<Env> {
       }
       case "relation.create": {
         if (message.kind === "subtask") {
-          // Boards written before this validation can hold anything; new subtask
-          // links may not. Endpoints must be live cards, the child may claim only
-          // one parent — including a retained link to an archived one — the pair
-          // cannot repeat, and walking up from the new parent must never reach
-          // the child. Every structural refusal is the same error, so the client
-          // reads it as "this link is impossible", not as a specific guess.
-          const endpoints = sql
-            .exec<{ id: string; archivedAt: number | null; taskType: Card["taskType"] }>(
-              `SELECT id, archived_at AS archivedAt, task_type AS taskType
-                 FROM cards WHERE id IN (?, ?)`,
-              message.sourceCardId,
-              message.targetCardId,
-            )
-            .toArray();
-          const source = endpoints.find((row) => row.id === message.sourceCardId);
-          const target = endpoints.find((row) => row.id === message.targetCardId);
-          const stored = sql
-            .exec<{ sourceCardId: string; targetCardId: string }>(
-              `SELECT source_card_id AS sourceCardId, target_card_id AS targetCardId
-                 FROM card_relations
-                WHERE kind = 'subtask'`,
-            )
-            .toArray();
-          // Reachability across EVERY stored parent edge: a legacy board may hold
-          // several edges into the same child, and keeping only one of them would
-          // accept a cycle that runs through a discarded edge. The visited set keeps
-          // a malformed cycle from spinning the walk.
-          const parentsByChild = new Map<string, string[]>();
-          for (const row of stored) {
-            const parents = parentsByChild.get(row.targetCardId) ?? [];
-            parents.push(row.sourceCardId);
-            parentsByChild.set(row.targetCardId, parents);
-          }
-          const visited = new Set<string>();
-          const pending = [message.sourceCardId];
-          let reachesChild = false;
-          while (pending.length > 0) {
-            const node = pending.pop()!;
-            if (node === message.targetCardId) {
-              reachesChild = true;
-              break;
-            }
-            if (visited.has(node)) continue;
-            visited.add(node);
-            for (const parent of parentsByChild.get(node) ?? []) pending.push(parent);
-          }
-
-          const invalid =
-            !source ||
-            !target ||
-            source.archivedAt !== null ||
-            target.archivedAt !== null ||
-            source.taskType === "subtask" ||
-            stored.some((row) => row.sourceCardId === message.targetCardId) ||
-            message.sourceCardId === message.targetCardId ||
-            stored.some(
-              (row) =>
-                row.targetCardId === message.targetCardId ||
-                (row.sourceCardId === message.sourceCardId &&
-                  row.targetCardId === message.targetCardId),
-            ) ||
-            reachesChild;
-          if (invalid) throw new Error("Invalid subtask hierarchy.");
+          checkSubtaskLink(sql, message.sourceCardId, message.targetCardId);
         }
         sql.exec(
           "INSERT INTO card_relations(id, source_card_id, target_card_id, kind) VALUES (?, ?, ?, ?)",
@@ -5041,7 +4913,7 @@ export class BoardDO extends DurableObject<Env> {
            WHERE archived_at IS NULL`,
         )
         .toArray()
-        .map((row) => ({ ...row, subtaskDone: completedColumn(sql, row.columnId) })),
+        .map((row) => ({ ...row, subtaskDone: isCompleted(sql, row.columnId) })),
       archivedCards: sql
         .exec<ArchivedCardRow>(
           `SELECT id, column_id AS columnId, title, description, position,
