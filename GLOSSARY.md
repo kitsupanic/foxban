@@ -103,3 +103,13 @@ _Avoid_: Copy, migrate
 **Card transfer coordinator**:
 The one module (`apps/api/src/card-transfer.ts`) that runs a card transfer step by step and settles a stuck one. It talks to the two boards as the source and the destination participant.
 _Avoid_: Saga route, recovery
+
+## Inside the Worker
+
+**BoardClient**:
+The Worker's one way to call a board's Durable Object (`boardClient(env, boardId)` in `apps/api/src/board-client.ts`). Each method is one internal route: it builds the request from the route table and hands back the decoded answer. Nothing else builds a request to a board.
+_Avoid_: Board stub, board fetch, DO client
+
+**Gate class**:
+What a board's internal route owes before its handler runs: `fence`, `settlement`, `cleanup`, `open` or `protected`. The class decides whether a deleted board or one whose access is changing still answers, and whether the caller must be a member. Each route in `apps/api/src/board-api.ts` names its class once, and the board's dispatcher enforces it.
+_Avoid_: Guard, middleware, route type
