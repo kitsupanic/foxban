@@ -63,7 +63,7 @@ import {
   removeInstanceGitHubApp,
 } from "./github-app";
 import { drainBackfill } from "./github-backfill";
-import { changeCardLink, readBoardDevelopment, readCardDevelopment, readPullRequest } from "./github-development";
+import { readCardDevelopment, readPullRequest } from "./github-development";
 import { findConnectedRepo, listConnectedRepos, refreshConnectedRepos } from "./github-repos";
 import { handleGitHubWebhook } from "./github-webhook";
 import {
@@ -73,22 +73,10 @@ import {
   userAvatarObjectKey,
   parseAvatarObjectKey,
 } from "./attachment-lifecycle";
-import {
-  INTERNAL_BOARD_ID_HEADER,
-  INTERNAL_CAN_MANAGE_COLUMNS_HEADER,
-  INTERNAL_TIMEZONE_HEADER,
-  INTERNAL_USER_ID_HEADER,
-  boardFetch,
-} from "./internal-headers";
+import { INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
+import { boardClient } from "./board-client";
 import { boardDestination, boardSource, run as runCardTransfer } from "./card-transfer";
-import {
-  CARD_TRANSFER_OPTIONS_PATH,
-  RECONCILE_ATTACHMENTS_PATH,
-  STAGE_ATTACHMENT_PATH,
-  WriteBackCardSchema,
-  routePath,
-  type WriteBackCard,
-} from "./board-api";
+import type { WriteBackCard } from "./board-api";
 import {
   createBranchRef,
   createInstallationToken,
@@ -314,20 +302,12 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
 
     const failures: string[] = [];
     for (const [boardId, items] of attachmentItemsByBoard) {
-      const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(boardId));
-      const response = await stub.fetch(`https://board.internal${RECONCILE_ATTACHMENTS_PATH}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          [INTERNAL_BOARD_ID_HEADER]: boardId,
-        },
-        body: JSON.stringify({
-          keys: items.map((i) => i.key),
-          ids: items.map((i) => i.attachmentId),
-          objects: items,
-        }),
+      const queued = await boardClient(env, boardId).reconcileAttachments({
+        keys: items.map((i) => i.key),
+        ids: items.map((i) => i.attachmentId),
+        objects: items,
       });
-      if (!response.ok) failures.push(boardId);
+      if (!queued) failures.push(boardId);
     }
     if (failures.length > 0) {
       throw new Error(`attachment reconciliation failed for boards: ${failures.join(", ")}`);
@@ -404,19 +384,6 @@ function classifyPullRequestFailure(err: unknown): {
 }
 
 /**
- * The active card a write-back route acts on (its id, title and task number), from the
- * BoardDO and parsed at the boundary. `null` means the card is missing or archived;
- * `"unreadable"` means the DO could not answer.
- */
-async function readWriteBackCard(env: Env, boardId: string, cardId: string): Promise<WriteBackCard | null | "unreadable"> {
-  const response = await boardFetch(env, boardId, routePath("writeBack", { cardId }));
-  if (response.status === 404) return null;
-  if (!response.ok) return "unreadable";
-  const parsed = WriteBackCardSchema.safeParse(await response.json().catch(() => null));
-  return parsed.success ? parsed.data : "unreadable";
-}
-
-/**
  * The temporary-pending answer a protected metadata read gives while a reserved
  * access change holds the board: preparation or recovery is still running, so the
  * caller retries instead of reading a fresh timestamp as a released boundary — and
@@ -436,7 +403,7 @@ function accessPendingResponse() {
  */
 async function checkGitHubWrite(c: Context<AppEnv>, cardContext: WriteBackCard, repository: ConnectedRepository) {
   const board = c.get("board");
-  const currentCard = await readWriteBackCard(c.env, board.id, cardContext.id);
+  const currentCard = await boardClient(c.env, board.id).writeBackCard(cardContext.id);
   const currentBoard = await findAccessibleBoard(c.env, c.get("user"), board.id);
   if (!currentBoard) return c.json({ error: "forbidden" } as const, 403);
   if (currentBoard.pendingAccessChange) {
@@ -475,7 +442,7 @@ async function prepareInstanceWrite(c: Context<AppEnv>, cardId: string, reposito
   if (!app) return { refusal: c.json({ error: "GitHub App integration is not configured" } as const, 503) };
   const connected = await findConnectedRepo(c.env, { id: repositoryId });
   if (!connected) return { refusal: c.json({ error: "that repository is not connected" } as const, 409) };
-  const cardContext = await readWriteBackCard(c.env, c.get("board").id, cardId);
+  const cardContext = await boardClient(c.env, c.get("board").id).writeBackCard(cardId);
   if (cardContext === null) return { refusal: c.json({ error: "card not found or archived" } as const, 404) };
   if (cardContext === "unreadable") return { refusal: c.json({ error: "could not read card context" } as const, 500) };
   const [owner = "", name = ""] = connected.fullName.split("/");
@@ -1461,22 +1428,13 @@ const app = new Hono<AppEnv>()
     const boardId = c.get("board").id;
     const objectKey = attachmentObjectKey(boardId, id);
     const user = c.get("user");
-    const stub = c.env.BOARD_DO.get(c.env.BOARD_DO.idFromName(boardId));
     // The DO records a provisional lease before R2 receives bytes. A tab that
     // closes before `attachment.create` therefore leaves a collectable object,
     // never an untracked one. The caller's identity travels with the staging call:
     // this request may have been buffering for a while, so the DO re-resolves the
     // uploader's current access instead of trusting the middleware's earlier read.
-    const staged = await stub.fetch(`https://board.internal${STAGE_ATTACHMENT_PATH}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        [INTERNAL_BOARD_ID_HEADER]: boardId,
-        [INTERNAL_USER_ID_HEADER]: user.id,
-      },
-      body: JSON.stringify({ id }),
-    });
-    if (!staged.ok) return c.json({ error: "could not prepare attachment" } as const, 500);
+    const staged = await boardClient(c.env, boardId).stageAttachment(user.id, { id });
+    if (!staged) return c.json({ error: "could not prepare attachment" } as const, 500);
 
     // The `boardId/` prefix binds the object to this board: the serve route
     // rebuilds the key from its own validated board, so a member of board A can
@@ -1492,14 +1450,7 @@ const app = new Hono<AppEnv>()
     const boardId = c.get("board").id;
     let resolvedKey: string | null = null;
     try {
-      const stub = c.env.BOARD_DO.get(c.env.BOARD_DO.idFromName(boardId));
-      const res = await stub.fetch(`https://board.internal/internal/attachments/key/${key}`, {
-        headers: { [INTERNAL_BOARD_ID_HEADER]: boardId },
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { objectKey?: string };
-        if (data.objectKey) resolvedKey = data.objectKey;
-      }
+      resolvedKey = await boardClient(c.env, boardId).attachmentKey(key);
     } catch {
       // Fall back to default key if BoardDO lookup fails
     }
@@ -1539,22 +1490,11 @@ const app = new Hono<AppEnv>()
     try {
       const boardsWithOptions = await Promise.all(
         destinationBoards.map(async (board) => {
-          const stub = c.env.BOARD_DO.get(c.env.BOARD_DO.idFromName(board.id));
-          const res = await stub.fetch(`https://board.internal${CARD_TRANSFER_OPTIONS_PATH}`, {
-            method: "POST",
-            headers: {
-              [INTERNAL_BOARD_ID_HEADER]: board.id,
-            },
-          });
-          if (!res.ok) {
-            throw new Error(`Failed to fetch options for board ${board.id}`);
-          }
-          const data = (await res.json()) as { columns: Array<{ id: string; title: string; position: string }> };
           return {
             id: board.id,
             name: board.name,
             key: board.key,
-            columns: data.columns,
+            columns: await boardClient(c.env, board.id).transferOptions(),
           };
         }),
       );
@@ -1623,17 +1563,7 @@ const app = new Hono<AppEnv>()
       return c.json({ error: "realtime client update required" }, 409);
     }
     const board = c.get("board");
-    const user = c.get("user");
-    const boardId = board.id;
-    const stub = c.env.BOARD_DO.get(c.env.BOARD_DO.idFromName(boardId));
-    const headers = new Headers(c.req.raw.headers);
-    headers.set(INTERNAL_BOARD_ID_HEADER, boardId);
-    headers.set(INTERNAL_USER_ID_HEADER, user.id);
-    headers.set(
-      INTERNAL_CAN_MANAGE_COLUMNS_HEADER,
-      board.capabilities.canManageColumns ? "true" : "false",
-    );
-    return stub.fetch(new Request(c.req.raw, { headers }));
+    return boardClient(c.env, board.id).connect(c.req.raw, c.get("user").id, board.capabilities.canManageColumns);
   })
   .get("/presence/ws", requireAuth, (c) => {
     if (c.req.query("realtimeVersion") !== REALTIME_PROTOCOL_VERSION) {
@@ -1660,7 +1590,7 @@ const app = new Hono<AppEnv>()
     return stub.fetch(new Request(c.req.raw, { headers }));
   })
   // Development info (ADR 0064) for the card fronts: every card's pull requests in one read, with no GitHub call and no polling.
-  .get("/boards/:id/development", requireAuth, requireMember, async (c) => c.json(await readBoardDevelopment(c.env, c.get("board").id)))
+  .get("/boards/:id/development", requireAuth, requireMember, async (c) => c.json(await boardClient(c.env, c.get("board").id).boardDevelopment()))
   // Development info (ADR 0064): the pull requests webhooks linked to this card. Readable with no GitHub call.
   .get("/boards/:id/cards/:cardId/development", requireAuth, requireMember, async (c) => {
     const development = await readCardDevelopment(c.env, c.get("board").id, c.req.param("cardId"));
@@ -1710,7 +1640,7 @@ const app = new Hono<AppEnv>()
         return c.json({ code: "wrong_repository", error: `#${reference.number} targets another repository.` } as const, 409);
       }
 
-      const result = await changeCardLink(c.env, c.get("board").id, c.get("user").id, c.req.param("cardId"), { link: read.pullRequest });
+      const result = await boardClient(c.env, c.get("board").id).changeCardLink(c.get("user").id, c.req.param("cardId"), { link: read.pullRequest });
       return result.ok
         ? c.json(result.development)
         : c.json({ code: result.code, error: result.error }, result.status as 400 | 403 | 404 | 409 | 410 | 502);
@@ -1723,7 +1653,7 @@ const app = new Hono<AppEnv>()
     if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !Number.isSafeInteger(number) || number <= 0) {
       return c.json({ code: "invalid_pr_reference", error: "Enter a pull request URL or number." } as const, 400);
     }
-    const result = await changeCardLink(c.env, c.get("board").id, c.get("user").id, c.req.param("cardId"), { unlink: { repositoryId, number } });
+    const result = await boardClient(c.env, c.get("board").id).changeCardLink(c.get("user").id, c.req.param("cardId"), { unlink: { repositoryId, number } });
     return result.ok
       ? c.json(result.development)
       : c.json({ code: result.code, error: result.error }, result.status as 400 | 403 | 404 | 409 | 410 | 502);
@@ -1734,7 +1664,7 @@ const app = new Hono<AppEnv>()
     if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
       return c.json({ code: "invalid_branch_reference", error: "invalid branch" } as const, 400);
     }
-    const result = await changeCardLink(c.env, c.get("board").id, c.get("user").id, c.req.param("cardId"), { unlinkBranch: { repositoryId, name: c.req.param("name") } });
+    const result = await boardClient(c.env, c.get("board").id).changeCardLink(c.get("user").id, c.req.param("cardId"), { unlinkBranch: { repositoryId, name: c.req.param("name") } });
     return result.ok
       ? c.json(result.development)
       : c.json({ code: result.code, error: result.error }, result.status as 400 | 403 | 404 | 409 | 410 | 502);

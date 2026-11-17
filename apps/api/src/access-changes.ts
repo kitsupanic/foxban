@@ -2,8 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import { boardManageSql, boardOpenSql, canManageBoard, canOpenBoard, isAdminEmail, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
-import { DELETE_BOARD_PATH } from "./board-api";
-import { INTERNAL_BOARD_ID_HEADER } from "./internal-headers";
+import { boardClient } from "./board-client";
 
 export type AccessChangeKind =
   | "workspace-member-add"
@@ -350,29 +349,6 @@ function parsePayload(op: OperationRow): Record<string, unknown> | null {
   return parsed.success ? (parsed.data as Record<string, unknown>) : null;
 }
 
-async function callParticipant(
-  env: Env,
-  boardId: string,
-  path: string,
-  operationId: string,
-  generation: number,
-): Promise<boolean> {
-  try {
-    const response = await env.BOARD_DO.get(env.BOARD_DO.idFromName(boardId)).fetch(
-      `https://board.internal${path}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", [INTERNAL_BOARD_ID_HEADER]: boardId },
-        body: JSON.stringify({ operationId, generation }),
-        signal: AbortSignal.timeout(PARTICIPANT_CALL_TIMEOUT_MS),
-      },
-    );
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
 /** Freezes every participant in D1 order. A lost acknowledgement is retried, not assumed. */
 async function ensurePrepared(
   env: Env,
@@ -390,12 +366,9 @@ async function ensurePrepared(
         return;
       }
       if (
-        !(await callParticipant(
-          env,
-          participant.boardId,
-          "/internal/access/prepare",
-          op.id,
-          participant.nextVersion,
+        !(await boardClient(env, participant.boardId).prepareAccess(
+          { operationId: op.id, generation: participant.nextVersion },
+          PARTICIPANT_CALL_TIMEOUT_MS,
         ))
       ) {
         complete = false;
@@ -1033,20 +1006,7 @@ async function commitStagedDeletion(
 
 /** The existing terminal BoardDO deletion path; retried after a lost response. */
 async function deleteBoardContent(env: Env, payload: Record<string, unknown>): Promise<boolean> {
-  const boardId = payload.boardId as string;
-  try {
-    const response = await env.BOARD_DO.get(env.BOARD_DO.idFromName(boardId)).fetch(
-      `https://board.internal${DELETE_BOARD_PATH}`,
-      {
-        method: "POST",
-        headers: { [INTERNAL_BOARD_ID_HEADER]: boardId },
-        signal: AbortSignal.timeout(PARTICIPANT_CALL_TIMEOUT_MS),
-      },
-    );
-    return response.ok;
-  } catch {
-    return false;
-  }
+  return boardClient(env, payload.boardId as string).deleteBoard(PARTICIPANT_CALL_TIMEOUT_MS);
 }
 
 async function releaseParticipants(env: Env, op: OperationRow): Promise<boolean> {
@@ -1068,12 +1028,9 @@ async function releaseParticipants(env: Env, op: OperationRow): Promise<boolean>
   let complete = true;
   await mapChunks(participants, PARTICIPANT_CONCURRENCY, async (participant) => {
     if (
-      !(await callParticipant(
-        env,
-        participant.boardId,
-        "/internal/access/release",
-        op.id,
-        participant.nextVersion,
+      !(await boardClient(env, participant.boardId).releaseAccess(
+        { operationId: op.id, generation: participant.nextVersion },
+        PARTICIPANT_CALL_TIMEOUT_MS,
       ))
     ) {
       complete = false;

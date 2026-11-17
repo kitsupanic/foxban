@@ -32,7 +32,7 @@ import {
  * The Worker's internal API to a board's Durable Object: every route the DO answers
  * besides the realtime socket, in one table both sides read. The DO dispatches from it
  * (`BoardDO.fetch`); the Worker's `BoardClient` builds its requests from it. The wire
- * is plain `fetch` to `https://board.internal`, the board named in `INTERNAL_BOARD_ID_HEADER`.
+ * is plain `fetch` to the board's stub, the board named in `INTERNAL_BOARD_ID_HEADER`.
  *
  * A route's `gate` says what the DO checks before it runs the handler:
  *

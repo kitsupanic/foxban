@@ -1,11 +1,11 @@
 import { DEVELOPMENT_TEXT_MAX } from "@foxban/shared";
 import { z } from "zod";
-import { BRANCH_WRITE_PATH } from "./board-api";
+import { boardClient } from "./board-client";
 import type { BranchWrite } from "./development-info";
 import { createInstallationToken, getBranchHead, type GitHubBranchHead } from "./github";
 import type { loadInstanceGitHubApp } from "./github-app";
 import { routedBranchBoardIds } from "./github-branch-routes";
-import { boardsNamedByKeys, writeToBoard } from "./github-development";
+import { boardsNamedByKeys } from "./github-development";
 import { findConnectedRepo } from "./github-repos";
 import { extractTaskKeys } from "./task-keys";
 
@@ -78,7 +78,7 @@ export async function writeBranch(
         observedAt,
         taskNumbers,
       };
-      return writeToBoard(env, boardId, BRANCH_WRITE_PATH, write);
+      return boardClient(env, boardId).writeBranch(write);
     }),
   );
   return results.some(Boolean);

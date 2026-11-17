@@ -1,12 +1,11 @@
-import { BoardDevelopmentSchema, CardDevelopmentSchema, DEVELOPMENT_TEXT_MAX, type BoardDevelopment, type CardDevelopment, type DevelopmentPullRequest } from "@foxban/shared";
+import { DEVELOPMENT_TEXT_MAX, type CardDevelopment, type DevelopmentPullRequest } from "@foxban/shared";
 import { z } from "zod";
-import { BOARD_DEVELOPMENT_PATH, PULL_REQUEST_WRITE_PATH, routePath } from "./board-api";
+import { boardClient } from "./board-client";
 import type { PullRequestWrite } from "./development-info";
 import { GitHubApiError, createInstallationToken, getPullRequestPayload } from "./github";
 import { loadInstanceGitHubApp } from "./github-app";
 import { routedBoardIds } from "./github-pr-routes";
 import { findConnectedRepo } from "./github-repos";
-import { INTERNAL_USER_ID_HEADER, boardFetch } from "./internal-headers";
 import { extractTaskKeys } from "./task-keys";
 
 /**
@@ -71,19 +70,6 @@ export async function boardsNamedByKeys(env: Env, keys: ReturnType<typeof extrac
   return named;
 }
 
-/** Posts one development-info write to a board; true when it changed any card. */
-export async function writeToBoard(env: Env, boardId: string, path: string, write: unknown): Promise<boolean> {
-  const response = await boardFetch(env, boardId, path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(write),
-  });
-  // A board deleted since its pointer was written has nothing to update.
-  if (response.status === 410) return false;
-  if (!response.ok) throw new Error(`board ${boardId} refused a development write to ${path}: ${response.status}`);
-  return (await response.json<{ changed: boolean }>()).changed;
-}
-
 /**
  * Routes a pull request event from a connected repo (the caller has checked that) to
  * the boards that hold it. A board is told when the PR's branch, title or body names
@@ -101,7 +87,7 @@ export async function handlePullRequestEvent(env: Env, payload: unknown): Promis
   }
 
   const results = await Promise.all(
-    [...boards].map(([boardId, taskNumbers]) => writeToBoard(env, boardId, PULL_REQUEST_WRITE_PATH, { pullRequest, taskNumbers } satisfies PullRequestWrite)),
+    [...boards].map(([boardId, taskNumbers]) => boardClient(env, boardId).writePullRequest({ pullRequest, taskNumbers } satisfies PullRequestWrite)),
   );
   return results.some(Boolean);
 }
@@ -138,18 +124,6 @@ export async function readPullRequest(
   return { baseRepositoryId: parsed.data.base.repo.id, pullRequest: toDevelopmentPullRequest(repo, parsed.data) };
 }
 
-/** What a board answers for a card's development info: the public part, and old manual links for the Worker to adopt. */
-const CardDevelopmentReadSchema = CardDevelopmentSchema.extend({
-  legacy: z.array(z.strictObject({ repositoryId: z.number().int(), number: z.number().int(), taskNumber: z.number().int() })),
-});
-
-async function readCardDevelopmentFromBoard(env: Env, boardId: string, cardId: string) {
-  const response = await boardFetch(env, boardId, routePath("cardDevelopment", { cardId }));
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`board ${boardId} could not read development info: ${response.status}`);
-  return CardDevelopmentReadSchema.parse(await response.json());
-}
-
 /**
  * Pull requests an old per-board integration linked by hand (ADR 0041 section 6) are
  * read from GitHub and written back as ordinary links, once their repo is connected:
@@ -163,7 +137,7 @@ async function adoptLegacyLinks(env: Env, boardId: string, legacy: Array<{ repos
         const repo = await findConnectedRepo(env, { id: repositoryId });
         const read = repo && (await readPullRequest(env, repo, number));
         if (!read || read.baseRepositoryId !== repo.id) return false;
-        return await writeToBoard(env, boardId, PULL_REQUEST_WRITE_PATH, { pullRequest: read.pullRequest, taskNumbers: [taskNumber] } satisfies PullRequestWrite);
+        return await boardClient(env, boardId).writePullRequest({ pullRequest: read.pullRequest, taskNumbers: [taskNumber] } satisfies PullRequestWrite);
       } catch (error) {
         console.warn("[github-development] could not adopt an old pull request link:", error instanceof Error ? error.message : error);
         return false;
@@ -173,53 +147,10 @@ async function adoptLegacyLinks(env: Env, boardId: string, legacy: Array<{ repos
   return results.some(Boolean);
 }
 
-/**
- * A member's manual link or unlink of a pull request, or unlink of a branch, committed by
- * the board under the actor's own access. The answer is the card's development info
- * afterwards, or the board's refusal.
- */
-export async function changeCardLink(
-  env: Env,
-  boardId: string,
-  userId: string,
-  cardId: string,
-  change: { link: DevelopmentPullRequest } | { unlink: { repositoryId: number; number: number } } | { unlinkBranch: { repositoryId: number; name: string } },
-): Promise<{ ok: true; development: CardDevelopment } | { ok: false; status: number; code: string; error: string }> {
-  const [method, path, sent] =
-    "link" in change
-      ? (["POST", routePath("pullRequestLink", { cardId }), { pullRequest: change.link }] as const)
-      : "unlink" in change
-        ? (["DELETE", routePath("pullRequestUnlink", { cardId }), change.unlink] as const)
-        : (["DELETE", routePath("branchUnlink", { cardId }), change.unlinkBranch] as const);
-  const response = await boardFetch(env, boardId, path, {
-    method,
-    headers: { "Content-Type": "application/json", [INTERNAL_USER_ID_HEADER]: userId },
-    body: JSON.stringify(sent),
-  });
-  const body: unknown = await response.json().catch(() => null);
-  if (response.ok) {
-    const development = CardDevelopmentSchema.safeParse(body);
-    if (development.success) return { ok: true, development: development.data };
-  }
-  const failure = z.object({ code: z.string(), error: z.string() }).safeParse(body);
-  return {
-    ok: false,
-    status: response.ok || response.status >= 500 ? 502 : response.status,
-    code: failure.success ? failure.data.code : "github_error",
-    error: failure.success ? failure.data.error : "Could not save the change.",
-  };
-}
-
 /** A card's development info, or null when the card is missing or archived. */
 export async function readCardDevelopment(env: Env, boardId: string, cardId: string): Promise<CardDevelopment | null> {
-  let read = await readCardDevelopmentFromBoard(env, boardId, cardId);
-  if (read && read.legacy.length > 0 && (await adoptLegacyLinks(env, boardId, read.legacy))) read = await readCardDevelopmentFromBoard(env, boardId, cardId);
+  const board = boardClient(env, boardId);
+  let read = await board.cardDevelopment(cardId);
+  if (read && read.legacy.length > 0 && (await adoptLegacyLinks(env, boardId, read.legacy))) read = await board.cardDevelopment(cardId);
   return read && { pullRequests: read.pullRequests, branches: read.branches };
-}
-
-/** The pull requests of every active card on a board, for the card fronts. */
-export async function readBoardDevelopment(env: Env, boardId: string): Promise<BoardDevelopment> {
-  const response = await boardFetch(env, boardId, BOARD_DEVELOPMENT_PATH);
-  if (!response.ok) throw new Error(`board ${boardId} could not read development info: ${response.status}`);
-  return BoardDevelopmentSchema.parse(await response.json());
 }

@@ -1,17 +1,7 @@
 import { TRANSFER_TERMINAL_CODE, rewriteAttachmentUrls } from "@foxban/shared";
 import { attachmentTransferObjectKey } from "./attachment-lifecycle";
-import {
-  CARD_TRANSFER_ABORT_PATH,
-  CARD_TRANSFER_FINALIZE_PATH,
-  CARD_TRANSFER_IMPORT_PATH,
-  CARD_TRANSFER_PREPARE_PATH,
-  CARD_TRANSFER_RECEIPT_PATH,
-  CARD_TRANSFER_RELEASE_PATH,
-  STAGE_ATTACHMENT_PATH,
-  type CardTransferReceipt,
-  type PreparedCardTransferBundle,
-} from "./board-api";
-import { INTERNAL_USER_ID_HEADER, boardFetch } from "./internal-headers";
+import type { CardTransferReceipt, PreparedCardTransferBundle } from "./board-api";
+import { boardClient, type Reply } from "./board-client";
 
 /**
  * The card transfer coordinator (ADRs 0038, 0048, 0061): the one place that knows
@@ -21,13 +11,12 @@ import { INTERNAL_USER_ID_HEADER, boardFetch } from "./internal-headers";
  * alarm, the access fence, a stale-lock takeover and the release endpoint.
  *
  * It talks to the boards only through `SourceParticipant` / `DestinationParticipant`.
- * The real adapters below call the BoardDOs; tests pass fakes.
+ * The real adapters below are thin wrappers over the `BoardClient`; tests pass fakes.
  */
 
 export type TransferIds = { transferId: string; sourceBoardId: string; cardId: string; destinationBoardId: string };
 type ErrorBody = { error?: string; code?: string };
-/** A participant's answer: its HTTP status and parsed body (`{}` when there is none). */
-export type Reply<T = ErrorBody> = { status: number; body: T };
+export type { Reply };
 const ok = (r: Reply<unknown>) => r.status >= 200 && r.status < 300;
 
 export interface SourceParticipant {
@@ -217,37 +206,27 @@ export async function settle(
   return { kind: "released", cleared: ok(await source.release()) };
 }
 
-async function reply<T>(response: Promise<Response>): Promise<Reply<T>> {
-  const res = await response;
-  return { status: res.status, body: ((await res.json().catch(() => null)) ?? {}) as T };
-}
-
-const post = (body: unknown, userId?: string): RequestInit => ({
-  method: "POST",
-  headers: { "Content-Type": "application/json", ...(userId ? { [INTERNAL_USER_ID_HEADER]: userId } : {}) },
-  body: JSON.stringify(body),
-});
-
 /** The source board over its internal endpoints. `userId` is the actor prepare admits. */
 export function boardSource(env: Env, ids: TransferIds, userId: string): SourceParticipant {
+  const board = boardClient(env, ids.sourceBoardId).transfer;
   const body = { transferId: ids.transferId, cardId: ids.cardId, destinationBoardId: ids.destinationBoardId };
   return {
-    prepare: () => reply(boardFetch(env, ids.sourceBoardId, CARD_TRANSFER_PREPARE_PATH, post(body, userId))),
-    finalize: () => reply(boardFetch(env, ids.sourceBoardId, CARD_TRANSFER_FINALIZE_PATH, post(body))),
-    release: () => reply(boardFetch(env, ids.sourceBoardId, CARD_TRANSFER_RELEASE_PATH, post(body))),
+    prepare: () => board.prepare(userId, body),
+    finalize: () => board.finalize(body),
+    release: () => board.release(body),
   };
 }
 
 /** The destination board over its internal endpoints, plus the R2 copy into it. `userId` is needed only to stage and import. */
 export function boardDestination(env: Env, ids: TransferIds, userId?: string): DestinationParticipant {
+  const board = boardClient(env, ids.destinationBoardId).transfer;
   const operation = { transferId: ids.transferId, sourceBoardId: ids.sourceBoardId, cardId: ids.cardId };
-  const call = <T>(path: string, body: unknown, user?: string) => reply<T>(boardFetch(env, ids.destinationBoardId, path, post(body, user)));
   return {
-    receipt: () => call(CARD_TRANSFER_RECEIPT_PATH, operation),
-    abort: () => call(CARD_TRANSFER_ABORT_PATH, operation),
-    stageAttachment: (attachment) => call(STAGE_ATTACHMENT_PATH, attachment, userId),
+    receipt: () => board.receipt(operation),
+    abort: () => board.abort(operation),
+    stageAttachment: (attachment) => board.stage(userId, attachment),
     import: ({ destinationColumnId, assigneeId, bundle }) =>
-      call(CARD_TRANSFER_IMPORT_PATH, { transferId: ids.transferId, sourceBoardId: ids.sourceBoardId, destinationColumnId, assigneeId, bundle }, userId),
+      board.import(userId, { transferId: ids.transferId, sourceBoardId: ids.sourceBoardId, destinationColumnId, assigneeId, bundle }),
     async copyAttachment(sourceKey, destinationKey) {
       try {
         const object = await env.ATTACHMENTS.get(sourceKey);
