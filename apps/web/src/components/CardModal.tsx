@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   AlignLeft,
-  ArrowUpRight,
   CalendarArrowDown,
   CalendarArrowUp,
   Check,
@@ -13,7 +12,6 @@ import {
   Link,
   Paperclip,
   Plus,
-  SquareCheck,
   Search,
   Tag,
   Users,
@@ -31,7 +29,6 @@ import { Textarea } from "./ui/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   DESCRIPTION_MAX_BYTES,
-  Title,
   type ClientMessage,
   descriptionByteLength,
   isPreviewableImageContentType,
@@ -80,11 +77,13 @@ import { TransferCardDialog } from "./TransferCardDialog";
 import { DescriptionEditor } from "./DescriptionEditor";
 import { MarkdownContent, MarkdownEditor } from "./MarkdownEditor";
 import { CardDevelopment } from "./CardDevelopment";
+import { CardChecklist } from "./CardChecklist";
 import { cardDevelopmentQueryOptions, connectedReposQueryOptions, usePullRequestLink } from "../lib/card-development";
 import { SubtaskList } from "./SubtaskList";
 import { buildSubtaskNodes, directSubtaskCounts } from "../lib/subtask-nodes";
 import { TASK_TYPE_META } from "../lib/task-type";
 import { restoreFocusSoon } from "../lib/focus";
+import { useChecklist } from "../lib/checklist";
 import { composerLane, useAuthoredOperation, useAuthoredScope, type AuthoredScope } from "../lib/authored-operation";
 import { usePickerMenuStyle } from "../lib/picker-menu";
 import "./card-detail.css";
@@ -447,58 +446,13 @@ export function CardModal({
     [attachmentView, card.id, descriptionDraft],
   );
   const attachmentDeletePending = attachmentView.isDeletePending(card.id);
-  // Inline item editor: the id being edited plus its own draft text.
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState("");
-  const [newItem, setNewItem] = useState("");
-  // Validation errors are local; everything else comes from the add / edit operations.
-  const [checklistInvalid, setChecklistInvalid] = useState<Record<"add" | "edit", string | null>>({ add: null, edit: null });
-  type ChecklistSent = { id: string; text: string; position?: string };
-  const checklistOptions = (onAccepted: (sent: ChecklistSent) => void) => ({
-    build: (mutationId: string, { id, text, position }: ChecklistSent): ClientMessage =>
-      position === undefined
-        ? { type: "checklist.update", mutationId, id, text }
-        : { type: "checklist.create", mutationId, id, cardId: card.id, text, position },
-    confirm: (board: BoardState | undefined, { id }: ChecklistSent) => !!board?.checklistItems.some((item) => item.id === id),
-    onAccepted,
-    copy: {
-      rejected: "Server rejected checklist save.",
-      unverified: "Sync could not verify checklist save. You can retry saving.",
-      "not-connected": "Not connected — try again.",
-      "accepted-gone": "This item was deleted. Your draft is preserved below.",
-    },
+  const checklist = useChecklist(authoredScope, {
+    cardId: card.id,
+    items,
+    placeNew: () => commands.placeNewChecklistItem(card.id),
   });
-  const addOp = useAuthoredOperation<ChecklistSent>(authoredScope, checklistOptions(() => setNewItem("")));
-  const editOp = useAuthoredOperation<ChecklistSent>(authoredScope, checklistOptions(({ id }) => {
-    // The user already left this edit (Escape/Discard): a late acceptance must not steal focus. "Save as
-    // new item" sends a fresh id while the edited item is deleted, so that case still belongs to the edit.
-    if (editingId !== id && !editedItemDeleted) return;
-    setEditingId(null);
-    restoreFocusSoon(() => document.querySelector<HTMLElement>(`[data-checklist-item-edit="${id}"]`));
-  }));
-  const checklistLane = (op: typeof addOp, lane: "add" | "edit") => ({
-    pending: op.status === "pending" || op.status === "uncertain",
-    uncertain: op.status === "uncertain",
-    error: checklistInvalid[lane] ?? op.error,
-  });
-  const checklistAttempts = { add: checklistLane(addOp, "add"), edit: checklistLane(editOp, "edit") };
-  // A failed lineage is only kept for its error; the draft lives in component state.
-  const clearChecklistError = (lane: "add" | "edit") => {
-    setChecklistInvalid((current) => ({ ...current, [lane]: null }));
-    const op = lane === "add" ? addOp : editOp;
-    if (op.status === "failed") op.discard();
-  };
-  const editedItemDeleted = editingId !== null && !items.some((item) => item.id === editingId);
-  const checklistHasWork = newItem !== "" || (editingId !== null && (editedItemDeleted || editText !== items.find((item) => item.id === editingId)?.text)) || checklistAttempts.add.pending || checklistAttempts.edit.pending;
-  const checklistHasWorkRef = useRef(checklistHasWork);
-  checklistHasWorkRef.current = checklistHasWork;
-  const [addingChecklistItem, setAddingChecklistItem] = useState(false);
-  const checklistInputRef = useRef<HTMLInputElement | null>(null);
-  const checklistAddButtonRef = useRef<HTMLButtonElement | null>(null);
   const attachInput = useRef<HTMLInputElement | null>(null);
   const [confirmingAttachmentId, setConfirmingAttachmentId] = useState<string | null>(null);
-  const doneCount = items.filter((item) => item.done).length;
-  const checklistPercent = items.length > 0 ? Math.round((doneCount / items.length) * 100) : 0;
   const [composingComment, setComposingComment] = useState(false);
   const [commentFeedbackResetToken, setCommentFeedbackResetToken] = useState(0);
   const [commentDraft, setCommentDraft] = useState("");
@@ -775,32 +729,6 @@ export function CardModal({
     commands.schedule(card.id, value === "" ? null : value);
   };
 
-  const sendChecklistText = (lane: "add" | "edit", itemId?: string) => {
-    if (checklistAttempts[lane].pending) return;
-    const text = (lane === "add" ? newItem : editText).trim();
-    if (!text || !Title.safeParse(text).success) {
-      setChecklistInvalid((current) => ({ ...current, [lane]: "Checklist text must contain 1–200 characters." }));
-      return;
-    }
-    setChecklistInvalid((current) => ({ ...current, [lane]: null }));
-    (lane === "add" ? addOp : editOp).start({
-      id: itemId ?? crypto.randomUUID(),
-      text,
-      position: itemId ? undefined : commands.placeNewChecklistItem(card.id),
-    });
-  };
-
-  const commitEdit = (item: ChecklistItem) => {
-    if (checklistAttempts.edit.pending) return;
-    if (editText.trim() === item.text) {
-      setEditingId(null);
-      return;
-    }
-    sendChecklistText("edit", item.id);
-  };
-
-  const addItem = () => sendChecklistText("add");
-
   /** A new subtask's key in the column it lands in: the starting column, or this card's own on a board without roles. */
   const subtaskTailPosition = (): string => commands.placeNewCard(columns.find(c => c.starting)?.id ?? card.columnId);
 
@@ -1062,7 +990,7 @@ export function CardModal({
    */
   const workKeepsCardOpen = () =>
     authoredScope.hasActiveWork() ||
-    checklistHasWorkRef.current ||
+    checklist.hasWorkNow() ||
     commentEditHasWorkRef.current ||
     (composingCommentRef.current && (commentDraftRef.current.trim() !== "" || commentUploadingRef.current)) ||
     (replyingCommentIdRef.current !== null && (replyDraftRef.current.trim() !== "" || replyUploadingRef.current)) ||
@@ -1223,7 +1151,7 @@ export function CardModal({
       : "Unsaved description";
   // Closing guards every authored lane; the footer Save owns only card text.
   const draftingDirty =
-    checklistHasWork ||
+    checklist.hasWork ||
     commentEditHasWork ||
     diff.title !== undefined ||
     diff.description !== undefined ||
@@ -2024,222 +1952,23 @@ export function CardModal({
       />
     </div>
   );
-  // A `div`, not a `section`: the e2e helpers locate board columns by
-  // `section`, and the modal must not add one.
   const checklistSection = (
-    <div data-testid="card-checklist-section" data-empty={items.length === 0} className="card-checklist-section flex flex-col gap-1 py-4 first:pt-0 last:pb-0">
-      <div className="card-checklist-heading">
-      <h3 className="card-section-title text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        <SquareCheck aria-hidden="true" className="card-section-icon" />Checklist{items.length > 0 && ` ${doneCount}/${items.length}`}
-      </h3>
-      {items.length === 0 && !addingChecklistItem && newItem === "" && (
-        <Button
-          ref={checklistAddButtonRef}
-          type="button"
-          variant="outline"
-          size="sm"
-          className="card-checklist-reveal"
-          onClick={() => {
-            setAddingChecklistItem(true);
-            requestAnimationFrame(() => checklistInputRef.current?.focus());
-          }}
-        >
-          <Plus aria-hidden="true" className="size-4" />Add item
-        </Button>
-      )}
-      </div>
-      {items.length > 0 && (
-        <div className="flex items-center gap-2 py-1">
-          <span className="text-xs font-medium text-muted-foreground w-8 text-right">
-            {checklistPercent}%
-          </span>
-          <div
-            role="progressbar"
-            aria-label="Checklist progress"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={checklistPercent}
-            className="relative h-2 flex-1 overflow-hidden rounded-full bg-muted"
-          >
-            <div
-              className="h-full bg-primary transition-[width] duration-200"
-              style={{ width: `${checklistPercent}%` }}
-            />
-          </div>
-        </div>
-      )}
-      <ul className="card-checklist-items flex flex-col gap-1">
-        {items.map((item) => (
-          <li key={item.id} className="group flex items-center gap-2 text-sm text-foreground">
-            <input
-              type="checkbox"
-              aria-label={item.text}
-              checked={item.done}
-              disabled={editingId === item.id && checklistAttempts.edit.pending}
-              onChange={() => commands.setChecklistDone(item.id, !item.done)}
-              className="size-4 rounded border-input text-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-            />
-            {editingId === item.id ? (
-              <Input
-                autoFocus
-                // The modal's Escape listener sits on `window`; React dispatches
-                // from the root container, so stopping propagation here keeps a
-                // cancelled item edit from also closing the modal.
-                data-checklist-edit
-                aria-label="Edit checklist item text"
-                readOnly={checklistAttempts.edit.pending}
-                value={editText}
-                onChange={(event) => {
-                  setEditText(event.target.value);
-                  clearChecklistError("edit");
-                }}
-                onBlur={() => { if (!checklistAttempts.edit.error) commitEdit(item); }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    commitEdit(item);
-                  }
-                  if (event.key === "Escape") {
-                    event.stopPropagation();
-                    if (checklistAttempts.edit.pending) return;
-                    setEditingId(null);
-                    restoreFocusSoon(() => document.querySelector<HTMLElement>(`[data-checklist-item-edit="${item.id}"]`));
-                  }
-                }}
-                className="h-7 flex-1 bg-background px-2 py-0.5 text-base sm:text-sm"
-              />
-            ) : (
-              <button
-                type="button"
-                data-checklist-item-edit={item.id}
-                disabled={checklistAttempts.edit.pending || editingId !== null}
-                aria-label={`Edit checklist item ${item.text}`}
-                className={`flex-1 cursor-text break-words text-left ${
-                  item.done ? "text-muted-foreground line-through" : "text-foreground"
-                }`}
-                onClick={() => {
-                  setEditingId(item.id);
-                  setEditText(item.text);
-                  clearChecklistError("edit");
-                }}
-              >
-                {item.text}
-              </button>
-            )}
-            {card.taskType !== "subtask" && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Convert to card ${item.text}`}
-                title="Convert to card"
-                // The conversion lane is single-slot: while a conversion is pending
-                // or a recovery is unresolved, its retry/discard pair is the only
-                // conversion action any checklist item offers.
-                disabled={convertLaneBusy || (editingId === item.id && checklistAttempts.edit.pending)}
-                onClick={() => convertItem(item)}
-                className="opacity-0 pointer-coarse:opacity-100 size-7 pointer-coarse:size-11 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 text-muted-foreground hover:text-foreground"
-              >
-                <ArrowUpRight aria-hidden="true" className="size-3.5 shrink-0" />
-              </Button>
-            )}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`Delete item ${item.text}`}
-              disabled={editingId === item.id && checklistAttempts.edit.pending}
-              onClick={() => commands.deleteChecklistItem(item.id)}
-              className="opacity-0 pointer-coarse:opacity-100 size-7 pointer-coarse:size-11 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 text-muted-foreground hover:text-destructive"
-            >
-              <X aria-hidden className="size-3.5" />
-            </Button>
-          </li>
-        ))}
-      </ul>
-      {editedItemDeleted && <div className="flex flex-col gap-2">
-        <p role="alert" className="text-xs text-destructive">This item was deleted. Your draft is preserved.</p>
-        <Input aria-label="Preserved checklist edit" value={editText} readOnly={checklistAttempts.edit.pending} onChange={(event) => setEditText(event.target.value)} />
-        <Button type="button" size="xs" disabled={checklistAttempts.edit.pending} onClick={() => sendChecklistText("edit")}>Save as new item</Button>
-        <Button type="button" size="xs" variant="ghost" disabled={checklistAttempts.edit.pending} onClick={() => setEditingId(null)}>Discard checklist edit</Button>
-      </div>}
-      {checklistAttempts.edit.pending && <p role="status" className="text-xs text-muted-foreground">{checklistAttempts.edit.uncertain ? "Checking whether checklist edit completed…" : "Saving checklist edit…"}</p>}
-      {editingId !== null && checklistAttempts.edit.error && <p role="alert" className="text-xs text-destructive">{checklistAttempts.edit.error}</p>}
-      {(items.length > 0 || addingChecklistItem || newItem !== "") && <form className="card-checklist-add"
-        onSubmit={(event) => {
-          event.preventDefault();
-          addItem();
-        }}
-      >
-        <Input
-          ref={checklistInputRef}
-          value={newItem}
-          readOnly={checklistAttempts.add.pending}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
-            event.stopPropagation();
-            if (items.length > 0 || newItem !== "") return;
-            event.preventDefault();
-            setAddingChecklistItem(false);
-            restoreFocusSoon(() => checklistAddButtonRef.current);
-          }}
-          onChange={(event) => {
-            setNewItem(event.target.value);
-            clearChecklistError("add");
-          }}
-          aria-label="Add checklist item"
-          placeholder="Add an item…"
-          className="h-8 bg-card text-base sm:text-sm"
-        />
-        <Button type="submit" size="sm" aria-label="Add checklist item" disabled={checklistAttempts.add.pending || newItem.trim() === ""}>
-          <Plus aria-hidden="true" className="size-4" />Add item
-        </Button>
-      </form>}
-      {checklistAttempts.add.pending && <p role="status" className="text-xs text-muted-foreground">{checklistAttempts.add.uncertain ? "Checking whether checklist item was added…" : "Adding checklist item…"}</p>}
-      {checklistAttempts.add.error && <p role="alert" className="text-xs text-destructive">{checklistAttempts.add.error}</p>}
-      {convertError !== null && convertRecovery === null && (
-        // The item is still here (the refused conversion never removed it), so
-        // the error sits with the checklist it belongs to.
-        <p role="alert" className="text-xs text-destructive">
-          {convertError}
-        </p>
-      )}
-      {convertRecovery !== null && (
-        <div
-          role="alert"
-          className="flex flex-col gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-xs text-destructive"
-        >
-          <div className="flex items-center justify-between gap-2 font-medium">
-            <span>{convertRecovery.error}</span>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="xs"
-                onClick={retryConvert}
-                disabled={pendingConvertItemId !== null || convertUncertain}
-                className="h-6 px-2 text-xs font-semibold text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-              >
-                {pendingConvertItemId !== null ? "Retrying…" : "Retry conversion"}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                disabled={pendingConvertItemId !== null || convertUncertain}
-                onClick={() => {
-                  if (pendingConvertItemId !== null || convertUncertain) return;
-                  convertOp.discard();
-                }}
-                className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:px-3"
-              >
-                Discard conversion attempt
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+    <CardChecklist
+      checklist={checklist}
+      items={items}
+      taskType={card.taskType}
+      commands={commands}
+      conversion={{
+        busy: convertLaneBusy,
+        convert: convertItem,
+        error: convertError,
+        recovery: convertRecovery,
+        pendingItemId: pendingConvertItemId,
+        uncertain: convertUncertain,
+        retry: retryConvert,
+        discard: convertOp.discard,
+      }}
+    />
   );
   const subtasksSection = (
     // Also a `div`, for the same reason as the checklist above. The section is
