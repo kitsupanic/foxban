@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   AlignLeft,
-  CalendarArrowDown,
-  CalendarArrowUp,
   Check,
   ChevronDown,
   File,
   GitBranch,
-  MessageSquare,
   Link,
   Paperclip,
   Plus,
@@ -17,19 +14,15 @@ import {
   Maximize2,
   Minimize2,
   Pencil,
-  Reply,
   X,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { boardQueryKey } from "../lib/board-cache";
 import { Input } from "./ui/input";
-import { Textarea } from "./ui/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  type ClientMessage,
   isPreviewableImageContentType,
-  normalizeAttachmentContentType,
   type Activity,
   type Attachment,
   type Card,
@@ -44,13 +37,7 @@ import {
   type TaskType,
 } from "@foxban/shared";
 import type { Member } from "../lib/api";
-import {
-  activitySentence,
-  activityTimeline,
-  cardAssigneeHistory,
-  cardCreatorId,
-  type ActivityTimelineItem,
-} from "../lib/activity";
+import { cardAssigneeHistory, cardCreatorId } from "../lib/activity";
 import type { SendMutation, MutationSettledCallback } from "../lib/socket";
 import { useAttachmentView, type BoardAttachments } from "../lib/attachments";
 import { LABEL_COLORS, LABEL_COLOR_META } from "../lib/labels";
@@ -72,30 +59,24 @@ import { StatusPicker } from "./StatusPicker";
 import { CardActionsMenu } from "./CardActionsMenu";
 import { TransferCardDialog } from "./TransferCardDialog";
 import { DescriptionEditor } from "./DescriptionEditor";
-import { MarkdownContent, MarkdownEditor } from "./MarkdownEditor";
 import { CardDevelopment } from "./CardDevelopment";
 import { CardChecklist } from "./CardChecklist";
 import { CardSubtasks } from "./CardSubtasks";
+import { CardActivity, ACTIVITY_TABS, type ActivitySortOrder, type ActivityView } from "./CardActivity";
 import { cardDevelopmentQueryOptions, connectedReposQueryOptions, usePullRequestLink } from "../lib/card-development";
 import { TASK_TYPE_META } from "../lib/task-type";
 import { restoreFocusSoon } from "../lib/focus";
 import { useCardDraft } from "../lib/card-draft";
+import { useCommentThread } from "../lib/comment-thread";
+import { uploadImageFor, type UploadImage } from "../lib/image-upload";
 import { useChecklist } from "../lib/checklist";
 import { useSubtaskComposer } from "../lib/subtask-composer";
-import { composerLane, useAuthoredOperation, useAuthoredScope, type AuthoredScope } from "../lib/authored-operation";
+import { useAuthoredScope, type AuthoredScope } from "../lib/authored-operation";
 import { usePickerMenuStyle } from "../lib/picker-menu";
 import "./card-detail.css";
 /** Which shell the card details render in: the overlay modal or full screen. */
 export type CardViewMode = "modal" | "full";
 
-type ActivityView = "all" | "comments" | "history";
-type ActivitySortOrder = "asc" | "desc";
-
-const ACTIVITY_TABS: readonly { view: ActivityView; label: string }[] = [
-  { view: "all", label: "All" },
-  { view: "comments", label: "Comments" },
-  { view: "history", label: "History" },
-];
 /**
  * Card details. The title/description draft is seeded once on mount and never
  * re-seeded from the card: whoever saves last wins (ADR 0007/0010), so a
@@ -240,70 +221,6 @@ export function CardModal({
   const commands = useBoardCommands(boardId, send);
   const editTitleButtonRef = useRef<HTMLButtonElement | null>(null);
   const attachmentView = useAttachmentView(boardAttachments);
-  const [commentUploading, setCommentUploading] = useState(false);
-  const commentUploadingRef = useRef(commentUploading);
-  commentUploadingRef.current = commentUploading;
-  const [replyUploading, setReplyUploading] = useState(false);
-  const replyUploadingRef = useRef(replyUploading);
-  replyUploadingRef.current = replyUploading;
-  // Comment and reply creation are authored operations (ADR 0069), one lineage each: the entity
-  // id is chosen at submit and survives retries. `sent` is what a retry re-sends and what the draft
-  // must still equal when the attempt is accepted.
-  type CommentSent = { entityId: string; authorId: string; parentCommentId: string | null; rawDraft: string; body: string };
-  const commentCopy = (noun: "comment" | "reply") => ({
-    rejected: `Server rejected ${noun}.`,
-    unverified: `Sync could not verify ${noun}. You can retry sending.`,
-    "not-connected": "Not connected — try again.",
-    "accepted-gone": `Server rejected ${noun}.`, // unreachable: no `confirm`
-  });
-  const createCommentMessage = (mutationId: string, { entityId, authorId, parentCommentId, body }: CommentSent): ClientMessage => ({
-    type: "comment.create",
-    mutationId,
-    id: entityId,
-    cardId: cardRef.current.id,
-    authorId,
-    parentCommentId,
-    body,
-    createdAt: Date.now(),
-  });
-  // The composer generation the running attempt is compared against: the one the submit bumped to,
-  // or the live one when a retry starts.
-  const commentAcceptGenRef = useRef(0);
-  const replyAcceptGenRef = useRef(0);
-  const commentRetriedRef = useRef(false);
-  const replyRetriedRef = useRef(false);
-  const commentRecoveryErrorRef = useRef("");
-  const replyRecoveryErrorRef = useRef("");
-  const commentOp = useAuthoredOperation<CommentSent>(authoredScope, {
-    build: createCommentMessage,
-    onAccepted: ({ rawDraft }) => {
-      if (commentGenerationRef.current === commentAcceptGenRef.current && commentDraftRef.current === rawDraft && !commentUploadingRef.current) {
-        cancelComposer(true);
-      }
-    },
-    copy: commentCopy("comment"),
-  });
-  const replyOp = useAuthoredOperation<CommentSent>(authoredScope, {
-    build: createCommentMessage,
-    onAccepted: ({ rawDraft, parentCommentId }) => {
-      if (
-        replyGenerationRef.current === replyAcceptGenRef.current &&
-        replyingRootIdRef.current === parentCommentId &&
-        replyDraftRef.current === rawDraft &&
-        !replyUploadingRef.current
-      ) {
-        cancelReplyComposer(true);
-      }
-    },
-    copy: commentCopy("reply"),
-  });
-  const commentLane = composerLane(commentOp, commentRetriedRef.current, commentRecoveryErrorRef);
-  const replyLane = composerLane(replyOp, replyRetriedRef.current, replyRecoveryErrorRef);
-  const { pendingId: pendingCommentId, uncertain: commentUncertain, error: commentError, recovery: commentRecovery } = commentLane;
-  const { pendingId: pendingReplyId, uncertain: replyUncertain, error: replyError, recovery: replyRecovery } = replyLane;
-  // Typing dismisses an inline error; a retained recovery stays until retried or discarded.
-  const clearCommentError = () => { if (commentError !== null) commentOp.discard(); };
-  const clearReplyError = () => { if (replyError !== null) replyOp.discard(); };
   // Save is one authored operation (ADR 0069): `card.update` with the fields Save diffed.
   const cardDraft = useCardDraft(authoredScope, {
     card,
@@ -327,76 +244,6 @@ export function CardModal({
   });
   const attachInput = useRef<HTMLInputElement | null>(null);
   const [confirmingAttachmentId, setConfirmingAttachmentId] = useState<string | null>(null);
-  const [composingComment, setComposingComment] = useState(false);
-  const [commentFeedbackResetToken, setCommentFeedbackResetToken] = useState(0);
-  const [commentDraft, setCommentDraft] = useState("");
-  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
-  const [editCommentDraft, setEditCommentDraft] = useState("");
-  const [editCommentBaseline, setEditCommentBaseline] = useState("");
-  const commentEditOp = useAuthoredOperation<{ id: string; body: string }>(authoredScope, {
-    build: (mutationId, { id, body }): ClientMessage => ({ type: "comment.update", mutationId, id, body, updatedAt: Date.now() }),
-    // Socket settlement can precede React rendering the peer's deletion.
-    confirm: (board, { id }) => !!board?.comments.some((comment) => comment.id === id && !comment.deleted),
-    // A late acceptance of an earlier attempt must not close an editor the user has kept typing in.
-    onAccepted: ({ id, body }) => {
-      if (editingCommentId === id && editCommentDraft.trim() === body && !commentUploading) setEditingCommentId(null);
-    },
-    copy: {
-      rejected: "Server rejected comment edit.",
-      unverified: "Sync could not verify comment edit. You can retry saving.",
-      "not-connected": "Not connected — try again.",
-      "accepted-gone": "",
-    },
-  });
-  const commentEditActive = commentEditOp.status === "pending" || commentEditOp.status === "uncertain";
-  const pendingCommentEditId = commentEditActive ? commentEditOp.sent?.id ?? null : null;
-  const pendingCommentEditIdRef = useRef(pendingCommentEditId);
-  pendingCommentEditIdRef.current = pendingCommentEditId;
-  const commentEditUncertain = commentEditOp.status === "uncertain";
-  // A deleted comment shows its own banner, so an accepted-but-gone edit has no error line.
-  const commentEditError = commentEditOp.failure === "accepted-gone" ? null : commentEditOp.error;
-  const clearCommentEditError = () => { if (pendingCommentEditIdRef.current === null) commentEditOp.discard(); };
-  const editingCommentIdRef = useRef(editingCommentId);
-  editingCommentIdRef.current = editingCommentId;
-  const editedCommentDeleted = editingCommentId !== null && !comments.some((comment) => comment.id === editingCommentId && !comment.deleted);
-  const commentEditHasWork = editingCommentId !== null && (editCommentDraft !== editCommentBaseline || pendingCommentEditId !== null);
-  const commentEditHasWorkRef = useRef(commentEditHasWork);
-  commentEditHasWorkRef.current = commentEditHasWork;
-  const [replyingCommentId, setReplyingCommentId] = useState<string | null>(null);
-  const [replyingRootId, setReplyingRootId] = useState<string | null>(null);
-  const [replyDraft, setReplyDraft] = useState("");
-  const pendingReplyUploadTargetRef = useRef<{ targetId: string; initialDraft: string } | null>(null);
-  const [orphanedReply, setOrphanedReply] = useState<{ text: string } | null>(null);
-  const orphanedReplyRef = useRef(orphanedReply);
-  orphanedReplyRef.current = orphanedReply;
-  const composingCommentRef = useRef(composingComment);
-  composingCommentRef.current = composingComment;
-  const commentDraftRef = useRef(commentDraft);
-  commentDraftRef.current = commentDraft;
-  const commentGenerationRef = useRef(0);
-  const replyingCommentIdRef = useRef(replyingCommentId);
-  replyingCommentIdRef.current = replyingCommentId;
-  const replyingRootIdRef = useRef(replyingRootId);
-  replyingRootIdRef.current = replyingRootId;
-  const replyDraftRef = useRef(replyDraft);
-  replyDraftRef.current = replyDraft;
-  const replyGenerationRef = useRef(0);
-  const commentsRef = useRef(comments);
-  commentsRef.current = comments;
-  const cardRef = useRef(card);
-  cardRef.current = card;
-  const commentRecoveryRef = useRef(commentRecovery);
-  commentRecoveryRef.current = commentRecovery;
-  const replyRecoveryRef = useRef(replyRecovery);
-  replyRecoveryRef.current = replyRecovery;
-  const pendingCommentIdRef = useRef(pendingCommentId);
-  pendingCommentIdRef.current = pendingCommentId;
-  const pendingReplyIdRef = useRef(pendingReplyId);
-  pendingReplyIdRef.current = pendingReplyId;
-  const commentUncertainRef = useRef(commentUncertain);
-  commentUncertainRef.current = commentUncertain;
-  const replyUncertainRef = useRef(replyUncertain);
-  replyUncertainRef.current = replyUncertain;
   // Below `md` the card is a full-viewport surface over a board page that scrolls
   // the document. Fixing the body removes that overflow for as long as the card is
   // open — `overflow: hidden` alone still lets the page be scrolled
@@ -418,7 +265,6 @@ export function CardModal({
       window.scrollTo(0, offset);
     };
   }, []);
-  const replyButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [activityView, setActivityView] = useState<ActivityView>("comments");
   const [activitySortOrder, setActivitySortOrder] = useState<ActivitySortOrder>("asc");
   const activityTabRefs = useRef<Record<ActivityView, HTMLButtonElement | null>>({
@@ -631,87 +477,6 @@ export function CardModal({
     else collapseLabelComposer();
   };
 
-  const cancelComposer = (force = false) => {
-    if (!force && (commentUploadingRef.current || pendingCommentIdRef.current !== null || commentUncertainRef.current)) return;
-    ++commentGenerationRef.current;
-    setCommentFeedbackResetToken((token) => token + 1);
-    setCommentDraft("");
-    setComposingComment(false);
-  };
-
-  const cancelReplyComposer = (force = false) => {
-    if (!force && (replyUploadingRef.current || pendingReplyIdRef.current !== null || replyUncertainRef.current)) return;
-    ++replyGenerationRef.current;
-    const targetId = replyingCommentId;
-    setReplyDraft("");
-    setReplyingCommentId(null);
-    setReplyingRootId(null);
-    if (targetId && replyButtonRefs.current[targetId]) {
-      replyButtonRefs.current[targetId]?.focus();
-    }
-  };
-  const startReply = (targetComment: Comment) => {
-    if (replyUploadingRef.current || pendingReplyIdRef.current !== null || replyUncertainRef.current || orphanedReplyRef.current !== null) return;
-    if (replyingCommentId === targetComment.id) return;
-    const rootId = targetComment.parentCommentId ?? targetComment.id;
-    const activate = () => {
-      ++replyGenerationRef.current;
-      setReplyingCommentId(targetComment.id);
-      setReplyingRootId(rootId);
-      setReplyDraft("");
-    };
-    if (replyingCommentId !== null && (replyDraft.trim() !== "" || replyUploadingRef.current)) {
-      requestClose(activate);
-      return;
-    }
-    activate();
-  };
-  // `authorId` and the timestamps ride the wire: the DO is identity-blind and
-  // rebroadcasts frames verbatim, so a server stamp would not reach peers until
-  // their next snapshot (ADR 0015).
-  const submitComment = () => {
-    const rawDraft = commentDraftRef.current;
-    const body = rawDraft.trim();
-    if (!body || !me || commentUploadingRef.current || pendingCommentId !== null || commentUncertain || commentRecovery !== null) return;
-    commentRetriedRef.current = false;
-    commentAcceptGenRef.current = ++commentGenerationRef.current;
-    commentOp.start({ entityId: crypto.randomUUID(), authorId: me.id, parentCommentId: null, rawDraft, body });
-  };
-
-  const submitReply = (rootCommentId: string) => {
-    const rawDraft = replyDraftRef.current;
-    const body = rawDraft.trim();
-    if (!body || !me || replyUploadingRef.current || pendingReplyId !== null || replyUncertain || replyRecovery !== null) return;
-    replyRetriedRef.current = false;
-    replyAcceptGenRef.current = ++replyGenerationRef.current;
-    replyOp.start({ entityId: crypto.randomUUID(), authorId: me.id, parentCommentId: rootCommentId, rawDraft, body });
-  };
-  const retryCommentRecovery = () => {
-    if (!commentRecovery || !me || commentUploadingRef.current || pendingCommentId !== null || commentUncertain) return;
-    commentRetriedRef.current = true;
-    commentAcceptGenRef.current = commentGenerationRef.current;
-    commentOp.retry();
-  };
-
-  const retryReplyRecovery = () => {
-    if (!replyRecovery || !me || replyUploadingRef.current || pendingReplyId !== null || replyUncertain) return;
-    replyRetriedRef.current = true;
-    replyAcceptGenRef.current = replyGenerationRef.current;
-    replyOp.retry();
-  };
-
-  const saveCommentEdit = () => {
-    const body = editCommentDraft.trim();
-    if (!body || !editingCommentId || commentUploadingRef.current || pendingCommentEditIdRef.current !== null) return;
-    commentEditOp.start({ id: editingCommentId, body });
-  };
-
-  const cancelCommentEdit = () => {
-    if (pendingCommentEditIdRef.current !== null || commentUploadingRef.current) return;
-    setEditingCommentId(null);
-    clearCommentEditError();
-  };
-
   /**
    * What keeps the card open after an accepted save instead of throwing it away: a submitted write
    * of another lane still in flight, a draft, or a recovery still on screen (Save's own included,
@@ -720,13 +485,8 @@ export function CardModal({
   const workKeepsCardOpen = () =>
     authoredScope.hasActiveWork() ||
     checklist.hasWorkNow() ||
-    commentEditHasWorkRef.current ||
-    (composingCommentRef.current && (commentDraftRef.current.trim() !== "" || commentUploadingRef.current)) ||
-    (replyingCommentIdRef.current !== null && (replyDraftRef.current.trim() !== "" || replyUploadingRef.current)) ||
-    orphanedReplyRef.current !== null ||
+    commentThread.current().keepsCardOpen ||
     cardDraft.current().uploading ||
-    commentRecoveryRef.current !== null ||
-    replyRecoveryRef.current !== null ||
     cardDraft.current().saveLane.recovery !== null ||
     // A pull request draft, or a link request still in flight, is work Save does
     // not own: the card stays open so it is not thrown away by closing.
@@ -738,140 +498,33 @@ export function CardModal({
       boardAttachments.upload({ file, cardId: card.id, scope: uploadScope, rasterizeSvg }),
   });
 
-  const uploadImageFor = (
-    uploading: { begin: () => boolean; end: () => void },
-    allowSvg: boolean = false,
-  ) => async (file: File): Promise<{ url: string; alt: string }> => {
-    const contentType = normalizeAttachmentContentType(file.type);
-    const isSvg = contentType === "image/svg+xml";
-    if (isSvg) {
-      if (!allowSvg) {
-        throw new Error("Choose a PNG, JPEG, GIF, or WebP image.");
-      }
-    } else if (!isPreviewableImageContentType(contentType)) {
-      throw new Error("Choose a PNG, JPEG, GIF, or WebP image.");
-    }
-
-    if (!uploading.begin()) {
-      throw new Error("An image is still uploading. Paste again when it finishes.");
-    }
-    try {
-      return await upload.mutateAsync({ file, rasterizeSvg: allowSvg && isSvg });
-    } finally {
-      uploading.end();
-    }
-  };
-
+  const uploadFile: UploadImage = (file, options) => upload.mutateAsync({ file, ...options });
   const uploadDescriptionImage = useMemo(
-    () => uploadImageFor({ begin: cardDraft.beginUpload, end: cardDraft.endUpload }, true),
+    () => uploadImageFor(uploadFile, { begin: cardDraft.beginUpload, end: cardDraft.endUpload }, true),
     [cardDraft.beginUpload, cardDraft.endUpload],
   );
-  const uploadCommentImage = useMemo(
-    () => uploadImageFor(
-      {
-        begin() {
-          if (commentUploadingRef.current) return false;
-          commentUploadingRef.current = true;
-          setCommentUploading(true);
-          return true;
-        },
-        end() {
-          commentUploadingRef.current = false;
-          setCommentUploading(false);
-        },
-      },
-      false,
-    ),
-    [],
-  );
-  const uploadEditedCommentImage = useMemo(
-    () => async (file: File) => {
-      const targetId = editingCommentIdRef.current;
-      const result = await uploadCommentImage(file);
-      if (targetId && !commentsRef.current.some((comment) => comment.id === targetId && !comment.deleted)) {
-        // The deleted row unmounted its editor, so preserve its pending image here.
-        setEditCommentDraft((draft) => `${draft}\n\n![${result.alt}](${result.url})`);
-      }
-      return result;
-    },
-    [],
-  );
-  const uploadReplyImage = useMemo(() => {
-    return async (file: File): Promise<{ url: string; alt: string }> => {
-      const capturedGeneration = replyGenerationRef.current;
-      const capturedTargetId = replyingCommentIdRef.current;
-      const capturedInitialDraft = replyDraftRef.current;
-      if (capturedTargetId) {
-        pendingReplyUploadTargetRef.current = { targetId: capturedTargetId, initialDraft: capturedInitialDraft };
-      }
-      const contentType = normalizeAttachmentContentType(file.type);
-      if (!isPreviewableImageContentType(contentType)) {
-        throw new Error("Choose a PNG, JPEG, GIF, or WebP image.");
-      }
-      setReplyUploading(true);
-      try {
-        const result = await upload.mutateAsync({ file });
-        // Tie async completion to reply owner generation + target.
-        // It may never overwrite another target's or newer reply draft.
-        if (replyGenerationRef.current !== capturedGeneration || replyingCommentIdRef.current !== capturedTargetId) {
-          throw new Error("Reply composer target changed or closed before upload completed.");
-        }
-        const targetStillExists = capturedTargetId ? commentsRef.current.some((c) => c.id === capturedTargetId && !c.deleted) : false;
-        if (!targetStillExists && capturedTargetId !== null) {
-          // Target was deleted by peer while upload was in flight.
-          // Form exact markdown embed using the current live reply draft.
-          const currentDraft = replyDraftRef.current;
-          const markup = `![${result.alt}](${result.url})`;
-          const finalOrphanText = currentDraft.trim() !== "" ? `${currentDraft}\n\n${markup}` : markup;
-          setOrphanedReply((prev) => (prev !== null ? prev : { text: finalOrphanText }));
-          setReplyingCommentId(null);
-          setReplyingRootId(null);
-          setReplyDraft("");
-          return result;
-        }
-        return result;
-      } catch (err) {
-        const targetId = replyingCommentIdRef.current ?? capturedTargetId;
-        const targetStillExists = targetId ? commentsRef.current.some((c) => c.id === targetId && !c.deleted) : true;
-        if (!targetStillExists && capturedTargetId !== null) {
-          const currentDraft = replyDraftRef.current;
-          if (currentDraft.trim() !== "") {
-            setOrphanedReply((prev) => (prev !== null ? prev : { text: currentDraft }));
-            setReplyingCommentId(null);
-            setReplyingRootId(null);
-            setReplyDraft("");
-          }
-        }
-        throw err;
-      } finally {
-        setReplyUploading(false);
-      }
-    };
-  }, [upload]);
+  const commentThread = useCommentThread(authoredScope, {
+    cardId: card.id,
+    me,
+    comments,
+    requestClose: (action) => requestClose(action),
+    upload: uploadFile,
+  });
+  const { uncertain: commentUncertain } = commentThread.composer;
+  const { uncertain: replyUncertain } = commentThread.reply;
   // Every authored draft is guarded independently of the title/description Save.
   const hasTextChanges = titleHasChanges || descriptionHasChanges;
   const textSaveStatusId = `card-text-save-status-${card.id}`;
   // Closing guards every authored lane; the footer Save owns only card text.
   const draftingDirty =
     checklist.hasWork ||
-    commentEditHasWork ||
+    commentThread.hasWork ||
     titleHasChanges ||
     descriptionHasChanges ||
     descriptionUploading ||
-    commentUploading ||
-    replyUploading ||
-    orphanedReply !== null ||
     savePending ||
-    pendingCommentId !== null ||
-    pendingReplyId !== null ||
     saveUncertain ||
-    commentUncertain ||
-    replyUncertain ||
-    commentRecovery !== null ||
-    replyRecovery !== null ||
     saveRecovery !== null ||
-    (composingComment && (commentDraft.trim() !== "" || commentUploading)) ||
-    (replyingCommentId !== null && (replyDraft.trim() !== "" || replyUploading)) ||
     subtasks.hasWork;
   // The pull request link is unsaved work too — it just belongs to Link pull
   // request, not Save — so closing is guarded the same way.
@@ -926,65 +579,6 @@ export function CardModal({
     onCancelBlockedNavigation?.();
   };
 
-  // Reconcile active reply composer when comments change:
-  // - If replying to a reply, check if that reply still exists. If the reply was deleted
-  //   by a peer, fall back to its thread root if that root is still live (not deleted).
-  // - If replying to a root, check if the root still exists and is not deleted.
-  // - If no valid live anchor remains:
-  //     - If the draft has text, prompt the user via requestClose / discard strip rather
-  //       than silently dropping the text or stranding invisible dirty state.
-  //     - If the draft is empty, simply close the composer.
-  useEffect(() => {
-    if (replyingCommentId === null) return;
-    const target = comments.find((c) => c.id === replyingCommentId);
-    if (target) {
-      // The target still exists. Ensure root comment tracking is synced.
-      const rootId = target.parentCommentId ?? target.id;
-      if (replyingRootId !== rootId) {
-        setReplyingRootId(rootId);
-      }
-      return;
-    }
-
-    // If reply is currently uploading, keep ownership; the upload completion
-    // will detect the missing target and create an orphan recovery.
-    // The uploading guard now precedes child-to-root reanchor.
-    if (replyUploadingRef.current) {
-      return;
-    }
-
-    // The target comment was deleted or pruned by a peer.
-    // Check if the thread's root comment still survives (either active or tombstoned with remaining replies).
-    const root = replyingRootId ? comments.find((c) => c.id === replyingRootId) : null;
-    if (root) {
-      // Re-anchor the active composer visibly directly beneath the surviving root.
-      // If the root is tombstoned, renderReplyComposer will appear under the root row,
-      // keeping the draft visible and editable!
-      setReplyingCommentId(root.id);
-      return;
-    }
-
-    // Neither the target comment nor any thread root survives.
-    // If reply is currently uploading, keep ownership; the upload completion
-    // will detect the missing target and create an orphan recovery.
-    if (replyUploadingRef.current) {
-      // Don't discard or clear target while uploading: keep active composer visible
-      // until upload completes or fails, so user can edit and see progress.
-      return;
-    }
-    // Prompt the user via the discard guard if dirty, or close if empty.
-    if (replyDraft.trim() !== "") {
-      requestClose(() => {
-        setReplyingCommentId(null);
-        setReplyingRootId(null);
-        setReplyDraft("");
-      });
-    } else {
-      setReplyingCommentId(null);
-      setReplyingRootId(null);
-      setReplyDraft("");
-    }
-  }, [comments, replyingCommentId, replyingRootId, replyDraft]);
   // A peer can delete the row while its confirmation is open. Do not leave an
   // invisible Escape rung behind after the live attachment disappears.
   useEffect(() => {
@@ -1887,616 +1481,23 @@ export function CardModal({
       </div>
     </details>
   );
-  const membersById = useMemo(
-    () => new Map(members.map((member) => [member.id, member])),
-    [members],
-  );
-  const activityRows = useMemo((): ActivityTimelineItem[] => {
-    const oldestFirst =
-      activityView === "all"
-        ? activityTimeline(comments, activities)
-        : activityView === "comments"
-          ? activityTimeline(comments, [])
-          : activityTimeline([], activities);
-    if (activitySortOrder === "desc") {
-      return [...oldestFirst].reverse();
-    }
-    return oldestFirst;
-  }, [activityView, comments, activities, activitySortOrder]);
-  const activeCommentCount = useMemo(
-    () => comments.filter((comment) => !comment.deleted).length,
-    [comments],
-  );
-  const activityCounts: Record<ActivityView, number> = {
-    all: activeCommentCount + activities.length,
-    comments: activeCommentCount,
-    history: activities.length,
-  };
-  const emptyActivityCopy =
-    activityView === "all"
-      ? "No activity yet."
-      : activityView === "comments"
-        ? "No comments yet."
-        : "No history yet.";
-  const renderReplyComposer = (rootId: string) => (
-    <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-border bg-card p-3 shadow-xs">
-      {replyError && (
-        <div role="alert" className="flex items-center justify-between gap-2 text-xs text-destructive">
-          <span>{replyError}</span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            onClick={() => submitReply(rootId)}
-            className="h-6 px-2 text-xs text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-          >
-            Retry
-          </Button>
-        </div>
-      )}
-      <MarkdownEditor
-        value={replyDraft}
-        readOnly={pendingReplyId !== null || replyUncertain}
-        onChange={(val) => {
-          setReplyDraft(val);
-          replyDraftRef.current = val;
-          clearReplyError();
-        }}
-        onSubmit={() => submitReply(rootId)}
-        onEscape={cancelReplyComposer}
-        onUploadImage={uploadReplyImage}
-        ariaLabel="Comment"
-        rows={4}
-        imageInputTestId="comment-image-input"
-      />
-      <div className="flex gap-2">
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          onClick={() => submitReply(rootId)}
-          disabled={replyDraft.trim() === "" || replyUploading || pendingReplyId !== null || replyUncertain || replyRecovery !== null}
-          className="pointer-coarse:min-h-11 pointer-coarse:px-4"
-        >
-          {pendingReplyId !== null ? "Sending…" : "Reply"}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          disabled={replyUploading}
-          onClick={() => cancelReplyComposer()}
-          className="text-muted-foreground hover:text-foreground pointer-coarse:min-h-11 pointer-coarse:px-4"
-        >
-          Cancel
-        </Button>
-      </div>
-    </div>
-  );
-
   const activitySection = (
-    <div className="flex min-w-0 flex-col gap-3">
-      <h3 className="card-section-title text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        <MessageSquare aria-hidden="true" className="card-section-icon" />Activity
-      </h3>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div role="tablist" aria-label="Activity view" className="flex flex-wrap gap-1">
-          {ACTIVITY_TABS.map((tab) => {
-            const selected = activityView === tab.view;
-            return (
-              <button
-                key={tab.view}
-                id={`card-activity-${tab.view}-tab`}
-                ref={(element) => {
-                  activityTabRefs.current[tab.view] = element;
-                }}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                aria-controls="card-activity-panel"
-                tabIndex={selected ? 0 : -1}
-                onClick={() => setActivityView(tab.view)}
-                onKeyDown={(event) => onActivityTabKeyDown(event, tab.view)}
-                className={cn(
-                  "whitespace-nowrap rounded-md border px-2 py-1 text-sm transition-colors focus-visible:outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
-                  selected
-                    ? "border-input bg-card font-medium text-foreground shadow-xs"
-                    : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                )}
-              >
-                {tab.label} · {activityCounts[tab.view]}
-              </button>
-            );
-          })}
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-label={
-            activitySortOrder === "asc"
-              ? "Sort activity by date: Oldest first"
-              : "Sort activity by date: Newest first"
-          }
-          onClick={() =>
-            setActivitySortOrder((current) =>
-              current === "asc" ? "desc" : "asc",
-            )
-          }
-        >
-          {activitySortOrder === "asc" ? (
-            <CalendarArrowUp aria-hidden className="size-4" />
-          ) : (
-            <CalendarArrowDown aria-hidden className="size-4" />
-          )}
-          {activitySortOrder === "asc" ? "Oldest first" : "Newest first"}
-        </Button>
-      </div>
-      <div
-        id="card-activity-panel"
-        role="tabpanel"
-        aria-labelledby={`card-activity-${activityView}-tab`}
-        className="flex min-w-0 flex-col gap-2"
-      >
-        {activityRows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{emptyActivityCopy}</p>
-        ) : (
-          <div className="flex min-w-0 flex-col gap-2">
-            <ul className="flex min-w-0 flex-col gap-2">
-            {activityRows.map((item) => {
-              if (item.kind === "history") {
-                const actor = membersById.get(item.activity.actorId) ?? null;
-                const createdAtDate = new Date(item.createdAt);
-                const isCreatedAtValid = !Number.isNaN(createdAtDate.getTime());
-                return (
-                  <li
-                    key={item.key}
-                    className="flex min-w-0 items-start gap-2 text-sm text-foreground"
-                  >
-                    {actor ? (
-                      <Avatar name={actor.name} githubLogin={actor.githubLogin} />
-                    ) : (
-                      <span aria-hidden="true" className="size-5 shrink-0" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <span className="sr-only">History entry: </span>
-                      <p className="min-w-0 [overflow-wrap:anywhere] text-foreground">
-                        <span className="min-w-0 [overflow-wrap:anywhere] font-medium">{actor?.name ?? "former member"}</span>{" "}
-                        {activitySentence(item.activity.detail, members)}
-                      </p>
-                      <time
-                        {...(isCreatedAtValid ? { dateTime: createdAtDate.toISOString() } : {})}
-                        className="text-xs text-muted-foreground"
-                      >
-                        {isCreatedAtValid ? createdAtDate.toLocaleString() : "Invalid date"}
-                      </time>
-                    </div>
-                  </li>
-                );
-              }
-
-              const { comment, replies } = item;
-
-              const renderCommentRow = (c: Comment) => {
-                const cAuthor = membersById.get(c.authorId) ?? null;
-                const cCreatedAtDate = new Date(c.createdAt);
-                const cIsCreatedAtValid = !Number.isNaN(cCreatedAtDate.getTime());
-
-                if (c.deleted) {
-                  return (
-                    <div
-                      key={c.id}
-                      data-comment-id={c.id}
-                      className="group flex min-w-0 items-start gap-2 text-sm text-foreground"
-                    >
-                      <span aria-hidden="true" className="size-5 shrink-0" />
-                      <div className="flex min-w-0 flex-1 flex-col gap-1.5 rounded-lg border border-border bg-card p-3 shadow-xs italic text-muted-foreground">
-                        Comment deleted
-                      </div>
-                    </div>
-                  );
-                }
-
-                return (
-                  <div
-                    key={c.id}
-                    data-comment-id={c.id}
-                    className="group flex min-w-0 items-start gap-2 text-sm text-foreground"
-                  >
-                    {cAuthor ? (
-                      <Avatar name={cAuthor.name} githubLogin={cAuthor.githubLogin} />
-                    ) : (
-                      <span aria-hidden="true" className="size-5 shrink-0" />
-                    )}
-                    <div className="card-comment-content flex min-w-0 flex-1 flex-col gap-1.5 rounded-lg border border-border bg-card p-3 shadow-xs">
-                      <div className="flex min-w-0 flex-wrap items-center gap-2">
-                        <span className="sr-only">Comment by </span>
-                        <span className="min-w-0 [overflow-wrap:anywhere] font-medium">
-                          {cAuthor?.name ?? "former member"}
-                        </span>
-                        <time
-                          {...(cIsCreatedAtValid ? { dateTime: cCreatedAtDate.toISOString() } : {})}
-                          className="text-xs text-muted-foreground"
-                          title={cIsCreatedAtValid ? cCreatedAtDate.toLocaleString() : "Invalid date"}
-                          aria-label={cIsCreatedAtValid ? cCreatedAtDate.toLocaleString() : "Invalid date"}
-                        >
-                          {cIsCreatedAtValid ? cCreatedAtDate.toLocaleDateString("en-US", {
-                            month: "short",
-                            day: "numeric",
-                            ...(cCreatedAtDate.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}),
-                          }) : "Invalid date"}
-                        </time>
-                        {c.updatedAt > c.createdAt && (
-                          <span className="text-xs text-muted-foreground">(edited)</span>
-                        )}
-                        <span className="flex-1" />
-                        {me !== null && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            aria-label="Reply to comment"
-                            ref={(el) => {
-                              replyButtonRefs.current[c.id] = el;
-                            }}
-                            disabled={replyUploading || orphanedReply !== null}
-                            onClick={() => startReply(c)}
-                            className="size-7 pointer-coarse:size-11 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
-                          >
-                            <Reply aria-hidden className="size-3.5" />
-                          </Button>
-                        )}
-                        {/* Legacy comment permissions remain UI-only (ADR 0029). */}
-                        {me?.id === c.authorId && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            aria-label="Edit comment"
-                            disabled={pendingCommentEditId !== null || commentUploading}
-                            onClick={() => {
-                              if (pendingCommentEditIdRef.current !== null || commentUploadingRef.current) return;
-                              if (editingCommentIdRef.current === c.id) return;
-                              if (commentEditHasWorkRef.current) {
-                                requestClose(() => { setEditingCommentId(c.id); setEditCommentDraft(c.body); setEditCommentBaseline(c.body); clearCommentEditError(); });
-                                return;
-                              }
-                              setEditingCommentId(c.id);
-                              setEditCommentDraft(c.body);
-                              setEditCommentBaseline(c.body);
-                              clearCommentEditError();
-                            }}
-                            className="size-7 pointer-coarse:size-11 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
-                          >
-                            <Pencil aria-hidden className="size-3.5" />
-                          </Button>
-                        )}
-                        {me !== null && (me.id === c.authorId || me.isAdmin) && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            aria-label="Delete comment"
-                            disabled={editingCommentId === c.id}
-                            onClick={() => commands.deleteComment(c.id)}
-                            className="size-7 pointer-coarse:size-11 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
-                          >
-                            <X aria-hidden className="size-3.5" />
-                          </Button>
-                        )}
-                      </div>
-                      {editingCommentId === c.id ? (
-                        <div className="flex min-w-0 flex-col gap-2">
-                          <MarkdownEditor
-                            value={editCommentDraft}
-                            onChange={setEditCommentDraft}
-                            onSubmit={saveCommentEdit}
-                            onEscape={cancelCommentEdit}
-                            readOnly={pendingCommentEditId !== null}
-                            onUploadImage={uploadEditedCommentImage}
-                            ariaLabel="Comment"
-                            rows={4}
-                            imageInputTestId="comment-image-input"
-                          />
-                          <div className="flex gap-2">
-                            <Button
-                              type="button"
-                              variant="default"
-                              size="sm"
-                              onClick={saveCommentEdit}
-                              disabled={editCommentDraft.trim() === "" || commentUploading || pendingCommentEditId !== null}
-                              className="pointer-coarse:min-h-11 pointer-coarse:px-4"
-                            >
-                              Save comment
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={cancelCommentEdit}
-                              disabled={commentUploading || pendingCommentEditId !== null}
-                              className="text-muted-foreground hover:text-foreground pointer-coarse:min-h-11 pointer-coarse:px-4"
-                            >
-                              Cancel
-                            </Button>
-                          </div>
-                          {commentEditError && <p role="alert" className="text-xs text-destructive">{commentEditError}</p>}
-                          {pendingCommentEditId !== null && <p role="status" className="text-xs text-muted-foreground">{commentEditUncertain ? "Checking whether comment edit completed…" : "Saving comment…"}</p>}
-                          {commentUploading && (
-                            <p role="status" className="text-xs text-muted-foreground">
-                              Converting and uploading image…
-                            </p>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="prose prose-sm min-w-0 max-w-none break-words [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
-                          <MarkdownContent
-                            value={c.body}
-                            previewImages={previewImages}
-                            onOpenImage={handleOpenAttachmentFromMarkdown}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              };
-
-              return (
-                <li key={item.key} className="flex min-w-0 flex-col gap-2">
-                  {renderCommentRow(comment)}
-                  {replyRecovery && replyRecovery.parentCommentId === comment.id && (
-                    <div className="pl-7">
-                      <div
-                        role="alert"
-                        className="flex flex-col gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-xs text-destructive"
-                      >
-                        <div className="flex items-center justify-between gap-2 font-medium">
-                          <span>{replyRecovery.error}</span>
-                          <div className="flex items-center gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="xs"
-                              onClick={retryReplyRecovery}
-                              disabled={replyUploading || pendingReplyId !== null || replyUncertain}
-                              className="h-6 px-2 text-xs font-semibold text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-                            >
-                              {pendingReplyId !== null ? "Retrying…" : "Retry unsent reply"}
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="xs"
-                              disabled={pendingReplyId !== null || replyUncertain}
-                              onClick={() => {
-                                if (pendingReplyId !== null || replyUncertain) return;
-                                replyOp.discard();
-                              }}
-                              className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:px-3"
-                            >
-                              Discard unsent reply
-                            </Button>
-                          </div>
-                        </div>
-                        <div className="rounded border border-border/50 bg-background/50 p-2 text-foreground font-mono text-[11px] whitespace-pre-wrap break-words">
-                          <span className="font-semibold text-muted-foreground">Unsent reply: </span>
-                          {replyRecovery.rawDraft}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {replyingCommentId === comment.id && (
-                    <div className="pl-7">
-                      {renderReplyComposer(comment.id)}
-                    </div>
-                  )}
-                  {replies.length > 0 && (
-                    <div className="flex min-w-0 flex-col gap-2 pl-7">
-                      {replies.map((reply) => (
-                        <div key={reply.id} className="flex min-w-0 flex-col gap-2">
-                          {renderCommentRow(reply)}
-                          {replyingCommentId === reply.id && (
-                            <div className="pl-7">
-                              {renderReplyComposer(comment.id)}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-            </ul>
-          </div>
-        )}
-        {replyingCommentId !== null && !comments.some((c) => c.id === replyingCommentId && !c.deleted) && replyUploading && (
-          <div className="pl-7">
-            {renderReplyComposer(replyingCommentId)}
-          </div>
-        )}
-        {editedCommentDeleted && (
-          <div role="alert" className="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-xs text-destructive">
-            <span>Edited comment was deleted. Your draft is preserved.</span>
-            <Textarea aria-label="Preserved comment edit" readOnly value={editCommentDraft} rows={4} className="w-full rounded border border-border bg-background p-2 font-mono text-foreground" />
-            <div className="flex gap-2">
-              <Button
-                type="button" variant="outline" size="xs"
-                disabled={commentUploading || pendingCommentEditId !== null || pendingCommentId !== null || commentUncertain || commentRecovery !== null}
-                onClick={() => {
-                  setCommentDraft((draft) => draft !== "" ? `${draft}\n\n${editCommentDraft}` : editCommentDraft);
-                  setComposingComment(true);
-                  cancelCommentEdit();
-                }}
-              >Move to comment</Button>
-              <Button type="button" variant="ghost" size="xs" disabled={commentUploading || pendingCommentEditId !== null} onClick={cancelCommentEdit}>Discard edit</Button>
-            </div>
-            {commentUploading && <p role="status">Uploading image into preserved draft…</p>}
-            {pendingCommentEditId !== null && <p role="status">{commentEditUncertain ? "Checking whether comment edit completed…" : "Saving comment…"}</p>}
-            {commentEditError && <p>{commentEditError}</p>}
-          </div>
-        )}
-        {orphanedReply && (
-          <div
-            role="alert"
-            className="flex flex-col gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-xs text-destructive"
-          >
-            <div className="flex items-center justify-between gap-2 font-medium">
-              <span>Target comment was deleted by a peer. Reply draft preserved (image placed at end):</span>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="xs"
-                  disabled={
-                    pendingCommentId !== null ||
-                    commentUncertain ||
-                    commentUploading ||
-                    commentRecovery !== null
-                  }
-                  onClick={() => {
-                    if (
-                      pendingCommentId !== null ||
-                      commentUncertain ||
-                      commentUploading ||
-                      commentRecovery !== null
-                    ) return;
-                    setCommentDraft((prev) => (prev.trim() !== "" ? `${prev}\n\n${orphanedReply.text}` : orphanedReply.text));
-                    setComposingComment(true);
-                    setOrphanedReply(null);
-                  }}
-                  className="h-6 px-2 text-xs font-semibold text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-                >
-                  Move to comment
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  onClick={() => {
-                    setOrphanedReply(null);
-                  }}
-                  className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground pointer-coarse:min-h-11 pointer-coarse:px-3"
-                >
-                  Discard
-                </Button>
-              </div>
-            </div>
-            <div className="rounded border border-border/50 bg-background/50 p-2 text-foreground font-mono text-[11px] whitespace-pre-wrap break-words">
-              {orphanedReply.text}
-            </div>
-          </div>
-        )}
-        {activityView !== "history" &&
-          me !== null && (
-            <div className="card-comment-composer-row flex min-w-0 items-start gap-2" data-expanded={composingComment || commentRecovery !== null || commentError !== null || commentUploading || pendingCommentId !== null || commentUncertain}>
-              <Avatar name={me.name} githubLogin={me.githubLogin} userId={me.id} avatarVersion={me.avatarVersion} />
-              <div className="min-w-0 flex-1">
-                  <div className="card-comment-composer flex min-w-0 flex-col gap-2">
-                    {commentRecovery && (
-                      <div
-                        role="alert"
-                        className="flex flex-col gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-xs text-destructive"
-                      >
-                        <div className="flex items-center justify-between gap-2 font-medium">
-                          <span>{commentRecovery.error}</span>
-                          <div className="flex items-center gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="xs"
-                              onClick={retryCommentRecovery}
-                              disabled={commentUploading || pendingCommentId !== null || commentUncertain}
-                              className="h-6 px-2 text-xs font-semibold text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-                            >
-                              {pendingCommentId !== null ? "Retrying…" : "Retry unsent comment"}
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="xs"
-                              disabled={pendingCommentId !== null || commentUncertain}
-                              onClick={() => {
-                                if (pendingCommentId !== null || commentUncertain) return;
-                                commentOp.discard();
-                              }}
-                              className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:px-3"
-                            >
-                              Discard unsent comment
-                            </Button>
-                          </div>
-                        </div>
-                        <div className="rounded border border-border/50 bg-background/50 p-2 text-foreground font-mono text-[11px] whitespace-pre-wrap break-words">
-                          <span className="font-semibold text-muted-foreground">Unsent comment: </span>
-                          {commentRecovery.rawDraft}
-                        </div>
-                      </div>
-                    )}
-                    {commentError && (
-                      <div role="alert" className="flex items-center justify-between gap-2 text-xs text-destructive">
-                        <span>{commentError}</span>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          onClick={submitComment}
-                          className="h-6 px-2 text-xs text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
-                        >
-                          Retry
-                        </Button>
-                      </div>
-                    )}
-                    <MarkdownEditor
-                      autoFocus={false}
-                      feedbackResetToken={commentFeedbackResetToken}
-                      compact={!composingComment && !commentRecovery && !commentError && !commentUploading && pendingCommentId === null && !commentUncertain}
-                      placeholder="Add a comment…"
-                      onFocus={() => setComposingComment(true)}
-                      onClick={() => setComposingComment(true)}
-                      value={commentDraft}
-                      readOnly={pendingCommentId !== null || commentUncertain}
-                      onChange={(val) => {
-                        setComposingComment(true);
-                        setCommentDraft(val);
-                        commentDraftRef.current = val;
-                        clearCommentError();
-                      }}
-                      onSubmit={submitComment}
-                      onEscape={composingComment || commentUploading ? cancelComposer : undefined}
-                      onUploadImage={uploadCommentImage}
-                      ariaLabel={composingComment ? "Comment" : "Add a comment"}
-                      rows={4}
-                      imageInputTestId="comment-image-input"
-                    />
-                    <div className="card-comment-actions flex gap-2">
-                      <Button
-                        type="button"
-                        variant="default"
-                        size="sm"
-                        onClick={submitComment}
-                        disabled={commentDraft.trim() === "" || commentUploading || pendingCommentId !== null || commentUncertain || commentRecovery !== null}
-                        className="pointer-coarse:min-h-11 pointer-coarse:px-4"
-                      >
-                        {pendingCommentId !== null ? "Sending…" : "Comment"}
-                      </Button>
-                      {composingComment && <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={commentUploading || pendingCommentId !== null || commentUncertain}
-                        onClick={() => cancelComposer()}
-                        className="text-muted-foreground hover:text-foreground pointer-coarse:min-h-11 pointer-coarse:px-4"
-                      >
-                        Cancel
-                      </Button>}
-                    </div>
-                  </div>
-              </div>
-            </div>
-          )}
-      </div>
-    </div>
+    <CardActivity
+      commentThread={commentThread}
+      comments={comments}
+      activities={activities}
+      members={members}
+      me={me}
+      commands={commands}
+      previewImages={previewImages}
+      onOpenImage={handleOpenAttachmentFromMarkdown}
+      activityView={activityView}
+      setActivityView={setActivityView}
+      activitySortOrder={activitySortOrder}
+      setActivitySortOrder={setActivitySortOrder}
+      activityTabRefs={activityTabRefs}
+      onActivityTabKeyDown={onActivityTabKeyDown}
+    />
   );
   // Header and footer sit outside the scroll region: the title and Save must
   // stay reachable however long the comment thread grows. Their borders always
