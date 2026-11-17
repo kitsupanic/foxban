@@ -27,9 +27,7 @@ import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  DESCRIPTION_MAX_BYTES,
   type ClientMessage,
-  descriptionByteLength,
   isPreviewableImageContentType,
   normalizeAttachmentContentType,
   type Activity,
@@ -81,6 +79,7 @@ import { CardSubtasks } from "./CardSubtasks";
 import { cardDevelopmentQueryOptions, connectedReposQueryOptions, usePullRequestLink } from "../lib/card-development";
 import { TASK_TYPE_META } from "../lib/task-type";
 import { restoreFocusSoon } from "../lib/focus";
+import { useCardDraft } from "../lib/card-draft";
 import { useChecklist } from "../lib/checklist";
 import { useSubtaskComposer } from "../lib/subtask-composer";
 import { composerLane, useAuthoredOperation, useAuthoredScope, type AuthoredScope } from "../lib/authored-operation";
@@ -239,19 +238,8 @@ export function CardModal({
     readBoard: () => queryClient.getQueryData<BoardState>(boardQueryKey(boardId)),
   });
   const commands = useBoardCommands(boardId, send);
-  const [title, setTitle] = useState(card.title);
-  const [editingTitle, setEditingTitle] = useState(false);
   const editTitleButtonRef = useRef<HTMLButtonElement | null>(null);
-  // Mount-only seed; never replaces an already-open draft on live updates.
-  const [descriptionDraft, setDescriptionDraft] = useState(() =>
-    boardAttachments.seedDescription(card.id, card.description),
-  );
   const attachmentView = useAttachmentView(boardAttachments);
-  // Only the "Description must be…" refusal; a failed send is the save operation's own error.
-  const [saveValidationError, setSaveValidationError] = useState<string | null>(null);
-  const [descriptionUploading, setDescriptionUploading] = useState(false);
-  const descriptionUploadingRef = useRef(descriptionUploading);
-  descriptionUploadingRef.current = descriptionUploading;
   const [commentUploading, setCommentUploading] = useState(false);
   const commentUploadingRef = useRef(commentUploading);
   commentUploadingRef.current = commentUploading;
@@ -316,70 +304,21 @@ export function CardModal({
   // Typing dismisses an inline error; a retained recovery stays until retried or discarded.
   const clearCommentError = () => { if (commentError !== null) commentOp.discard(); };
   const clearReplyError = () => { if (replyError !== null) replyOp.discard(); };
-  // Save is one authored operation (ADR 0069): `card.update` with the fields Save diffed. `sent` is
-  // that diff plus the draft it was taken from (to tell later edits apart on acceptance). `entityId`
-  // is the card, only so the lane helper has a marker for "in flight".
-  type SaveSent = { entityId: string; submittedTitle?: string; submittedDescription?: string; draftTitle: string; draftDescription: string };
-  const saveRetriedRef = useRef(false);
-  const saveRecoveryErrorRef = useRef("");
-  // What each attempt of the lineage actually carried, by mutationId: a retry re-diffs against the
-  // live card, so it can drop a field a peer already saved, and an earlier attempt may still be
-  // accepted late. Acceptance updates baselines for exactly what the accepted attempt carried.
-  const saveAttemptDiffsRef = useRef(new Map<string, { title?: string; description?: string }>());
-  const saveOp = useAuthoredOperation<SaveSent>(authoredScope, {
-    build: (mutationId, { submittedTitle, submittedDescription }): ClientMessage | null => {
-      const retried = saveRetriedRef.current;
-      const diff: { title?: string; description?: string } = {};
-      if (submittedTitle !== undefined && (!retried || submittedTitle !== cardRef.current.title)) diff.title = submittedTitle;
-      if (submittedDescription !== undefined && (!retried || submittedDescription !== cardRef.current.description)) diff.description = submittedDescription;
-      saveAttemptDiffsRef.current.set(mutationId, diff);
-      // Nothing left to send: the lineage settles and its recovery goes with it.
-      if (diff.title === undefined && diff.description === undefined) return null;
-      return { type: "card.update", mutationId, id: cardRef.current.id, ...diff };
-    },
-    onAccepted: ({ draftTitle, draftDescription }, mutationId) => {
-      const { title: sentTitle, description: sentDescription } = saveAttemptDiffsRef.current.get(mutationId) ?? {};
-      saveAttemptDiffsRef.current.clear();
-      const currentTitle = titleRef.current.trim();
-      const currentDescription = descriptionRef.current;
-      if (sentTitle !== undefined) {
-        titleBaselineRef.current = sentTitle;
-        if (currentTitle === sentTitle) titleDirtyRef.current = false;
-      }
-      if (sentDescription !== undefined) {
-        descriptionBaselineRef.current = sentDescription;
-        if (currentDescription === sentDescription) descriptionDirtyRef.current = false;
-      }
-      // Only a first attempt closes the card, and only if nothing else needs it open. `saveUncertain`
-      // is as of the last render, so a save that went uncertain on the way never closes the card.
-      if (!saveRetriedRef.current && !saveUncertain && !workKeepsCardOpen() && currentTitle === draftTitle && currentDescription === draftDescription) {
-        onCloseRef.current();
-      }
-    },
-    copy: {
-      rejected: "Server rejected save.",
-      unverified: "Sync could not verify save. You can retry sending.",
-      "not-connected": "Not connected — changes won't send.",
-      "accepted-gone": "Server rejected save.", // unreachable: no `confirm`
-    },
+  // Save is one authored operation (ADR 0069): `card.update` with the fields Save diffed.
+  const cardDraft = useCardDraft(authoredScope, {
+    card,
+    boardAttachments,
+    attachmentView,
+    keepsOpen: () => workKeepsCardOpen(),
+    close: onClose,
   });
-  const saveLane = composerLane(saveOp, saveRetriedRef.current, saveRecoveryErrorRef);
-  const { pendingId: pendingSaveId, uncertain: saveUncertain, recovery: saveRecovery } = saveLane;
-  const saveError = saveValidationError ?? saveLane.error;
-  // Typing dismisses an inline error; a retained recovery stays until retried or discarded.
-  const clearSaveError = () => {
-    setSaveValidationError(null);
-    if (saveLane.error !== null) saveOp.discard();
-  };
+  const { title, editingTitle, description, uploading: descriptionUploading, titleHasChanges, descriptionHasChanges, unsavedTextMessage } = cardDraft;
+  const { pending: savePending, uncertain: saveUncertain, error: saveError, recovery: saveRecovery } = cardDraft.saveLane;
   const subtasks = useSubtaskComposer(authoredScope, {
     cardId: card.id,
     isSubtask: card.taskType === "subtask",
     placeTail: () => commands.placeNewCard(columns.find(c => c.starting)?.id ?? card.columnId),
   });
-  const description = useMemo(
-    () => attachmentView.descriptionFor(card.id, descriptionDraft),
-    [attachmentView, card.id, descriptionDraft],
-  );
   const attachmentDeletePending = attachmentView.isDeletePending(card.id);
   const checklist = useChecklist(authoredScope, {
     cardId: card.id,
@@ -442,46 +381,18 @@ export function CardModal({
   const replyDraftRef = useRef(replyDraft);
   replyDraftRef.current = replyDraft;
   const replyGenerationRef = useRef(0);
-  const titleRef = useRef(title);
-  titleRef.current = title;
-  const descriptionRef = useRef(description);
-  descriptionRef.current = description;
-  // Each field is sent only when the user edited it and it differs from the
-  // value that edit started from, so an untouched field never overwrites a peer.
-  const titleBaselineRef = useRef(card.title);
-  const descriptionBaselineRef = useRef(card.description);
-  const titleDirtyRef = useRef(false);
-  const descriptionDirtyRef = useRef(description !== card.description);
-  useEffect(() => {
-    if (!titleDirtyRef.current && card.title !== titleRef.current) {
-      titleRef.current = card.title;
-      setTitle(card.title);
-    }
-    if (!titleDirtyRef.current) titleBaselineRef.current = card.title;
-    if (!descriptionDirtyRef.current && card.description !== descriptionRef.current) {
-      descriptionRef.current = card.description;
-      setDescriptionDraft(card.description);
-    }
-    if (!descriptionDirtyRef.current) descriptionBaselineRef.current = card.description;
-  }, [card.title, card.description]);
   const commentsRef = useRef(comments);
   commentsRef.current = comments;
   const cardRef = useRef(card);
   cardRef.current = card;
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
   const commentRecoveryRef = useRef(commentRecovery);
   commentRecoveryRef.current = commentRecovery;
   const replyRecoveryRef = useRef(replyRecovery);
   replyRecoveryRef.current = replyRecovery;
-  const saveRecoveryRef = useRef(saveRecovery);
-  saveRecoveryRef.current = saveRecovery;
   const pendingCommentIdRef = useRef(pendingCommentId);
   pendingCommentIdRef.current = pendingCommentId;
   const pendingReplyIdRef = useRef(pendingReplyId);
   pendingReplyIdRef.current = pendingReplyId;
-  const attachmentDeletePendingRef = useRef(attachmentDeletePending);
-  attachmentDeletePendingRef.current = attachmentDeletePending;
   const commentUncertainRef = useRef(commentUncertain);
   commentUncertainRef.current = commentUncertain;
   const replyUncertainRef = useRef(replyUncertain);
@@ -789,12 +700,6 @@ export function CardModal({
     replyOp.retry();
   };
 
-  const retrySaveRecovery = () => {
-    if (!saveRecovery || descriptionUploadingRef.current || pendingSaveId !== null || saveUncertain) return;
-    saveRetriedRef.current = true;
-    saveOp.retry();
-  };
-
   const saveCommentEdit = () => {
     const body = editCommentDraft.trim();
     if (!body || !editingCommentId || commentUploadingRef.current || pendingCommentEditIdRef.current !== null) return;
@@ -808,30 +713,6 @@ export function CardModal({
   };
 
   /**
-   * What Save would send: the draft diffed against the card. Shared with the
-   * dirty check below, so "unsaved changes" means exactly "Save has work".
-   */
-  const changes = (): { title?: string; description?: string } => {
-    const nextTitle = title.trim();
-    const diff: { title?: string; description?: string } = {};
-    // An emptied title is a slip, not an edit — the card keeps the old one.
-    if (titleDirtyRef.current && nextTitle && nextTitle !== titleBaselineRef.current) diff.title = nextTitle;
-    if (descriptionDirtyRef.current && description !== descriptionBaselineRef.current) {
-      diff.description = description;
-    }
-    return diff;
-  };
-
-  const liveChanges = (): { title?: string; description?: string } => {
-    const nextTitle = titleRef.current.trim();
-    const diff: { title?: string; description?: string } = {};
-    if (titleDirtyRef.current && nextTitle && nextTitle !== titleBaselineRef.current) diff.title = nextTitle;
-    if (descriptionDirtyRef.current && descriptionRef.current !== descriptionBaselineRef.current) {
-      diff.description = descriptionRef.current;
-    }
-    return diff;
-  };
-  /**
    * What keeps the card open after an accepted save instead of throwing it away: a submitted write
    * of another lane still in flight, a draft, or a recovery still on screen (Save's own included,
    * so the late acceptance of an earlier attempt does not close the card).
@@ -843,35 +724,14 @@ export function CardModal({
     (composingCommentRef.current && (commentDraftRef.current.trim() !== "" || commentUploadingRef.current)) ||
     (replyingCommentIdRef.current !== null && (replyDraftRef.current.trim() !== "" || replyUploadingRef.current)) ||
     orphanedReplyRef.current !== null ||
-    descriptionUploadingRef.current ||
+    cardDraft.current().uploading ||
     commentRecoveryRef.current !== null ||
     replyRecoveryRef.current !== null ||
-    saveRecoveryRef.current !== null ||
+    cardDraft.current().saveLane.recovery !== null ||
     // A pull request draft, or a link request still in flight, is work Save does
     // not own: the card stays open so it is not thrown away by closing.
     pullRequestWorkRef.current ||
     subtasks.current().keepsCardOpen;
-  const save = () => {
-    if (attachmentDeletePendingRef.current || descriptionUploadingRef.current || pendingSaveId !== null || saveUncertain || saveRecoveryRef.current !== null) return;
-    if (descriptionByteLength(description) > DESCRIPTION_MAX_BYTES) {
-      setSaveValidationError("Description must be 100,000 bytes or fewer.");
-      return;
-    }
-    clearSaveError();
-    const diff = liveChanges();
-    if (diff.title === undefined && diff.description === undefined) {
-      return;
-    }
-    saveRetriedRef.current = false;
-    saveAttemptDiffsRef.current.clear();
-    saveOp.start({
-      entityId: cardRef.current.id,
-      submittedTitle: diff.title,
-      submittedDescription: diff.description,
-      draftTitle: titleRef.current.trim(),
-      draftDescription: descriptionRef.current,
-    });
-  };
   /** The one upload path, shared by the panel and the image-only Markdown entry points. */
   const upload = useMutation({
     mutationFn: ({ file, rasterizeSvg }: { file: File; rasterizeSvg?: boolean }) =>
@@ -879,9 +739,8 @@ export function CardModal({
   });
 
   const uploadImageFor = (
-    setUploading: React.Dispatch<React.SetStateAction<boolean>>,
+    uploading: { begin: () => boolean; end: () => void },
     allowSvg: boolean = false,
-    uploadingRef?: React.RefObject<boolean>,
   ) => async (file: File): Promise<{ url: string; alt: string }> => {
     const contentType = normalizeAttachmentContentType(file.type);
     const isSvg = contentType === "image/svg+xml";
@@ -893,29 +752,36 @@ export function CardModal({
       throw new Error("Choose a PNG, JPEG, GIF, or WebP image.");
     }
 
-    if (uploadingRef) {
-      if (uploadingRef.current) {
-        throw new Error("An image is still uploading. Paste again when it finishes.");
-      }
-      uploadingRef.current = true;
+    if (!uploading.begin()) {
+      throw new Error("An image is still uploading. Paste again when it finishes.");
     }
-    setUploading(true);
     try {
       return await upload.mutateAsync({ file, rasterizeSvg: allowSvg && isSvg });
     } finally {
-      if (uploadingRef) {
-        uploadingRef.current = false;
-      }
-      setUploading(false);
+      uploading.end();
     }
   };
 
   const uploadDescriptionImage = useMemo(
-    () => uploadImageFor(setDescriptionUploading, true, descriptionUploadingRef),
-    [],
+    () => uploadImageFor({ begin: cardDraft.beginUpload, end: cardDraft.endUpload }, true),
+    [cardDraft.beginUpload, cardDraft.endUpload],
   );
   const uploadCommentImage = useMemo(
-    () => uploadImageFor(setCommentUploading, false, commentUploadingRef),
+    () => uploadImageFor(
+      {
+        begin() {
+          if (commentUploadingRef.current) return false;
+          commentUploadingRef.current = true;
+          setCommentUploading(true);
+          return true;
+        },
+        end() {
+          commentUploadingRef.current = false;
+          setCommentUploading(false);
+        },
+      },
+      false,
+    ),
     [],
   );
   const uploadEditedCommentImage = useMemo(
@@ -983,27 +849,19 @@ export function CardModal({
     };
   }, [upload]);
   // Every authored draft is guarded independently of the title/description Save.
-  const diff = changes();
-  const titleHasChanges = diff.title !== undefined;
-  const descriptionHasChanges = diff.description !== undefined;
   const hasTextChanges = titleHasChanges || descriptionHasChanges;
   const textSaveStatusId = `card-text-save-status-${card.id}`;
-  const unsavedTextMessage = titleHasChanges && descriptionHasChanges
-    ? "Unsaved title and description"
-    : titleHasChanges
-      ? "Unsaved title"
-      : "Unsaved description";
   // Closing guards every authored lane; the footer Save owns only card text.
   const draftingDirty =
     checklist.hasWork ||
     commentEditHasWork ||
-    diff.title !== undefined ||
-    diff.description !== undefined ||
+    titleHasChanges ||
+    descriptionHasChanges ||
     descriptionUploading ||
     commentUploading ||
     replyUploading ||
     orphanedReply !== null ||
-    pendingSaveId !== null ||
+    savePending ||
     pendingCommentId !== null ||
     pendingReplyId !== null ||
     saveUncertain ||
@@ -1700,7 +1558,7 @@ export function CardModal({
         <h3 className="card-section-title text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           <AlignLeft aria-hidden="true" className="card-section-icon" />Description
         </h3>
-        {descriptionHasChanges && pendingSaveId === null && !saveUncertain && (
+        {descriptionHasChanges && !savePending && !saveUncertain && (
           <span className="card-text-draft-badge">Unsaved</span>
         )}
       </div>}
@@ -1716,20 +1574,20 @@ export function CardModal({
                 type="button"
                 variant="outline"
                 size="xs"
-                onClick={retrySaveRecovery}
-                disabled={descriptionUploading || pendingSaveId !== null || saveUncertain}
+                onClick={cardDraft.retry}
+                disabled={descriptionUploading || savePending || saveUncertain}
                 className="h-6 px-2 text-xs font-semibold text-destructive hover:bg-destructive/10 pointer-coarse:min-h-11 pointer-coarse:px-3"
               >
-                {pendingSaveId !== null ? "Retrying…" : "Retry unsent save"}
+                {savePending ? "Retrying…" : "Retry unsent save"}
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="xs"
-                disabled={pendingSaveId !== null || saveUncertain}
+                disabled={savePending || saveUncertain}
                 onClick={() => {
-                  if (pendingSaveId !== null || saveUncertain) return;
-                  saveOp.discard();
+                  if (savePending || saveUncertain) return;
+                  cardDraft.discardRecovery();
                 }}
                 className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:px-3"
               >
@@ -1748,14 +1606,13 @@ export function CardModal({
         </div>
       )}
         value={description}
-        readOnly={pendingSaveId !== null || saveUncertain}
+        readOnly={savePending || saveUncertain}
         onChange={(next) => {
-          if (next !== descriptionRef.current) descriptionDirtyRef.current = true;
-          setDescriptionDraft(next);
-          clearSaveError();
+          cardDraft.setDescription(next);
+          cardDraft.clearError();
           cancelPendingClose();
         }}
-        onSave={save}
+        onSave={cardDraft.save}
         onUploadImage={uploadDescriptionImage}
         previewImages={previewImages}
         onOpenImage={handleOpenAttachmentFromMarkdown}
@@ -2659,28 +2516,27 @@ export function CardModal({
                 {taskKey(boardKey, card.taskNumber)}
               </span>}
               <span className="card-detail-type"><span aria-hidden="true" className={`size-2 shrink-0 rounded-sm ${TASK_TYPE_META[card.taskType].swatch}`} />{TASK_TYPE_META[card.taskType].label}</span>
-              {titleHasChanges && pendingSaveId === null && !saveUncertain && <span className="card-text-draft-badge">Unsaved</span>}
+              {titleHasChanges && !savePending && !saveUncertain && <span className="card-text-draft-badge">Unsaved</span>}
             </div>
           {editingTitle ? (
             <Input
               autoFocus
               aria-label="Card title"
               value={title}
-              readOnly={pendingSaveId !== null || saveUncertain}
-              aria-disabled={pendingSaveId !== null || saveUncertain}
+              readOnly={savePending || saveUncertain}
+              aria-disabled={savePending || saveUncertain}
               onChange={(event) => {
-                if (pendingSaveId !== null || saveUncertain) return;
-                titleDirtyRef.current = true;
-                setTitle(event.target.value);
+                if (savePending || saveUncertain) return;
+                cardDraft.setTitle(event.target.value);
                 cancelPendingClose();
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
-                  save();
+                  cardDraft.save();
                 } else if (event.key === "Escape") {
                   event.preventDefault();
                   event.stopPropagation();
-                  setEditingTitle(false);
+                  cardDraft.setEditingTitle(false);
                   requestAnimationFrame(() => editTitleButtonRef.current?.focus());
                 }
               }}
@@ -2705,9 +2561,9 @@ export function CardModal({
                 size="icon-sm"
                 aria-label="Edit title"
                 title="Edit title"
-                disabled={pendingSaveId !== null || saveUncertain}
-                aria-disabled={pendingSaveId !== null || saveUncertain}
-                onClick={() => setEditingTitle(true)}
+                disabled={savePending || saveUncertain}
+                aria-disabled={savePending || saveUncertain}
+                onClick={() => cardDraft.setEditingTitle(true)}
                 className="shrink-0 text-muted-foreground hover:text-foreground pointer-coarse:min-h-11 pointer-coarse:min-w-11"
               >
                 <Pencil aria-hidden className="size-3.5" />
@@ -2816,7 +2672,7 @@ export function CardModal({
                           : "text-muted-foreground"
                   }
                 >
-                  {connected && !dirty && !attachmentDeletePending && !descriptionUploading && pendingSaveId === null && !saveUncertain && !commentUncertain && !replyUncertain && (
+                  {connected && !dirty && !attachmentDeletePending && !descriptionUploading && !savePending && !saveUncertain && !commentUncertain && !replyUncertain && (
                     <Check aria-hidden="true" className="card-text-clean-icon" />
                   )}
                   {!connected
@@ -2827,7 +2683,7 @@ export function CardModal({
                       ? "Sync uncertain — reconnecting to verify."
                       : attachmentDeletePending
                         ? "Deleting attachment…"
-                        : pendingSaveId !== null
+                        : savePending
                           ? "Saving…"
                           : descriptionUploading
                             ? "Preparing description image…"
@@ -2867,11 +2723,11 @@ export function CardModal({
                 variant="default"
                 size="sm"
                 aria-describedby={textSaveStatusId}
-                onClick={save}
-                disabled={!hasTextChanges || attachmentDeletePending || descriptionUploading || pendingSaveId !== null || saveUncertain || saveRecovery !== null}
+                onClick={cardDraft.save}
+                disabled={!hasTextChanges || attachmentDeletePending || descriptionUploading || savePending || saveUncertain || saveRecovery !== null}
                 className="min-h-11 md:min-h-8 pointer-coarse:min-h-11"
               >
-                {pendingSaveId !== null ? "Saving…" : "Save title & description"}
+                {savePending ? "Saving…" : "Save title & description"}
               </Button>
             </div>
           </div>
