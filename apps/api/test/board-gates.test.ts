@@ -302,6 +302,25 @@ describe("what the table changed", () => {
     expect(malformed.status).toBe(400);
     expect(await malformed.text()).toBe("invalid request");
     expect((await call(board, "POST", MCP_BOARD_READ_PATH, wellFormed)).status).toBe(200);
+    const otherBoard = { board: { ...wellFormed.board, id: "gate-elsewhere" } };
+    for (const who of [{}, stranger]) {
+      const mismatched = await call(board, "POST", MCP_BOARD_READ_PATH, otherBoard, who);
+      expect(mismatched.status).toBe(400);
+      expect(await mismatched.text()).toBe("invalid board identity");
+    }
+  });
+
+  it("stamps the board's identity only on routes that declare it", async () => {
+    const board = freshBoard();
+    await seed(board);
+    const stampedId = () =>
+      runInDurableObject(env.BOARD_DO.get(env.BOARD_DO.idFromName(board)), (_instance, state) =>
+        state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'board_id'").toArray()[0]?.value,
+      );
+    expect((await call(board, "GET", BOARD_DEVELOPMENT_PATH)).status).toBe(200);
+    expect(await stampedId()).toBeUndefined();
+    expect((await call(board, "GET", `/internal/attachments/key/${ATTACHMENT}`)).status).toBe(404);
+    expect(await stampedId()).toBe(board);
   });
 
   it("asks for the board id on the development reads and the attachment key lookup", async () => {
