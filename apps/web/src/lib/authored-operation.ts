@@ -222,3 +222,18 @@ export function useAuthoredOperation<S>(
   const state = useSyncExternalStore(op.subscribe, op.getState, op.getState);
   return { ...state, start: op.start, retry: op.retry, discard: op.discard };
 }
+
+// The old render shape: pending / uncertain / inline error / retained recovery. A first attempt
+// that never left (not connected) is only an inline error; a retry's failure and any rejected or
+// unverified attempt is a recovery, which stays on screen, with its last error, while a retry runs.
+export function composerLane<S extends { entityId: string }>(op: AuthoredState<S>, retried: boolean, lastError: { current: string }) {
+  const active = op.status === "pending" || op.status === "uncertain";
+  const retained = op.status === "failed" ? retried || op.failure !== "not-connected" : active && retried;
+  if (op.status === "failed" && retained) lastError.current = op.error ?? "";
+  return {
+    pendingId: active ? op.sent?.entityId ?? null : null,
+    uncertain: op.status === "uncertain",
+    error: op.status === "failed" && !retained ? op.error : null,
+    recovery: retained && op.sent ? { ...op.sent, error: lastError.current } : null,
+  };
+}

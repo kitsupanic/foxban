@@ -85,7 +85,7 @@ import { SubtaskList } from "./SubtaskList";
 import { buildSubtaskNodes, directSubtaskCounts } from "../lib/subtask-nodes";
 import { TASK_TYPE_META } from "../lib/task-type";
 import { restoreFocusSoon } from "../lib/focus";
-import { useAuthoredOperation, useAuthoredScope, type AuthoredScope, type AuthoredState } from "../lib/authored-operation";
+import { composerLane, useAuthoredOperation, useAuthoredScope, type AuthoredScope } from "../lib/authored-operation";
 import { usePickerMenuStyle } from "../lib/picker-menu";
 import "./card-detail.css";
 /** Which shell the card details render in: the overlay modal or full screen. */
@@ -209,8 +209,8 @@ export function CardModal({
   membersError: boolean;
   onRetryMembers: () => void;
   send: SendMutation;
-  subscribeMutation?: (mutationId: string, callback: MutationSettledCallback) => () => void;
-  retireTrackedMutation?: (mutationId: string) => void;
+  subscribeMutation: (mutationId: string, callback: MutationSettledCallback) => () => void;
+  retireTrackedMutation: (mutationId: string) => void;
   connected: boolean;
   handshakeFailed?: boolean;
   onRetryConnection?: () => void;
@@ -233,12 +233,11 @@ export function CardModal({
   ) => void;
 }) {
   const queryClient = useQueryClient();
-  // Settlement scope for the modal's authored operations (ADR 0069). Every caller passes both
-  // callbacks today; the no-ops keep an absent one behaving as before (never settles).
+  // Settlement scope for the modal's authored operations (ADR 0069).
   const authoredScope = useAuthoredScope({
     send,
-    subscribe: subscribeMutation ?? (() => () => {}),
-    retire: retireTrackedMutation ?? (() => {}),
+    subscribe: subscribeMutation,
+    retire: retireTrackedMutation,
     readBoard: () => queryClient.getQueryData<BoardState>(boardQueryKey(boardId)),
   });
   const commands = useBoardCommands(boardId, send);
@@ -312,20 +311,6 @@ export function CardModal({
     },
     copy: commentCopy("reply"),
   });
-  // The old render shape: pending / uncertain / inline error / retained recovery. A first attempt
-  // that never left (not connected) is only an inline error; a retry's failure and any rejected or
-  // unverified attempt is a recovery, which stays on screen, with its last error, while a retry runs.
-  const composerLane = <S extends { entityId: string }>(op: AuthoredState<S>, retried: boolean, lastError: { current: string }) => {
-    const active = op.status === "pending" || op.status === "uncertain";
-    const retained = op.status === "failed" ? retried || op.failure !== "not-connected" : active && retried;
-    if (op.status === "failed" && retained) lastError.current = op.error ?? "";
-    return {
-      pendingId: active ? op.sent?.entityId ?? null : null,
-      uncertain: op.status === "uncertain",
-      error: op.status === "failed" && !retained ? op.error : null,
-      recovery: retained && op.sent ? { ...op.sent, error: lastError.current } : null,
-    };
-  };
   const commentLane = composerLane(commentOp, commentRetriedRef.current, commentRecoveryErrorRef);
   const replyLane = composerLane(replyOp, replyRetriedRef.current, replyRecoveryErrorRef);
   const { pendingId: pendingCommentId, uncertain: commentUncertain, error: commentError, recovery: commentRecovery } = commentLane;
