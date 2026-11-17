@@ -82,6 +82,10 @@ _Avoid_: Quick edit, fire-and-forget
 The check that stops a parent with open subtasks from moving into the completed column on its own. The person is asked to finish the parent alone or the whole family. Every move goes through it, a drag or a status change alike.
 _Avoid_: Completion check
 
+**Subtask family rules**:
+The server's one home (`apps/api/src/subtask-family.ts`) for how a family behaves: who parents whom, when a card counts as done, where a new subtask starts, which links are allowed, and the board's side of the family-finish gate. It only reads and decides; the board does the writing.
+_Avoid_: Hierarchy helpers
+
 ## Moving cards
 
 **Card transfer**:
