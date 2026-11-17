@@ -43,7 +43,7 @@ import {
   verifyUserPassword,
   BOARD_SELECT_COLS,
   boardManageSql,
-  boardMemberSql,
+  boardMemberIdsSql,
   boardOpenSql,
   toBoardRow,
   type AppEnv,
@@ -1401,7 +1401,7 @@ const app = new Hono<AppEnv>()
               bm.role AS explicitRole,
               CASE WHEN b.access_mode='workspace' THEN wm.role ELSE NULL END AS workspaceRole
          FROM boards b
-         LEFT JOIN users u ON ${boardMemberSql("b", "u.id")}
+         LEFT JOIN users u ON u.id IN (${boardMemberIdsSql("b")})
          LEFT JOIN board_members bm ON bm.board_id=b.id AND bm.user_id=u.id
          LEFT JOIN workspace_members wm ON wm.workspace_id=b.workspace_id AND wm.user_id=u.id
         WHERE b.id=? AND ${boardOpenSql("b", "?", "?=1")}
@@ -1528,7 +1528,7 @@ const app = new Hono<AppEnv>()
       // destination is workspace-access. Explicit-only would drop an assignee the
       // destination board really does admit.
       const { results: destMembers } = await c.env.DB.prepare(
-        `SELECT u.id AS userId FROM boards b JOIN users u ON ${boardMemberSql("b", "u.id")} WHERE b.id = ?`,
+        `SELECT u.id AS userId FROM boards b JOIN users u ON u.id IN (${boardMemberIdsSql("b")}) WHERE b.id = ?`,
       )
         .bind(destinationBoardId)
         .all<{ userId: string }>();

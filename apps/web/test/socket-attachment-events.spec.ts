@@ -92,6 +92,10 @@ async function mount() {
       calls.push(`resolved ${mutationId}`);
       events.resolved?.(mutationId);
     },
+    halted: () => {
+      calls.push("halted");
+      events.halted?.();
+    },
   };
   const socket: { current: ReturnType<typeof useBoardSocket> | null } = { current: null };
   function Probe() {
@@ -144,5 +148,13 @@ test("a rejected delete is resolved by the rollback and clears the gate without 
   expect(attachments.getView().isDeletePending(cardId)).toBe(false);
   const embed = `![x](/boards/${boardId}/attachments/${attachmentId})`;
   expect(attachments.getView().descriptionFor(cardId, embed)).toBe(embed);
+  await unmount();
+});
+
+test("a denied close halts the attachments module", async () => {
+  const { BOARD_ACCESS_DENIED_CLOSE } = await import("../src/lib/access-attempt");
+  const { calls, ws, unmount } = await mount();
+  await act(async () => ws.onclose?.({ code: BOARD_ACCESS_DENIED_CLOSE }));
+  expect(calls).toEqual(["halted"]);
   await unmount();
 });

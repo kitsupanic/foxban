@@ -52,9 +52,12 @@ export function resolveCardDrop(state: BoardState, hierarchy: SubtaskHierarchy, 
   // Peers are a subset of the column, so the gap after `lower` may hold other rows' keys
   // (a nested child's, or a parent's). Bounding by the first key above `lower` in the whole
   // column keeps the new key unique; it still sorts after the previous peer and before the next.
-  const lower = peers[index - 1]?.position ?? null;
-  const columnAbove = columnCards(state, destination).find(candidate => candidate.id !== cardId && (lower === null || candidate.position > lower))?.position ?? null;
   const nextPeer = peers[index]?.position ?? null;
+  // A first child sorts after its parent rather than before the whole column, but only
+  // when the parent's key is below the next peer (a parent can sort after its children).
+  const parentPosition = nested ? state.cards.find(candidate => candidate.id === parentId)!.position : null;
+  const lower = peers[index - 1]?.position ?? (parentPosition !== null && (nextPeer === null || parentPosition < nextPeer) ? parentPosition : null);
+  const columnAbove = columnCards(state, destination).find(candidate => candidate.id !== cardId && (lower === null || candidate.position > lower))?.position ?? null;
   const upper = nextPeer !== null && (columnAbove === null || nextPeer < columnAbove) ? nextPeer : columnAbove;
   try {
     return { columnId: destination, position: generateKeyBetween(lower, upper), hint };

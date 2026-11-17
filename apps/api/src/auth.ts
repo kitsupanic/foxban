@@ -137,6 +137,16 @@ export function boardMemberSql(board: string, member: string): string {
     OR (${board}.access_mode='workspace' AND EXISTS(SELECT 1 FROM workspace_members member_wm WHERE member_wm.workspace_id=${board}.workspace_id AND member_wm.user_id=${member})))`;
 }
 
+/**
+ * The same relation as `boardMemberSql`, as a subquery of the member ids of `board`.
+ * Use it to list members (`users.id IN (...)`): it reads the board's own membership
+ * rows by primary key instead of testing every user.
+ */
+export function boardMemberIdsSql(board: string): string {
+  return `SELECT member_bm.user_id FROM board_members member_bm WHERE member_bm.board_id=${board}.id
+    UNION SELECT member_wm.user_id FROM workspace_members member_wm WHERE ${board}.access_mode='workspace' AND member_wm.workspace_id=${board}.workspace_id`;
+}
+
 export function toBoardRow(raw: RawBoardRecord): BoardRow {
   const canManage = canManageBoard({
     operator: raw.operatorAccess === 1,

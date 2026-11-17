@@ -81,11 +81,18 @@ test("reopening children into their parent's column never ties the parent or a l
     const drop = resolveCardDrop(state, buildSubtaskHierarchy(state.cards, state.relations), id, "column-drop:todo")!;
     expect(drop.hint).toEqual({ cardId: "P", placement: "inside" });
     expect(uniqueIn(state, "todo", id, drop.position)).toBe(true);
+    expect(drop.position > "a0").toBe(true); // after the parent, not before the whole column
     state.cards.find(c => c.id === id)!.columnId = "todo";
     state.cards.find(c => c.id === id)!.position = drop.position;
   }
   const keys = state.cards.filter(c => c.columnId === "todo").map(c => c.position);
   expect(new Set(keys).size).toBe(keys.length);
+});
+test("a child dropped first among siblings that sort below their parent lands before them", () => {
+  const state: BoardState = { ...fixture().state, cards: [card("C1", "a1"), card("C2", "a2"), card("P", "a3"), card("C3", "a4")], relations: ["C1", "C2", "C3"].map((id, i) => ({ id: `r${i}`, kind: "subtask" as const, sourceCardId: "P", targetCardId: id })) };
+  const drop = resolveCardDrop(state, buildSubtaskHierarchy(state.cards, state.relations), "C3", "C1", "before")!;
+  expect(drop.position < "a1").toBe(true);
+  expect(uniqueIn(state, "todo", "C3", drop.position)).toBe(true);
 });
 test("a root dropped on a column body never ties the last root's nested child", () => {
   const state: BoardState = { ...fixture().state, cards: [card("R", "a0"), card("K", "a1"), card("N", "a0", "work")], relations: [{ id: "r1", kind: "subtask", sourceCardId: "R", targetCardId: "K" }] };
