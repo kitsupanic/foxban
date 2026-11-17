@@ -214,3 +214,29 @@ test("upload fails fast when offline, when the POST fails, or before spending by
   await expect(badName.attachments.upload({ file, cardId: "card-1", scope: badName.scope })).rejects.toThrow("File name must be 200 characters or fewer.");
   expect(badName.posts).toEqual([]);
 });
+
+test("an uncertain upload fails out when the socket halts instead of waiting forever", async () => {
+  const { attachments, fake, scope, file } = uploadSetup();
+  const result = attachments.upload({ file, cardId: "card-1", scope });
+  await flush();
+  fake.fire("timeout");
+  // Denied, or the reconnect budget ran out: no snapshot is coming.
+  attachments.events.halted?.();
+  await expect(result).rejects.toThrow("Could not confirm the upload — try again.");
+  expect(scope.hasActiveWork()).toBe(false);
+  // A late answer after the fail-out changes nothing.
+  fake.fire("accepted");
+});
+
+test("an upload discarded by its scope, or started on a disposed one, rejects", async () => {
+  const discarded = uploadSetup();
+  const pendingUpload = discarded.attachments.upload({ file: discarded.file, cardId: "card-1", scope: discarded.scope });
+  await flush();
+  discarded.scope.dispose();
+  await expect(pendingUpload).rejects.toThrow("Could not confirm the upload — try again.");
+
+  const disposed = uploadSetup();
+  disposed.scope.dispose();
+  await expect(disposed.attachments.upload({ file: disposed.file, cardId: "card-1", scope: disposed.scope })).rejects.toThrow("Could not attach the upload.");
+  expect(disposed.fake.sends).toEqual([]);
+});

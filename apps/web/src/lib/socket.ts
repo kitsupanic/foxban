@@ -69,6 +69,8 @@ export type BoardEventObserver = {
   sent?(msg: ClientMessage, before: BoardState, after: BoardState): void;
   /** An own pending mutation left the pending set: acked, rejected, timed out or rolled back. A transport close is not one. */
   resolved?(mutationId: string): void;
+  /** The socket stopped reconnecting (access denied, or the reconnect budget ran out); nothing settles until a manual retry. */
+  halted?(): void;
 };
 
 export type MutationSettledStatus = "accepted" | "rejected" | "timeout" | "uncertain" | "verified-retry";
@@ -366,6 +368,7 @@ export function useBoardSocket(
         if (plan.mode === "denied") {
           setAccessState("denied");
           setHandshakeFailed(true);
+          eventsRef.current?.halted?.();
           clearBoardAccessCaches(queryClient, { boardId });
           return;
         }
@@ -387,6 +390,7 @@ export function useBoardSocket(
         if (plan.mode === "stopped" || plan.delayMs === null) {
           console.warn("board socket: stopped reconnecting after unsynchronized failures");
           setHandshakeFailed(true);
+          eventsRef.current?.halted?.();
           return;
         }
         retryTimer = window.setTimeout(() => {

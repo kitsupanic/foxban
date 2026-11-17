@@ -52,6 +52,8 @@ export type AuthoredScope = {
   operation<S>(options: AuthoredOperationOptions<S>): AuthoredOperation<S>;
   /** Any operation of this scope pending or uncertain. */
   hasActiveWork(): boolean;
+  /** Discards a one-shot operation and forgets it, so the scope does not retain it. */
+  release(op: AuthoredOperation<unknown>): void;
   dispose(): void;
 };
 
@@ -163,6 +165,10 @@ export function createAuthoredScope(transport: AuthoredTransport): AuthoredScope
         const { status } = op.getState();
         return status === "pending" || status === "uncertain";
       }),
+    release(op) {
+      op.discard();
+      operations.delete(op as AuthoredOperation<never>);
+    },
     dispose() {
       disposed = true;
       for (const op of operations) op.discard();

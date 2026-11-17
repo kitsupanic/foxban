@@ -54,6 +54,8 @@ export function createBoardAttachments(boardId: string, deps: { fetch?: typeof f
   let confirmed: ReadonlyMap<string, string> = new Map();
   let pending: ReadonlyMap<string, string> = new Map();
   const listeners = new Set<() => void>();
+  // Fail-out of every upload still waiting on `attachment.create`.
+  const openUploads = new Set<() => void>();
 
   const makeView = (): AttachmentView => {
     const confirmedNow = confirmed;
@@ -142,6 +144,10 @@ export function createBoardAttachments(boardId: string, deps: { fetch?: typeof f
       publish(confirmed, withEntry(pending, msg.mutationId, ownerId));
     },
     resolved: clearPending,
+    // Nothing will settle until a manual retry: give waiting uploads the old fail-out, not a dead Save.
+    halted() {
+      for (const failOut of Array.from(openUploads)) failOut();
+    },
   };
 
   /**
@@ -167,29 +173,33 @@ export function createBoardAttachments(boardId: string, deps: { fetch?: typeof f
     });
     if (!response.ok) throw new Error("Could not upload the attachment.");
     const uploaded = (await response.json()) as { id: string; contentType: string; size: number };
+    // Locals only: the closures below must not keep the prepared Blob alive.
+    const { fileName } = prepared;
+    const { id, contentType, size } = uploaded;
     const result: UploadedAttachment = {
-      url: `/boards/${boardId}/attachments/${uploaded.id}`,
+      url: `/boards/${boardId}/attachments/${id}`,
       // Brackets and parens would break out of the `![alt](url)` markup.
-      alt: prepared.fileName.replace(/[[\]()]/g, ""),
+      alt: fileName.replace(/[[\]()]/g, ""),
     };
     // If the socket is closed or the server refuses, the upload's provisional lease
     // remains in the BoardDO and its alarm removes the unclaimed R2 object after one hour.
-    // A timeout only makes the attempt uncertain: a late acceptance still resolves it.
+    // A timeout only makes the attempt uncertain: the reconnect snapshot settles it, so a
+    // late acceptance still resolves. A halted socket, discard or disposed scope fails it.
     return new Promise<UploadedAttachment>((resolve, reject) => {
+      let done = false;
+      const finish = (settle: () => void) => {
+        if (done) return;
+        done = true;
+        unsubscribe();
+        openUploads.delete(failOut);
+        scope.release(op);
+        settle();
+      };
+      const failOut = (message = "Could not confirm the upload — try again.") =>
+        finish(() => reject(new Error(message)));
       const op = scope.operation<null>({
-        build: (mutationId) => ({
-          type: "attachment.create",
-          mutationId,
-          id: uploaded.id,
-          cardId,
-          fileName: prepared.fileName,
-          contentType: uploaded.contentType,
-          size: uploaded.size,
-        }),
-        onAccepted: () => {
-          unsubscribe();
-          resolve(result);
-        },
+        build: (mutationId) => ({ type: "attachment.create", mutationId, id, cardId, fileName, contentType, size }),
+        onAccepted: () => finish(() => resolve(result)),
         copy: {
           rejected: "Could not attach the upload.",
           unverified: "Could not confirm the upload — try again.",
@@ -199,12 +209,11 @@ export function createBoardAttachments(boardId: string, deps: { fetch?: typeof f
       });
       const unsubscribe = op.subscribe(() => {
         const state = op.getState();
-        if (state.status !== "failed") return;
-        unsubscribe();
-        op.discard();
-        reject(new Error(state.error ?? "Could not attach the upload."));
+        if (state.status === "failed") failOut(state.error ?? "Could not attach the upload.");
+        else if (state.status === "idle") failOut();
       });
-      op.start(null);
+      openUploads.add(failOut);
+      if (!op.start(null)) failOut("Could not attach the upload.");
     });
   };
 
