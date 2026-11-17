@@ -117,3 +117,7 @@ _Avoid_: Board stub, board fetch, DO client
 **Gate class**:
 What a board's internal route owes before its handler runs: `fence`, `settlement`, `cleanup`, `open` or `protected`. The class decides whether a deleted board or one whose access is changing still answers, and whether the caller must be a member. Each route in `apps/api/src/board-api.ts` names its class once, and the board's dispatcher enforces it.
 _Avoid_: Guard, middleware, route type
+
+**Mutation pipeline**:
+The board's one home (`apps/api/src/board-mutations.ts`) for carrying out a mutation: check it, note its activity, write it, and save the activity, always in that order. The socket and the MCP endpoint both go through it, inside the board's own transaction. It only touches the board's SQLite; the board does the sockets, the broadcast and the alarm.
+_Avoid_: Apply, mutation handler
