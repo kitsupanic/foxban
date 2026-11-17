@@ -186,7 +186,7 @@ export function useBoardSocket(
 
       // On live-socket timeout of an authored operation requiring authoritative settlement verification,
       // initiate resync by closing the transport so the subsequent reconnect snapshot resolves it.
-      // Do NOT close transport for ordinary instant or attachment mutations.
+      // Unsubscribed instant mutations keep the socket open; subscribed ones, attachment uploads included, close it on purpose (ADR 0069).
       if (reason === "timeout" && mutationSubscribersRef.current.has(mutationId)) {
         const ws = socketRef.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
