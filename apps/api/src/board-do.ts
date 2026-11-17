@@ -1,19 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import {
-  ATTACHMENT_POLICY,
-  ActivitySchema,
   CARD_ARCHIVE_RETENTION_MS,
-  CardPullRequestAssociationSchema,
-  CardSchema,
-  ChecklistItemSchema,
   ClientMessageSchema,
-  CommentSchema,
-  DevelopmentPullRequestSchema,
   Identifier,
   REALTIME_PROTOCOL_VERSION,
-  LabelColorSchema,
-  Title,
   buildSubtaskHierarchy,
   descriptionByteLength,
   removeAttachmentReferences,
@@ -38,10 +29,7 @@ import {
 import {
   ATTACHMENT_BOARD_ID,
   ATTACHMENT_ID,
-  CHECK_ATTACHMENT_OWNERSHIP_PATH,
-  RECONCILE_ATTACHMENTS_PATH,
   STAGED_ATTACHMENT_TTL_MS,
-  STAGE_ATTACHMENT_PATH,
   attachmentObjectKey,
   attachmentTransferObjectKey,
   parseAttachmentObjectKey,
@@ -70,17 +58,7 @@ import {
   type MutationContext,
 } from "./mutation-gate";
 import {
-  BOARD_DEVELOPMENT_PATH,
-  BRANCH_WRITE_PATH,
-  BranchUnlinkSchema,
-  BranchWriteSchema,
-  DevelopmentBranchTransferSchema,
-  PULL_REQUEST_WRITE_PATH,
-  PullRequestLinkSchema,
-  PullRequestUnlinkSchema,
-  PullRequestWriteSchema,
   linkPullRequestToCard,
-  DevelopmentUnlinkSchema,
   importCardBranches,
   importCardPullRequests,
   importCardUnlinks,
@@ -100,15 +78,10 @@ import { syncPullRequestRoute } from "./github-pr-routes";
 import { boardMemberSql, canManageBoard, canOpenBoard, isAdminEmail } from "./auth";
 import { generateKeyBetween } from "fractional-indexing";
 import {
-  MCP_BOARD_READ_PATH,
-  MCP_COMMAND_PATH,
-  MCP_TASK_LIST_PATH,
-  MCP_TASK_READ_PATH,
   AddCommentOutputSchema,
   AssignLabelOutputSchema,
   LabelMutationOutputSchema,
   McpBoardReadRequestSchema,
-  McpCommandRequestSchema,
   McpTaskListRequestSchema,
   McpTaskReadRequestSchema,
   TaskRecordSchema,
@@ -120,137 +93,31 @@ import {
   encodeCursor,
   type McpBoardIdentity,
   type McpCommand,
-  type McpCommandRequest,
   type McpToolResult,
   type TaskRecord,
 } from "./mcp-contract";
 
-export const DELETE_BOARD_PATH = "/internal/board/delete";
 import {
-  CARD_TRANSFER_ABORT_PATH,
-  CARD_TRANSFER_FINALIZE_PATH,
-  CARD_TRANSFER_IMPORT_PATH,
-  CARD_TRANSFER_OPTIONS_PATH,
-  CARD_TRANSFER_PREPARE_PATH,
-  CARD_TRANSFER_RECEIPT_PATH,
-  CARD_TRANSFER_RELEASE_PATH,
-  boardDestination,
-  settle,
-  type SourceParticipant,
-} from "./card-transfer";
-export {
-  CARD_TRANSFER_ABORT_PATH,
-  CARD_TRANSFER_FINALIZE_PATH,
-  CARD_TRANSFER_IMPORT_PATH,
-  CARD_TRANSFER_OPTIONS_PATH,
-  CARD_TRANSFER_PREPARE_PATH,
-  CARD_TRANSFER_RECEIPT_PATH,
-  CARD_TRANSFER_RELEASE_PATH,
-};
-export const CARD_PATH_PREFIX = "/internal/cards/";
-/** The identity the write-back routes (create a branch or pull request from a card) read before and after talking to GitHub. */
-export function cardWriteBackPath(cardId: string): string {
-  return `${CARD_PATH_PREFIX}${encodeURIComponent(cardId)}/write-back`;
-}
+  decodeParams,
+  matchRoute,
+  type CardTransferReceipt,
+  type Gate,
+  type PreparedCardTransferBundle,
+  type RouteGate,
+  type RouteInput,
+  type RouteMatch,
+  type RouteName,
+  type WriteBackCard,
+} from "./board-api";
+import { boardDestination, settle, type SourceParticipant } from "./card-transfer";
+// The bundle is the transfer's wire contract and lives with the routes; tests and the coordinator read it from here.
+export { PreparedCardTransferBundleSchema, type PreparedCardTransferBundle } from "./board-api";
 /** One card's explicit association row, as stored. */
 const CardPullRequestRowSchema = z.strictObject({
   repositoryId: z.number().int().positive(),
   number: z.number().int().positive(),
   revision: z.uuid(),
 });
-export const WriteBackCardSchema = z.strictObject({
-  id: Identifier,
-  title: Title,
-  taskNumber: z.number().int().min(1),
-});
-export type WriteBackCard = z.infer<typeof WriteBackCardSchema>;
-export const PreparedCardTransferBundleSchema = z.strictObject({
-  card: CardSchema,
-  checklistItems: z.array(ChecklistItemSchema),
-  attachments: z
-    .array(
-      z.strictObject({
-        id: Identifier,
-        cardId: Identifier,
-        fileName: Title,
-        contentType: z.string().max(ATTACHMENT_POLICY.contentTypeMaxLength),
-        size: z.number().int().min(0).max(ATTACHMENT_POLICY.fileMaxBytes),
-        objectKey: z.string().min(1).max(200),
-      }),
-    ),
-  comments: z.array(CommentSchema),
-  activities: z.array(ActivitySchema),
-  labels: z
-    .array(
-      z.strictObject({
-        id: Identifier,
-        name: Title,
-        color: LabelColorSchema,
-        joinId: Identifier,
-      }),
-    ),
-  /**
-   * The card's explicit pull request link travels with it. Its repository id may
-   * name a different board's repository, in which case it stays dormant — the
-   * destination never resolves its number against its own repository.
-   */
-  pullRequestAssociation: CardPullRequestAssociationSchema.nullable(),
-  /** The pull requests webhooks linked to the card (ADR 0064): the link follows the card to its new board. */
-  developmentPullRequests: z.array(DevelopmentPullRequestSchema),
-  /** The branches linked to the card (ADR 0064), which follow it like the pull requests. */
-  developmentBranches: z.array(DevelopmentBranchTransferSchema),
-  /** The card's unlink tombstones (ADR 0064), so an unlink still holds after the move. */
-  developmentUnlinks: z.array(DevelopmentUnlinkSchema),
-}).superRefine((data, ctx) => {
-  const cardId = data.card.id;
-  for (let i = 0; i < data.checklistItems.length; i++) {
-    if (data.checklistItems[i].cardId !== cardId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `checklistItem[${i}] cardId does not match bundle card id`,
-        path: ["checklistItems", i, "cardId"],
-      });
-    }
-  }
-  for (let i = 0; i < data.attachments.length; i++) {
-    if (data.attachments[i].cardId !== cardId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `attachment[${i}] cardId does not match bundle card id`,
-        path: ["attachments", i, "cardId"],
-      });
-    }
-  }
-  for (let i = 0; i < data.comments.length; i++) {
-    if (data.comments[i].cardId !== cardId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `comment[${i}] cardId does not match bundle card id`,
-        path: ["comments", i, "cardId"],
-      });
-    }
-  }
-  for (let i = 0; i < data.activities.length; i++) {
-    if (data.activities[i].cardId !== cardId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `activity[${i}] cardId does not match bundle card id`,
-        path: ["activities", i, "cardId"],
-      });
-    }
-  }
-});
-
-export type PreparedCardTransferBundle = z.infer<typeof PreparedCardTransferBundleSchema>;
-
-export const CardTransferImportPayloadSchema = z.strictObject({
-  transferId: Identifier,
-  sourceBoardId: Identifier,
-  destinationColumnId: Identifier,
-  assigneeId: Identifier.nullable().optional(),
-  bundle: PreparedCardTransferBundleSchema,
-});
-
 export class ImportConflictError extends Error {
   constructor(
     public readonly status: number,
@@ -261,36 +128,6 @@ export class ImportConflictError extends Error {
   }
 }
 
-
-export const CardTransferPreparePayloadSchema = z.strictObject({
-  transferId: Identifier,
-  cardId: Identifier,
-  destinationBoardId: Identifier,
-});
-
-export const CardTransferFinalizePayloadSchema = z.strictObject({
-  transferId: Identifier,
-  cardId: Identifier,
-  destinationBoardId: Identifier.optional(),
-});
-
-export const CardTransferReleasePayloadSchema = z.strictObject({
-  transferId: Identifier,
-  cardId: Identifier,
-  destinationBoardId: Identifier.optional(),
-});
-export const CardTransferAbortPayloadSchema = z.strictObject({
-  transferId: Identifier,
-  sourceBoardId: Identifier,
-  cardId: Identifier,
-});
-
-export type CardTransferReceipt = {
-  sourceBoardId: string;
-  cardId: string;
-  transferId: string;
-  taskNumber: number;
-};
 
 const ATTACHMENT_CLEANUP_RETRY_MS = 60_000;
 const TRANSFER_LOCK_TTL_MS = 5 * 60 * 1000;
@@ -959,6 +796,17 @@ function linkChangeRefusal(sql: SqlStorage, cardId: string) {
   return null;
 }
 
+/** What a handler is given, whatever its route: the request, the board it was admitted for and the path's parameters. */
+type RouteContext = { request: Request; boardId: string; params: Record<string, string> };
+/** A protected route's handler also gets the actor and the facts of the verdict that admitted them. */
+type ProtectedContext = RouteContext & { userId: string; canManageColumns: boolean; probeAllowed: boolean };
+type Handlers = {
+  [K in RouteName]: (
+    ctx: RouteGate<K> extends "protected" ? ProtectedContext : RouteContext,
+    input: RouteInput<K>,
+  ) => Response | Promise<Response>;
+};
+
 export class BoardDO extends DurableObject<Env> {
   private readonly attachmentBucket: R2Bucket;
   private deleting = false;
@@ -1184,1585 +1032,1015 @@ export class BoardDO extends DurableObject<Env> {
     };
   }
 
+  /**
+   * One handler per route of `boardRoutes`, so a route cannot be added to the table
+   * without one. By the time a handler runs, `dispatch` has done everything the route's
+   * gate class promises: the gates, the identity checks, the body parse and, for a
+   * protected route, the admission.
+   */
+  private readonly handlers: Handlers = {
+    accessPrepare: ({ boardId }, input) => this.changeAccess("prepare", boardId, input),
+    accessRelease: ({ boardId }, input) => this.changeAccess("release", boardId, input),
+    boardDelete: ({ boardId }) => this.deleteBoard(boardId),
+    transferReceipt: (_, input) => this.readTransferReceipt(input),
+    transferAbort: (_, input) => this.abortTransfer(input),
+    transferFinalize: (_, input) => this.finalizeTransfer(input),
+    transferRelease: ({ boardId }, input) => this.releaseTransfer(boardId, input),
+    attachmentsReconcile: ({ boardId }, input) => this.reconcileAttachments(boardId, input),
+    writeBack: ({ params }) => this.readWriteBackCard(params.cardId),
+    boardDevelopment: () => Response.json({ cards: readBoardPullRequests(this.ctx.storage.sql) } satisfies BoardDevelopment),
+    cardDevelopment: ({ params }) => this.readCardDevelopment(params.cardId),
+    pullRequestWrite: ({ boardId }, input) => this.acceptPullRequestWrite(boardId, input),
+    branchWrite: ({ boardId }, input) => this.acceptBranchWrite(boardId, input),
+    attachmentKey: ({ params }) => this.readAttachmentKey(params.attachmentId),
+    attachmentOwnership: (_, input) => this.checkAttachmentOwnership(input),
+    transferOptions: () => this.readTransferOptions(),
+    mcpBoard: (_, input) => this.mcpResponse(() => this.readMcpBoard(input)),
+    mcpTasks: (_, input) => this.mcpResponse(() => this.readMcpTasks(input)),
+    mcpTask: (_, input) => this.mcpResponse(() => this.readMcpTask(input)),
+    mcpCommand: (ctx, input) => this.mcpResponse(() => this.executeMcpRequest(ctx, input)),
+    pullRequestLink: ({ boardId, params }, input) => this.changePullRequestLink(boardId, params.cardId, input),
+    pullRequestUnlink: ({ boardId, params }, input) => this.changePullRequestLink(boardId, params.cardId, input),
+    branchUnlink: ({ boardId, params }, input) => this.unlinkBranch(boardId, params.cardId, input),
+    attachmentStage: ({ boardId }, input) => this.stageAttachment(boardId, input),
+    transferPrepare: ({ boardId, userId }, input) => this.prepareTransfer(boardId, userId, input),
+    transferImport: ({ boardId, userId }, input) => this.importTransfer(boardId, userId, input),
+  };
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const boardId = request.headers.get(INTERNAL_BOARD_ID_HEADER);
     const userId = request.headers.get(INTERNAL_USER_ID_HEADER);
+    const match = matchRoute(url.pathname, request.method);
 
-    if (url.pathname === "/internal/access/prepare" || url.pathname === "/internal/access/release") {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) return new Response("invalid board id", { status: 400 });
-      const input = await request.json<{operationId?:unknown;generation?:unknown}>().catch(()=>null);
-      if (!input || typeof input.operationId !== "string" || typeof input.generation !== "number") return new Response("invalid access operation", {status:400});
-      const operationId = input.operationId;
-      const generation = input.generation;
-      const participant = await this.env.DB.prepare(
-        `SELECT o.phase,b.next_version AS generation FROM access_change_operations o JOIN access_change_boards b ON b.operation_id=o.id WHERE o.id=? AND b.board_id=?`,
-      ).bind(operationId,boardId).first<{phase:string;generation:number}>();
-      if (!participant || participant.generation !== generation) return new Response("access operation not found",{status:409});
-      if (url.pathname.endsWith("/prepare")) {
-        if (participant.phase !== "preparing") return new Response("operation is terminal",{status:409});
-        let conflicted = false;
-        this.ctx.storage.transactionSync(()=>{
-          const state=this.policyBoundary();
-          // A newer generation, or a different pending operation, always wins: this
-          // message must not refreeze a fence it no longer owns. Reaching this
-          // operation's own generation is likewise only possible once — a prepare
-          // that arrives after its release must not refreeze a boundary nothing will
-          // ever release again, leaving the board permanently unusable.
-          if (state) {
-            if (state.generation > generation) { conflicted = true; return; }
-            if (state.generation === generation) {
-              if (state.frozen === 1 && state.pendingOperationId === operationId) return;
-              conflicted = true;
-              return;
-            }
-            if (state.frozen === 1 && state.pendingOperationId !== operationId) { conflicted = true; return; }
-          }
-          this.ctx.storage.sql.exec(`UPDATE board_access_state SET generation=?,pending_operation_id=?,frozen=1 WHERE id=1`,generation,operationId);
-        });
-        if (conflicted) return new Response("stale access operation",{status:409});
-        for(const socket of this.ctx.getWebSockets())try{socket.close(4010,"Board access is changing");}catch{}
-        // A card copied to another board under the old policy must not land after the
-        // change commits: every outbound transfer is settled (finalized or aborted at
-        // its destination) before this board claims to be prepared.
-        const locks = this.ctx.storage.sql
-          .exec<TransferLock>(
-            `SELECT card_id AS cardId, transfer_id AS transferId, destination_board_id AS destinationBoardId
-               FROM card_transfer_locks ORDER BY card_id LIMIT ?`,
-            FENCE_TRANSFER_SETTLE_LIMIT + 1,
-          )
-          .toArray();
-        let pending = locks.length > FENCE_TRANSFER_SETTLE_LIMIT;
-        const now = Date.now();
-        for (const lock of locks.slice(0, FENCE_TRANSFER_SETTLE_LIMIT)) {
-          if ((await this.settleTransferLock(lock, boardId, now, false)) === "retry") pending = true;
-        }
-        if (pending) return new Response("transfer settlement pending", { status: 503 });
-        return Response.json({prepared:true});
+    // A fence is how a board enters and leaves the gates, so it is dispatched ahead of them.
+    // Everything else, a path no route owns included, stands behind them.
+    if (match?.spec.gate !== "fence") {
+      const refused = this.gateRefusal(match?.spec.gate);
+      if (refused) return refused;
+      if (boardId !== null && ATTACHMENT_BOARD_ID.test(boardId) && (match === null || match.spec.stamp)) {
+        await this.stampIdentity(boardId);
       }
-      if (!["committed","aborted","completed"].includes(participant.phase)) return new Response("operation is not terminal",{status:409});
-      this.ctx.storage.transactionSync(()=>{
-        const state=this.ctx.storage.sql.exec<{generation:number;pendingOperationId:string|null}>(`SELECT generation,pending_operation_id AS pendingOperationId FROM board_access_state WHERE id=1`).toArray()[0];
-        if (!state || state.generation > generation || (state.pendingOperationId!==null&&state.pendingOperationId!==operationId)) return;
-        this.ctx.storage.sql.exec(`UPDATE board_access_state SET generation=?,pending_operation_id=NULL,frozen=0 WHERE id=1`,generation);
-      });
-      return Response.json({released:true});
     }
+    // The realtime socket is the one thing the table does not own: it is every other path.
+    if (match === null) return this.acceptSocket(request, boardId, userId);
+    return this.dispatch(match, request, boardId, userId);
+  }
 
-    if (url.pathname === DELETE_BOARD_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-
-      this.deleting = true;
-      await this.ctx.blockConcurrencyWhile(async () => {
-        this.ctx.storage.transactionSync(() => {
-          const sql = this.ctx.storage.sql;
-          sql.exec("INSERT OR REPLACE INTO meta(key,value) VALUES ('deleted',1)");
-          // Receipts must outlive content: a source may still need to finish a committed move.
-          for (const table of [
-            "attachments", "checklist_items", "comments", "activities", "card_relations",
-            "card_labels", "labels", "card_github_pull_requests", "card_development_pull_requests", "card_development_branches", "card_development_unlinks", "cards", "columns",
-            "card_transfer_locks", "card_transfer_operations", "mcp_operation_receipts", "attachment_cleanup",
-          ]) sql.exec(`DELETE FROM ${table}`);
-          sql.exec("DELETE FROM meta WHERE key NOT IN ('schema_version','board_id','deleted')");
-        });
-        await this.ctx.storage.deleteAlarm();
-      });
-
-      for (const socket of this.ctx.getWebSockets()) {
-        try {
-          socket.close(1000, "board deleted");
-        } catch {
-          // A failed close must not abort closing remaining sockets.
-        }
-      }
-
-      let cursor: string | undefined;
-      do {
-        const listed = await this.attachmentBucket.list({
-          prefix: `${boardId}/`,
-          cursor,
-        });
-        if (listed.objects.length > 0) {
-          await this.attachmentBucket.delete(listed.objects.map((obj) => obj.key));
-        }
-        cursor = listed.truncated ? listed.cursor : undefined;
-      } while (cursor !== undefined);
-
-      return new Response(null, { status: 204 });
-    }
-
-    const policyState = this.policyBoundary();
-    // Settlement of a transfer that already exists (receipt, abort, finalize, release)
-    // runs even behind an access fence: it is identity-bound, creates no card content,
-    // and is how a frozen board drains its own in-flight transfers. New transfers
-    // (options, prepare, import) stay behind the gate.
-    const settlement =
-      url.pathname === CARD_TRANSFER_RECEIPT_PATH ||
-      url.pathname === CARD_TRANSFER_ABORT_PATH ||
-      url.pathname === CARD_TRANSFER_FINALIZE_PATH ||
-      url.pathname === CARD_TRANSFER_RELEASE_PATH;
-    const deletedCleanup = this.deleting && url.pathname === RECONCILE_ATTACHMENTS_PATH;
+  /**
+   * The gates that stand in front of every route but a fence. Settlement of a transfer
+   * that already exists (receipt, abort, finalize, release) runs even behind an access
+   * fence: it is identity-bound, creates no card content, and is how a frozen board
+   * drains its own in-flight transfers. New transfers (options, prepare, import) stay
+   * behind the gate. A deleted board still collects its objects (cleanup).
+   */
+  private gateRefusal(gate: Gate | undefined): Response | null {
+    const settlement = gate === "settlement";
+    const deletedCleanup = this.deleting && gate === "cleanup";
     if (this.deleting && !settlement && !deletedCleanup) return new Response("board deleted", { status: 410 });
-    if (!settlement && !deletedCleanup && (!policyState || policyState.frozen === 1)) return this.accessChangingResponse();
-    if (
-      url.pathname === MCP_BOARD_READ_PATH ||
-      url.pathname === MCP_TASK_LIST_PATH ||
-      url.pathname === MCP_TASK_READ_PATH ||
-      url.pathname === MCP_COMMAND_PATH
-    ) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (
-        boardId === null || !ATTACHMENT_BOARD_ID.test(boardId) ||
-        userId === null || !Identifier.safeParse(userId).success
-      ) return new Response("invalid identity", { status: 400 });
-      const raw: unknown = await request.json().catch(() => null);
-      // A command is parsed before admission because what it names — the assignee of a
-      // creation — is part of what admission has to resolve; the read schemas are
-      // parsed under the admitted verdict, next to the work they describe.
-      let command: McpCommandRequest | null = null;
-      try {
-        if (url.pathname === MCP_COMMAND_PATH) {
-          command = McpCommandRequestSchema.parse(raw);
-          if (command.board.id !== boardId)
-            return new Response("invalid board identity", { status: 400 });
-        }
-      } catch (error) {
-        if (error instanceof z.ZodError) return new Response("invalid request", { status: 400 });
-        throw error;
-      }
-      // One admission for reads and writes: the boundary before the D1 verdicts, the
-      // verdicts (including a creation's current assignee), and the boundary after —
-      // all inside one bounded window, so a verdict a later prepare, commit or release
-      // invalidated is discarded instead of being consumed by this request. Receipts
-      // are replayed under this verdict too, so a stored result is never served to a
-      // caller who lost access while its body was arriving.
-      const admitted = await this.admitProtectedPath(boardId, userId, () =>
-        command?.command.operation === "create_task" && command.command.assigneeId !== null
-          ? this.currentAssigneeEligible(boardId, command.command.assigneeId)
-          : Promise.resolve(true),
-      );
-      if (!admitted.admitted) return admitted.response;
-      try {
-        let result: McpToolResult;
-        if (url.pathname === MCP_BOARD_READ_PATH) {
-          const input = McpBoardReadRequestSchema.parse(raw);
-          if (input.board.id !== boardId) return new Response("invalid board identity", { status: 400 });
-          result = this.readMcpBoard(input);
-        } else if (url.pathname === MCP_TASK_LIST_PATH) {
-          const input = McpTaskListRequestSchema.parse(raw);
-          if (input.board.id !== boardId) return new Response("invalid board identity", { status: 400 });
-          result = this.readMcpTasks(input);
-        } else if (url.pathname === MCP_TASK_READ_PATH) {
-          const input = McpTaskReadRequestSchema.parse(raw);
-          if (input.board.id !== boardId) return new Response("invalid board identity", { status: 400 });
-          result = this.readMcpTask(input);
-        } else {
-          if (command === null) throw new Error("missing MCP command");
-          const executed = this.executeMutation(
-            {
-              source: "mcp",
-              command: command.command,
-              credentialId: command.credentialId,
-              inputHash: command.inputHash,
-              board: command.board,
-              assigneeAllowed: admitted.probeAllowed,
-            },
-            {
-              actorId: userId,
-              boardId,
-              canManageColumns:
-                admitted.canManageColumns &&
-                request.headers.get(INTERNAL_CAN_MANAGE_COLUMNS_HEADER) === "true",
-            },
-          );
-          if (executed === undefined) throw new Error("missing MCP result");
-          result = executed;
-        }
-        return Response.json(result);
-      } catch (error) {
-        if (error instanceof MutationRefusal) return Response.json(this.mcpFailure(error));
-        if (error instanceof z.ZodError) return new Response("invalid request", { status: 400 });
-        return Response.json({
-          ok: false,
-          error: {
-            code: "internal_error",
-            message: "Unexpected failure; retry with the same operationKey.",
-            retryable: true,
-          },
-        } satisfies McpToolResult);
-      }
+    if (settlement || deletedCleanup) return null;
+    const policyState = this.policyBoundary();
+    return !policyState || policyState.frozen === 1 ? this.accessChangingResponse() : null;
+  }
+
+  /**
+   * The checks every route owes its gate class, in the order they have always run:
+   * method, identity, body, then (protected routes) admission, and only then the handler.
+   */
+  private async dispatch(
+    match: RouteMatch,
+    request: Request,
+    boardId: string | null,
+    userId: string | null,
+  ): Promise<Response> {
+    const { name, spec } = match;
+    if (!(spec.methods as readonly string[]).includes(request.method)) return new Response("method not allowed", { status: 405 });
+    if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
+      return new Response(spec.joinedIdentity ? "invalid identity" : "invalid board id", { status: 400 });
     }
-
-    // The identity read the write-back routes make: a card read must never write backfill,
-    // recovery or alarm state on its way to answer, so it is dispatched ahead of the preamble below.
-    if (url.pathname.startsWith(CARD_PATH_PREFIX) && url.pathname.endsWith("/write-back")) {
-      if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      const cardId = decodeURIComponent(
-        url.pathname.slice(CARD_PATH_PREFIX.length, -"/write-back".length),
-      );
-      if (!cardId) {
-        return new Response("invalid card id", { status: 400 });
-      }
-      const card = this.ctx.storage.sql
-        .exec<{ id: string; title: string; taskNumber: number }>(
-          `SELECT id, title, task_number AS taskNumber
-             FROM cards
-            WHERE id = ? AND task_number IS NOT NULL AND archived_at IS NULL`,
-          cardId,
-        )
-        .toArray()[0];
-
-      if (!card) {
-        return Response.json({ error: "card not found" }, { status: 404 });
-      }
-      return Response.json({ id: card.id, title: card.title, taskNumber: card.taskNumber } satisfies WriteBackCard);
+    let actor: string | null = null;
+    if (spec.gate === "protected") {
+      if (userId === null || !Identifier.safeParse(userId).success) return new Response("invalid identity", { status: 400 });
+      actor = userId;
     }
-
-    // Development info (ADR 0064). These internal routes sit ahead of the board-identity
-    // preamble: a signed webhook carries no user, and none of them may start board state.
-    if (url.pathname === PULL_REQUEST_WRITE_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      if (this.deleting) return new Response("board deleted", { status: 410 });
-      const parsed = PullRequestWriteSchema.safeParse(await request.json().catch(() => null));
-      if (!parsed.success) return new Response("invalid pull request write", { status: 400 });
-      const { changedCardIds, linked } = this.ctx.storage.transactionSync(() =>
-        writePullRequest(this.ctx.storage.sql, parsed.data),
-      );
-      // An accepted write is announced; the receiver answers with an authoritative read.
-      for (const cardId of changedCardIds) {
-        this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
-      }
-      const { repositoryId, number } = parsed.data.pullRequest;
-      await syncPullRequestRoute(this.env, boardId, repositoryId, number, linked);
-      return Response.json({ changed: changedCardIds.length > 0 });
+    const params = decodeParams(match.params);
+    let input: unknown;
+    if (spec.input) {
+      const parsed = spec.input.safeParse(await request.json().catch(() => null));
+      if (!parsed.success) return spec.invalid!();
+      input = parsed.data;
+      if (spec.boardOf && spec.boardOf(input) !== boardId) return new Response("invalid board identity", { status: 400 });
     }
+    const handler = this.handlers[name] as (ctx: RouteContext | ProtectedContext, input: unknown) => Response | Promise<Response>;
+    if (actor === null) return handler({ request, boardId, params }, input);
+    // One admission for every protected path: the boundary before the D1 verdicts, the
+    // verdicts (including the current eligibility of an assignee the body names), and the
+    // boundary after, all inside one bounded window, so a verdict a later prepare, commit
+    // or release invalidated is discarded instead of being consumed by this request.
+    // Receipts are replayed under this verdict too, so a stored result is never served to
+    // a caller who lost access while its body was arriving.
+    const assigneeId: string | null = spec.assignee?.(input) ?? null;
+    const admitted = await this.admitProtectedPath(
+      boardId,
+      actor,
+      assigneeId === null ? undefined : () => this.currentAssigneeEligible(boardId, assigneeId),
+    );
+    if (!admitted.admitted) return admitted.response;
+    return handler(
+      { request, boardId, params, userId: actor, canManageColumns: admitted.canManageColumns, probeAllowed: admitted.probeAllowed },
+      input,
+    );
+  }
 
-    // A member links a pull request by hand (POST) or unlinks one (DELETE). The actor is
-    // admitted on the boundary the write runs under, after the Worker's GitHub round trip.
-    if (url.pathname.startsWith(CARD_PATH_PREFIX) && url.pathname.endsWith("/development/pull-requests")) {
-      if (request.method !== "POST" && request.method !== "DELETE") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      if (userId === null || !Identifier.safeParse(userId).success) {
-        return new Response("invalid identity", { status: 400 });
-      }
-      if (this.deleting) return new Response("board deleted", { status: 410 });
-      const cardId = decodeURIComponent(
-        url.pathname.slice(CARD_PATH_PREFIX.length, -"/development/pull-requests".length),
-      );
-      const raw: unknown = await request.json().catch(() => null);
-      const linking = request.method === "POST" ? PullRequestLinkSchema.safeParse(raw) : null;
-      const unlinking = request.method === "DELETE" ? PullRequestUnlinkSchema.safeParse(raw) : null;
-      if (!(linking ?? unlinking)?.success) {
-        return Response.json({ code: "invalid_pr_reference", error: "invalid pull request" }, { status: 400 });
-      }
-      const admitted = await this.admitProtectedPath(boardId, userId);
-      if (!admitted.admitted) return admitted.response;
+  /**
+   * Records which board this object is, before the route's own checks. The Worker names
+   * the board in a header on every request, so this is how an object learns its id, how a
+   * row from before attachments had internal keys gets one, and how a board whose locks
+   * expired while nothing named it wakes to settle them. Idempotent.
+   */
+  private async stampIdentity(boardId: string): Promise<void> {
+    const priorBoardId = this.ctx.storage.sql
+      .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'board_id'")
+      .toArray()[0]?.value;
 
-      const outcome = this.ctx.storage.transactionSync(() => {
-        const sql = this.ctx.storage.sql;
-        const refusal = linkChangeRefusal(sql, cardId);
-        if (refusal) return refusal;
-        if (linking?.success) {
-          const { pullRequest } = linking.data;
-          const { changed } = linkPullRequestToCard(sql, cardId, pullRequest);
-          return { status: 200, changed, linked: true, ref: pullRequest } as const;
-        }
-        const { repositoryId, number } = unlinking!.data!;
-        const { unlinked, stillLinked } = unlinkPullRequestFromCard(sql, cardId, repositoryId, number);
-        if (!unlinked) return { status: 404, code: "not_linked", error: "this card does not link that pull request" } as const;
-        return { status: 200, changed: true, linked: stillLinked, ref: { repositoryId, number } } as const;
-      });
-      if (outcome.status !== 200) {
-        return Response.json({ code: outcome.code, error: outcome.error }, { status: outcome.status });
-      }
-      if (outcome.changed) this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
-      await syncPullRequestRoute(this.env, boardId, outcome.ref.repositoryId, outcome.ref.number, outcome.linked);
-      const sql = this.ctx.storage.sql;
-      return Response.json({ pullRequests: readCardPullRequests(sql, cardId), branches: readCardBranches(sql, cardId) } satisfies CardDevelopment);
-    }
+    this.ctx.storage.sql.exec(
+      `INSERT INTO meta(key, value) VALUES ('board_id', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      boardId,
+    );
+    // v9 rows created before this deployment have no internal R2 key. The
+    // membership-checked Worker supplies the board id on every socket fetch,
+    // so the first reconnect backfills them before any delete can arrive.
+    this.ctx.storage.sql.exec(
+      "UPDATE attachments SET object_key = ? || '/' || id WHERE object_key IS NULL",
+      boardId,
+    );
 
-    // A member unlinks a branch by hand (DELETE). Branches are linked by name only, so there is no link counterpart.
-    if (url.pathname.startsWith(CARD_PATH_PREFIX) && url.pathname.endsWith("/development/branches")) {
-      if (request.method !== "DELETE") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      if (userId === null || !Identifier.safeParse(userId).success) {
-        return new Response("invalid identity", { status: 400 });
-      }
-      if (this.deleting) return new Response("board deleted", { status: 410 });
-      const cardId = decodeURIComponent(url.pathname.slice(CARD_PATH_PREFIX.length, -"/development/branches".length));
-      const unlinking = BranchUnlinkSchema.safeParse(await request.json().catch(() => null));
-      if (!unlinking.success) {
-        return Response.json({ code: "invalid_branch_reference", error: "invalid branch" }, { status: 400 });
-      }
-      const admitted = await this.admitProtectedPath(boardId, userId);
-      if (!admitted.admitted) return admitted.response;
-
-      const { repositoryId, name } = unlinking.data;
-      const outcome = this.ctx.storage.transactionSync(() => {
-        const sql = this.ctx.storage.sql;
-        const refusal = linkChangeRefusal(sql, cardId);
-        if (refusal) return refusal;
-        const { unlinked, stillLinked } = unlinkBranchFromCard(sql, cardId, repositoryId, name);
-        if (!unlinked) return { status: 404, code: "not_linked", error: "this card does not link that branch" } as const;
-        return { status: 200, stillLinked } as const;
-      });
-      if (outcome.status !== 200) {
-        return Response.json({ code: outcome.code, error: outcome.error }, { status: outcome.status });
-      }
-      this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
-      await syncBranchRoute(this.env, boardId, repositoryId, name, outcome.stillLinked);
-      const sql = this.ctx.storage.sql;
-      return Response.json({ pullRequests: readCardPullRequests(sql, cardId), branches: readCardBranches(sql, cardId) } satisfies CardDevelopment);
-    }
-
-    if (url.pathname === BRANCH_WRITE_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      if (this.deleting) return new Response("board deleted", { status: 410 });
-      const parsed = BranchWriteSchema.safeParse(await request.json().catch(() => null));
-      if (!parsed.success) return new Response("invalid branch write", { status: 400 });
-      const { changedCardIds, linked } = this.ctx.storage.transactionSync(() => writeBranch(this.ctx.storage.sql, parsed.data));
-      for (const cardId of changedCardIds) {
-        this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
-      }
-      await syncBranchRoute(this.env, boardId, parsed.data.repositoryId, parsed.data.name, linked);
-      return Response.json({ changed: changedCardIds.length > 0 });
-    }
-
-    if (url.pathname === BOARD_DEVELOPMENT_PATH) {
-      if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
-      return Response.json({ cards: readBoardPullRequests(this.ctx.storage.sql) } satisfies BoardDevelopment);
-    }
-
-    if (url.pathname.startsWith(CARD_PATH_PREFIX) && url.pathname.endsWith("/development")) {
-      if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
-      const cardId = decodeURIComponent(
-        url.pathname.slice(CARD_PATH_PREFIX.length, -"/development".length),
-      );
-      const sql = this.ctx.storage.sql;
-      const active = sql
-        .exec("SELECT 1 FROM cards WHERE id = ? AND task_number IS NOT NULL AND archived_at IS NULL", cardId)
-        .toArray().length > 0;
-      if (!active) return Response.json({ error: "card not found" }, { status: 404 });
-      // `legacy` is for the Worker only: old manual links it should read from GitHub and write back.
-      return Response.json({
-        pullRequests: readCardPullRequests(sql, cardId),
-        branches: readCardBranches(sql, cardId),
-        legacy: readLegacyAssociations(sql, cardId),
-      });
-    }
-
-    if (boardId !== null && ATTACHMENT_BOARD_ID.test(boardId)) {
-      const priorBoardId = this.ctx.storage.sql
-        .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'board_id'")
-        .toArray()[0]?.value;
-
-      this.ctx.storage.sql.exec(
-        `INSERT INTO meta(key, value) VALUES ('board_id', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-        boardId,
-      );
-      // v9 rows created before this deployment have no internal R2 key. The
-      // membership-checked Worker supplies the board id on every socket fetch,
-      // so the first reconnect backfills them before any delete can arrive.
-      this.ctx.storage.sql.exec(
-        "UPDATE attachments SET object_key = ? || '/' || id WHERE object_key IS NULL",
-        boardId,
-      );
-
-      if (!priorBoardId) {
-        const hasExpiredLocks = this.ctx.storage.sql
-          .exec<{ count: number }>(
-            "SELECT COUNT(*) AS count FROM card_transfer_locks WHERE expires_at <= ?",
-            Date.now(),
-          )
-          .toArray()[0]?.count ?? 0;
-        if (hasExpiredLocks > 0) {
-          await this.scheduleAlarmAt(Date.now());
-          this.ctx.waitUntil(this.recoverExpiredTransferLocks(Date.now()));
-        }
-      }
-    }
-
-    if (url.pathname.startsWith("/internal/attachments/key/")) {
-      const attId = url.pathname.slice("/internal/attachments/key/".length);
-      if (!ATTACHMENT_ID.test(attId)) return new Response("not found", { status: 404 });
-      const row = this.ctx.storage.sql
-        .exec<{ object_key: string | null }>(
-          "SELECT object_key FROM attachments WHERE id = ?",
-          attId,
-        )
-        .toArray()[0];
-      if (row && row.object_key) {
-        return Response.json({ objectKey: row.object_key });
-      }
-      const stagedRow = this.ctx.storage.sql
-        .exec<{ object_key: string }>(
-          "SELECT object_key FROM attachment_cleanup WHERE attachment_id = ? AND reason = 'staged' AND delete_after > ? AND claim_token IS NULL AND deleted_at IS NULL",
-          attId,
+    if (!priorBoardId) {
+      const hasExpiredLocks = this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM card_transfer_locks WHERE expires_at <= ?",
           Date.now(),
         )
-        .toArray()[0];
-      if (stagedRow && stagedRow.object_key) {
-        return Response.json({ objectKey: stagedRow.object_key });
+        .toArray()[0]?.count ?? 0;
+      if (hasExpiredLocks > 0) {
+        await this.scheduleAlarmAt(Date.now());
+        this.ctx.waitUntil(this.recoverExpiredTransferLocks(Date.now()));
       }
-      return new Response("not found", { status: 404 });
+    }
+  }
+
+  /** Runs one MCP request the dispatcher admitted; a refusal, a bad request and a crash each answer in the contract's shape. */
+  private mcpResponse(run: () => McpToolResult): Response {
+    try {
+      return Response.json(run());
+    } catch (error) {
+      if (error instanceof MutationRefusal) return Response.json(this.mcpFailure(error));
+      if (error instanceof z.ZodError) return new Response("invalid request", { status: 400 });
+      return Response.json({
+        ok: false,
+        error: {
+          code: "internal_error",
+          message: "Unexpected failure; retry with the same operationKey.",
+          retryable: true,
+        },
+      } satisfies McpToolResult);
+    }
+  }
+
+  private executeMcpRequest(
+    { request, boardId, userId, canManageColumns, probeAllowed }: ProtectedContext,
+    input: RouteInput<"mcpCommand">,
+  ): McpToolResult {
+    const executed = this.executeMutation(
+      {
+        source: "mcp",
+        command: input.command,
+        credentialId: input.credentialId,
+        inputHash: input.inputHash,
+        board: input.board,
+        assigneeAllowed: probeAllowed,
+      },
+      {
+        actorId: userId,
+        boardId,
+        canManageColumns: canManageColumns && request.headers.get(INTERNAL_CAN_MANAGE_COLUMNS_HEADER) === "true",
+      },
+    );
+    if (executed === undefined) throw new Error("missing MCP result");
+    return executed;
+  }
+
+  /** Moves this board into (`prepare`) or out of (`release`) the access fence of an operation D1's journal says it takes part in. */
+  private async changeAccess(
+    op: "prepare" | "release",
+    boardId: string,
+    { operationId, generation }: RouteInput<"accessPrepare">,
+  ): Promise<Response> {
+    const participant = await this.env.DB.prepare(
+      `SELECT o.phase,b.next_version AS generation FROM access_change_operations o JOIN access_change_boards b ON b.operation_id=o.id WHERE o.id=? AND b.board_id=?`,
+    ).bind(operationId,boardId).first<{phase:string;generation:number}>();
+    if (!participant || participant.generation !== generation) return new Response("access operation not found",{status:409});
+    if (op === "prepare") {
+      if (participant.phase !== "preparing") return new Response("operation is terminal",{status:409});
+      let conflicted = false;
+      this.ctx.storage.transactionSync(()=>{
+        const state=this.policyBoundary();
+        // A newer generation, or a different pending operation, always wins: this
+        // message must not refreeze a fence it no longer owns. Reaching this
+        // operation's own generation is likewise only possible once — a prepare
+        // that arrives after its release must not refreeze a boundary nothing will
+        // ever release again, leaving the board permanently unusable.
+        if (state) {
+          if (state.generation > generation) { conflicted = true; return; }
+          if (state.generation === generation) {
+            if (state.frozen === 1 && state.pendingOperationId === operationId) return;
+            conflicted = true;
+            return;
+          }
+          if (state.frozen === 1 && state.pendingOperationId !== operationId) { conflicted = true; return; }
+        }
+        this.ctx.storage.sql.exec(`UPDATE board_access_state SET generation=?,pending_operation_id=?,frozen=1 WHERE id=1`,generation,operationId);
+      });
+      if (conflicted) return new Response("stale access operation",{status:409});
+      for(const socket of this.ctx.getWebSockets())try{socket.close(4010,"Board access is changing");}catch{}
+      // A card copied to another board under the old policy must not land after the
+      // change commits: every outbound transfer is settled (finalized or aborted at
+      // its destination) before this board claims to be prepared.
+      const locks = this.ctx.storage.sql
+        .exec<TransferLock>(
+          `SELECT card_id AS cardId, transfer_id AS transferId, destination_board_id AS destinationBoardId
+             FROM card_transfer_locks ORDER BY card_id LIMIT ?`,
+          FENCE_TRANSFER_SETTLE_LIMIT + 1,
+        )
+        .toArray();
+      let pending = locks.length > FENCE_TRANSFER_SETTLE_LIMIT;
+      const now = Date.now();
+      for (const lock of locks.slice(0, FENCE_TRANSFER_SETTLE_LIMIT)) {
+        if ((await this.settleTransferLock(lock, boardId, now, false)) === "retry") pending = true;
+      }
+      if (pending) return new Response("transfer settlement pending", { status: 503 });
+      return Response.json({prepared:true});
+    }
+    if (!["committed","aborted","completed"].includes(participant.phase)) return new Response("operation is not terminal",{status:409});
+    this.ctx.storage.transactionSync(()=>{
+      const state=this.ctx.storage.sql.exec<{generation:number;pendingOperationId:string|null}>(`SELECT generation,pending_operation_id AS pendingOperationId FROM board_access_state WHERE id=1`).toArray()[0];
+      if (!state || state.generation > generation || (state.pendingOperationId!==null&&state.pendingOperationId!==operationId)) return;
+      this.ctx.storage.sql.exec(`UPDATE board_access_state SET generation=?,pending_operation_id=NULL,frozen=0 WHERE id=1`,generation);
+    });
+    return Response.json({released:true});
+  }
+
+  private async deleteBoard(boardId: string): Promise<Response> {
+    this.deleting = true;
+    await this.ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.transactionSync(() => {
+        const sql = this.ctx.storage.sql;
+        sql.exec("INSERT OR REPLACE INTO meta(key,value) VALUES ('deleted',1)");
+        // Receipts must outlive content: a source may still need to finish a committed move.
+        for (const table of [
+          "attachments", "checklist_items", "comments", "activities", "card_relations",
+          "card_labels", "labels", "card_github_pull_requests", "card_development_pull_requests", "card_development_branches", "card_development_unlinks", "cards", "columns",
+          "card_transfer_locks", "card_transfer_operations", "mcp_operation_receipts", "attachment_cleanup",
+        ]) sql.exec(`DELETE FROM ${table}`);
+        sql.exec("DELETE FROM meta WHERE key NOT IN ('schema_version','board_id','deleted')");
+      });
+      await this.ctx.storage.deleteAlarm();
+    });
+
+    for (const socket of this.ctx.getWebSockets()) {
+      try {
+        socket.close(1000, "board deleted");
+      } catch {
+        // A failed close must not abort closing remaining sockets.
+      }
     }
 
-    if (url.pathname === STAGE_ATTACHMENT_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
+    let cursor: string | undefined;
+    do {
+      const listed = await this.attachmentBucket.list({
+        prefix: `${boardId}/`,
+        cursor,
+      });
+      if (listed.objects.length > 0) {
+        await this.attachmentBucket.delete(listed.objects.map((obj) => obj.key));
       }
-      if (userId === null || !Identifier.safeParse(userId).success) {
-        return new Response("invalid identity", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      let attachmentId: unknown = null;
-      if (typeof raw === "object" && raw !== null && "id" in raw) attachmentId = raw.id;
-      if (typeof attachmentId !== "string" || !ATTACHMENT_ID.test(attachmentId)) {
-        return new Response("invalid attachment id", { status: 400 });
-      }
-      // Staging writes durable state, so it is admitted on the same boundary as every
-      // other write, and on the uploader's access as it stands now: the upload route
-      // may have spent a long time buffering the body first, and the D1 verdict itself
-      // can be answered after a prepare landed.
-      const admitted = await this.admitProtectedPath(boardId, userId);
-      if (!admitted.admitted) return admitted.response;
-      let objectKey = attachmentObjectKey(boardId, attachmentId);
-      if (
-        typeof raw === "object" &&
-        raw !== null &&
-        "objectKey" in raw &&
-        typeof raw.objectKey === "string" &&
-        raw.objectKey.startsWith(`${boardId}/`)
-      ) {
-        objectKey = raw.objectKey;
-      }
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor !== undefined);
 
-      const existingConflict = this.ctx.storage.sql
+    return new Response(null, { status: 204 });
+  }
+
+  /** The identity a write-back route reads before and after it talks to GitHub. */
+  private readWriteBackCard(cardId: string): Response {
+    if (!cardId) {
+      return new Response("invalid card id", { status: 400 });
+    }
+    const card = this.ctx.storage.sql
+      .exec<{ id: string; title: string; taskNumber: number }>(
+        `SELECT id, title, task_number AS taskNumber
+           FROM cards
+          WHERE id = ? AND task_number IS NOT NULL AND archived_at IS NULL`,
+        cardId,
+      )
+      .toArray()[0];
+
+    if (!card) {
+      return Response.json({ error: "card not found" }, { status: 404 });
+    }
+    return Response.json({ id: card.id, title: card.title, taskNumber: card.taskNumber } satisfies WriteBackCard);
+  }
+
+  private readCardDevelopment(cardId: string): Response {
+    const sql = this.ctx.storage.sql;
+    const active = sql
+      .exec("SELECT 1 FROM cards WHERE id = ? AND task_number IS NOT NULL AND archived_at IS NULL", cardId)
+      .toArray().length > 0;
+    if (!active) return Response.json({ error: "card not found" }, { status: 404 });
+    // `legacy` is for the Worker only: old manual links it should read from GitHub and write back.
+    return Response.json({
+      pullRequests: readCardPullRequests(sql, cardId),
+      branches: readCardBranches(sql, cardId),
+      legacy: readLegacyAssociations(sql, cardId),
+    });
+  }
+
+  private async acceptPullRequestWrite(boardId: string, input: RouteInput<"pullRequestWrite">): Promise<Response> {
+    const { changedCardIds, linked } = this.ctx.storage.transactionSync(() =>
+      writePullRequest(this.ctx.storage.sql, input),
+    );
+    // An accepted write is announced; the receiver answers with an authoritative read.
+    for (const cardId of changedCardIds) {
+      this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
+    }
+    const { repositoryId, number } = input.pullRequest;
+    await syncPullRequestRoute(this.env, boardId, repositoryId, number, linked);
+    return Response.json({ changed: changedCardIds.length > 0 });
+  }
+
+  private async acceptBranchWrite(boardId: string, input: RouteInput<"branchWrite">): Promise<Response> {
+    const { changedCardIds, linked } = this.ctx.storage.transactionSync(() => writeBranch(this.ctx.storage.sql, input));
+    for (const cardId of changedCardIds) {
+      this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
+    }
+    await syncBranchRoute(this.env, boardId, input.repositoryId, input.name, linked);
+    return Response.json({ changed: changedCardIds.length > 0 });
+  }
+
+  /** A member links a pull request by hand (POST) or unlinks one (DELETE), on the boundary the dispatcher admitted, after the Worker's GitHub round trip. */
+  private async changePullRequestLink(
+    boardId: string,
+    cardId: string,
+    change: RouteInput<"pullRequestLink"> | RouteInput<"pullRequestUnlink">,
+  ): Promise<Response> {
+    const outcome = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const refusal = linkChangeRefusal(sql, cardId);
+      if (refusal) return refusal;
+      if ("pullRequest" in change) {
+        const { pullRequest } = change;
+        const { changed } = linkPullRequestToCard(sql, cardId, pullRequest);
+        return { status: 200, changed, linked: true, ref: pullRequest } as const;
+      }
+      const { repositoryId, number } = change;
+      const { unlinked, stillLinked } = unlinkPullRequestFromCard(sql, cardId, repositoryId, number);
+      if (!unlinked) return { status: 404, code: "not_linked", error: "this card does not link that pull request" } as const;
+      return { status: 200, changed: true, linked: stillLinked, ref: { repositoryId, number } } as const;
+    });
+    if (outcome.status !== 200) {
+      return Response.json({ code: outcome.code, error: outcome.error }, { status: outcome.status });
+    }
+    if (outcome.changed) this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
+    await syncPullRequestRoute(this.env, boardId, outcome.ref.repositoryId, outcome.ref.number, outcome.linked);
+    const sql = this.ctx.storage.sql;
+    return Response.json({ pullRequests: readCardPullRequests(sql, cardId), branches: readCardBranches(sql, cardId) } satisfies CardDevelopment);
+  }
+
+  /** A member unlinks a branch by hand. Branches are linked by name only, so there is no link counterpart. */
+  private async unlinkBranch(boardId: string, cardId: string, input: RouteInput<"branchUnlink">): Promise<Response> {
+    const { repositoryId, name } = input;
+    const outcome = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const refusal = linkChangeRefusal(sql, cardId);
+      if (refusal) return refusal;
+      const { unlinked, stillLinked } = unlinkBranchFromCard(sql, cardId, repositoryId, name);
+      if (!unlinked) return { status: 404, code: "not_linked", error: "this card does not link that branch" } as const;
+      return { status: 200, stillLinked } as const;
+    });
+    if (outcome.status !== 200) {
+      return Response.json({ code: outcome.code, error: outcome.error }, { status: outcome.status });
+    }
+    this.broadcast({ type: "github.invalidated", scope: "card", cardId, revision: null });
+    await syncBranchRoute(this.env, boardId, repositoryId, name, outcome.stillLinked);
+    const sql = this.ctx.storage.sql;
+    return Response.json({ pullRequests: readCardPullRequests(sql, cardId), branches: readCardBranches(sql, cardId) } satisfies CardDevelopment);
+  }
+
+  private readAttachmentKey(attId: string): Response {
+    if (!ATTACHMENT_ID.test(attId)) return new Response("not found", { status: 404 });
+    const row = this.ctx.storage.sql
+      .exec<{ object_key: string | null }>(
+        "SELECT object_key FROM attachments WHERE id = ?",
+        attId,
+      )
+      .toArray()[0];
+    if (row && row.object_key) {
+      return Response.json({ objectKey: row.object_key });
+    }
+    const stagedRow = this.ctx.storage.sql
+      .exec<{ object_key: string }>(
+        "SELECT object_key FROM attachment_cleanup WHERE attachment_id = ? AND reason = 'staged' AND delete_after > ? AND claim_token IS NULL AND deleted_at IS NULL",
+        attId,
+        Date.now(),
+      )
+      .toArray()[0];
+    if (stagedRow && stagedRow.object_key) {
+      return Response.json({ objectKey: stagedRow.object_key });
+    }
+    return new Response("not found", { status: 404 });
+  }
+
+  /**
+   * Staging writes durable state, so it is admitted on the same boundary as every
+   * other write, and on the uploader's access as it stands now: the upload route
+   * may have spent a long time buffering the body first, and the D1 verdict itself
+   * can be answered after a prepare landed.
+   */
+  private async stageAttachment(boardId: string, input: RouteInput<"attachmentStage">): Promise<Response> {
+    const attachmentId = input.id;
+    let objectKey = attachmentObjectKey(boardId, attachmentId);
+    if (typeof input.objectKey === "string" && input.objectKey.startsWith(`${boardId}/`)) {
+      objectKey = input.objectKey;
+    }
+
+    const existingConflict = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        `SELECT COUNT(*) AS count
+           FROM attachment_cleanup
+          WHERE object_key = ?
+            AND (claim_token IS NOT NULL OR deleted_at IS NOT NULL OR reason = 'deleted')`,
+        objectKey,
+      )
+      .toArray()[0]?.count ?? 0;
+    if (existingConflict > 0) {
+      return Response.json(
+        { error: "attachment object is currently being collected" },
+        { status: 409 },
+      );
+    }
+
+    const deleteAfter = Date.now() + STAGED_ATTACHMENT_TTL_MS;
+    // Schedule before persisting the lease. If the event dies between these
+    // operations, an empty alarm is harmless; the reverse order could strand
+    // a lease forever.
+    await this.scheduleAlarmAt(deleteAfter);
+    this.ctx.storage.sql.exec(
+      `INSERT INTO attachment_cleanup(object_key, attachment_id, reason, delete_after)
+       VALUES (?, ?, 'staged', ?)
+       ON CONFLICT(object_key) DO UPDATE SET
+         attachment_id = excluded.attachment_id,
+         reason = excluded.reason,
+         delete_after = excluded.delete_after
+       WHERE attachment_cleanup.claim_token IS NULL
+         AND attachment_cleanup.deleted_at IS NULL
+         AND attachment_cleanup.reason = 'staged'`,
+      objectKey,
+      attachmentId,
+      deleteAfter,
+    );
+    return new Response(null, { status: 204 });
+  }
+
+  private async reconcileAttachments(boardId: string, input: RouteInput<"attachmentsReconcile">): Promise<Response> {
+    const items: { objectKey: string; attachmentId: string }[] = [];
+    const seenKeys = new Set<string>();
+
+    const rawObj = input;
+    if ("objects" in rawObj && Array.isArray(rawObj.objects)) {
+      for (const obj of rawObj.objects) {
+        if (
+          typeof obj === "object" &&
+          obj !== null &&
+          "key" in obj &&
+          "attachmentId" in obj &&
+          typeof obj.key === "string" &&
+          typeof obj.attachmentId === "string"
+        ) {
+          const parsed = parseAttachmentObjectKey(obj.key);
+          if (parsed && parsed.boardId === boardId && parsed.attachmentId === obj.attachmentId) {
+            if (!seenKeys.has(obj.key)) {
+              seenKeys.add(obj.key);
+              items.push({ objectKey: obj.key, attachmentId: obj.attachmentId });
+            }
+          }
+        }
+      }
+    } else if ("keys" in rawObj && Array.isArray(rawObj.keys)) {
+      for (const key of rawObj.keys) {
+        if (typeof key === "string") {
+          const parsed = parseAttachmentObjectKey(key);
+          if (parsed && parsed.boardId === boardId) {
+            if (!seenKeys.has(key)) {
+              seenKeys.add(key);
+              items.push({ objectKey: key, attachmentId: parsed.attachmentId });
+            }
+          }
+        }
+      }
+    } else if ("ids" in rawObj && Array.isArray(rawObj.ids)) {
+      for (const id of rawObj.ids) {
+        if (typeof id === "string" && ATTACHMENT_ID.test(id)) {
+          const key = attachmentObjectKey(boardId, id);
+          if (!seenKeys.has(key)) {
+            seenKeys.add(key);
+            items.push({ objectKey: key, attachmentId: id });
+          }
+        }
+      }
+    }
+
+    if (items.length === 0) return Response.json({ queued: 0 });
+
+    const now = Date.now();
+    const orphanItems: { objectKey: string; attachmentId: string }[] = [];
+    const redeleteItems: { objectKey: string; attachmentId: string }[] = [];
+
+    for (const item of items) {
+      const isOwned = this.ctx.storage.sql
+        .exec<{ count: number }>(
+          `SELECT COUNT(*) AS count
+             FROM attachments
+             JOIN cards ON cards.id = attachments.card_id
+            WHERE attachments.object_key = ?
+               OR (attachments.object_key IS NULL AND attachments.id = ? AND ? = ?)`,
+          item.objectKey,
+          item.attachmentId,
+          item.objectKey,
+          attachmentObjectKey(boardId, item.attachmentId),
+        )
+        .toArray()[0]?.count ?? 0;
+
+      if (isOwned > 0) continue;
+
+      const isStaged = this.ctx.storage.sql
         .exec<{ count: number }>(
           `SELECT COUNT(*) AS count
              FROM attachment_cleanup
             WHERE object_key = ?
-              AND (claim_token IS NOT NULL OR deleted_at IS NOT NULL OR reason = 'deleted')`,
-          objectKey,
+              AND reason = 'staged'
+              AND delete_after > ?
+              AND claim_token IS NULL
+              AND deleted_at IS NULL`,
+          item.objectKey,
+          now,
         )
         .toArray()[0]?.count ?? 0;
-      if (existingConflict > 0) {
-        return Response.json(
-          { error: "attachment object is currently being collected" },
-          { status: 409 },
+
+      if (isStaged > 0) continue;
+
+      const isTombstone = this.ctx.storage.sql
+        .exec<{ count: number }>(
+          `SELECT COUNT(*) AS count
+             FROM attachment_cleanup
+            WHERE object_key = ?
+              AND deleted_at IS NOT NULL`,
+          item.objectKey,
+        )
+        .toArray()[0]?.count ?? 0;
+
+      if (isTombstone > 0) {
+        redeleteItems.push(item);
+        continue;
+      }
+
+      orphanItems.push(item);
+    }
+
+    if (orphanItems.length > 0 || redeleteItems.length > 0) {
+      this.ctx.storage.setAlarm(now);
+      for (const item of orphanItems) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO attachment_cleanup(
+             object_key, attachment_id, reason, delete_after
+           ) VALUES (?, ?, 'deleted', 0)
+           ON CONFLICT(object_key) DO UPDATE SET
+             reason = 'deleted',
+             delete_after = 0
+           WHERE attachment_cleanup.claim_token IS NULL
+             AND attachment_cleanup.deleted_at IS NULL`,
+          item.objectKey,
+          item.attachmentId,
         );
       }
+      for (const item of redeleteItems) {
+        this.ctx.storage.sql.exec(
+          `UPDATE attachment_cleanup
+              SET delete_after = ?,
+                  reason = 'deleted'
+            WHERE object_key = ?
+              AND deleted_at IS NOT NULL`,
+          now,
+          item.objectKey,
+        );
+      }
+      this.ctx.waitUntil(this.drainAttachmentCleanup());
+    }
+    return Response.json({ queued: orphanItems.length + redeleteItems.length });
+  }
 
-      const deleteAfter = Date.now() + STAGED_ATTACHMENT_TTL_MS;
-      // Schedule before persisting the lease. If the event dies between these
-      // operations, an empty alarm is harmless; the reverse order could strand
-      // a lease forever.
-      await this.scheduleAlarmAt(deleteAfter);
-      this.ctx.storage.sql.exec(
-        `INSERT INTO attachment_cleanup(object_key, attachment_id, reason, delete_after)
-         VALUES (?, ?, 'staged', ?)
-         ON CONFLICT(object_key) DO UPDATE SET
-           attachment_id = excluded.attachment_id,
-           reason = excluded.reason,
-           delete_after = excluded.delete_after
-         WHERE attachment_cleanup.claim_token IS NULL
-           AND attachment_cleanup.deleted_at IS NULL
-           AND attachment_cleanup.reason = 'staged'`,
-        objectKey,
-        attachmentId,
-        deleteAfter,
-      );
-      return new Response(null, { status: 204 });
+  private checkAttachmentOwnership({ ids }: RouteInput<"attachmentOwnership">): Response {
+    const attachmentIds = [...new Set(ids)];
+    if (attachmentIds.length === 0) return Response.json({ ownedIds: [] });
+
+    const placeholders = attachmentIds.map(() => "?").join(", ");
+    const ownedIds = this.ctx.storage.sql
+      .exec<{ id: string }>(
+        `SELECT id FROM attachments WHERE id IN (${placeholders})`,
+        ...attachmentIds,
+      )
+      .toArray()
+      .map(({ id }) => id);
+
+    return Response.json({ ownedIds });
+  }
+
+  private readTransferOptions(): Response {
+    const columns = this.ctx.storage.sql
+      .exec<Pick<Column, "id" | "title" | "position">>("SELECT id, title, position FROM columns ORDER BY position, id")
+      .toArray();
+    return Response.json({ columns });
+  }
+
+  /**
+   * The dispatcher has admitted the actor already, to fail fast on one the board no
+   * longer admits; the binding verdict is the second admission below, taken after every
+   * await and right before the lock.
+   */
+  private async prepareTransfer(
+    boardId: string,
+    userId: string,
+    input: RouteInput<"transferPrepare">,
+  ): Promise<Response> {
+    const { transferId, cardId, destinationBoardId } = input;
+    const now = Date.now();
+
+    // Check if this transferId is already bound in operations history
+    const existingOp = this.ctx.storage.sql
+      .exec<{
+        cardId: string;
+        destinationBoardId: string;
+        state: string;
+      }>(
+        `SELECT card_id AS cardId, destination_board_id AS destinationBoardId, state
+           FROM card_transfer_operations
+          WHERE transfer_id = ?`,
+        transferId,
+      )
+      .toArray()[0];
+    if (existingOp) {
+      if (existingOp.cardId !== cardId) {
+        return Response.json({ error: "transfer id already used for another card", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
+      }
+      if (existingOp.destinationBoardId !== destinationBoardId) {
+        return Response.json({ error: "transfer id cannot change destination board", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
+      }
+      if (existingOp.state === "finalized" || existingOp.state === "aborted") {
+        return Response.json({ error: "transfer id already used for a terminated transfer", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
+      }
     }
 
-    if (url.pathname === RECONCILE_ATTACHMENTS_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
+    // Check if this transferId is already bound to another card or destination in active locks
+    const existingByTransferId = this.ctx.storage.sql
+      .exec<{ card_id: string; destination_board_id: string }>(
+        "SELECT card_id, destination_board_id FROM card_transfer_locks WHERE transfer_id = ?",
+        transferId,
+      )
+      .toArray()[0];
+    if (existingByTransferId) {
+      if (existingByTransferId.card_id !== cardId) {
+        return Response.json({ error: "transfer id already used for another card", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
       }
-      const raw: unknown = await request.json().catch(() => null);
-      if (typeof raw !== "object" || raw === null) {
-        return new Response("invalid request body", { status: 400 });
+      if (
+        existingByTransferId.destination_board_id &&
+        existingByTransferId.destination_board_id !== destinationBoardId
+      ) {
+        return Response.json({ error: "transfer id cannot change destination board", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
       }
+    }
 
-      const items: { objectKey: string; attachmentId: string }[] = [];
-      const seenKeys = new Set<string>();
+    const existingLock = this.ctx.storage.sql
+      .exec<{ transfer_id: string; destination_board_id: string; expires_at: number }>(
+        "SELECT transfer_id, destination_board_id, expires_at FROM card_transfer_locks WHERE card_id = ?",
+        cardId,
+      )
+      .toArray()[0];
 
-      const rawObj = raw as Record<string, unknown>;
-      if ("objects" in rawObj && Array.isArray(rawObj.objects)) {
-        for (const obj of rawObj.objects) {
-          if (
-            typeof obj === "object" &&
-            obj !== null &&
-            "key" in obj &&
-            "attachmentId" in obj &&
-            typeof obj.key === "string" &&
-            typeof obj.attachmentId === "string"
-          ) {
-            const parsed = parseAttachmentObjectKey(obj.key);
-            if (parsed && parsed.boardId === boardId && parsed.attachmentId === obj.attachmentId) {
-              if (!seenKeys.has(obj.key)) {
-                seenKeys.add(obj.key);
-                items.push({ objectKey: obj.key, attachmentId: obj.attachmentId });
-              }
-            }
-          }
-        }
-      } else if ("keys" in rawObj && Array.isArray(rawObj.keys)) {
-        for (const key of rawObj.keys) {
-          if (typeof key === "string") {
-            const parsed = parseAttachmentObjectKey(key);
-            if (parsed && parsed.boardId === boardId) {
-              if (!seenKeys.has(key)) {
-                seenKeys.add(key);
-                items.push({ objectKey: key, attachmentId: parsed.attachmentId });
-              }
-            }
-          }
-        }
-      } else if ("ids" in rawObj && Array.isArray(rawObj.ids)) {
-        for (const id of rawObj.ids) {
-          if (typeof id === "string" && ATTACHMENT_ID.test(id)) {
-            const key = attachmentObjectKey(boardId, id);
-            if (!seenKeys.has(key)) {
-              seenKeys.add(key);
-              items.push({ objectKey: key, attachmentId: id });
-            }
-          }
-        }
+    if (existingLock && existingLock.transfer_id !== transferId) {
+      // Another operation holds the card. Only an expired lock may be taken over,
+      // and only once its destination settles it.
+      if (existingLock.expires_at > now) {
+        return Response.json({ error: "card transfer already in progress" }, { status: 409 });
       }
-
-      if (items.length === 0) return Response.json({ queued: 0 });
-
-      const now = Date.now();
-      const orphanItems: { objectKey: string; attachmentId: string }[] = [];
-      const redeleteItems: { objectKey: string; attachmentId: string }[] = [];
-
-      for (const item of items) {
-        const isOwned = this.ctx.storage.sql
-          .exec<{ count: number }>(
-            `SELECT COUNT(*) AS count
-               FROM attachments
-               JOIN cards ON cards.id = attachments.card_id
-              WHERE attachments.object_key = ?
-                 OR (attachments.object_key IS NULL AND attachments.id = ? AND ? = ?)`,
-            item.objectKey,
-            item.attachmentId,
-            item.objectKey,
-            attachmentObjectKey(boardId, item.attachmentId),
+      if (!existingLock.destination_board_id) {
+        await this.recoverExpiredTransferLocks(now);
+        const recheckLock = this.ctx.storage.sql
+          .exec<{ transfer_id: string }>(
+            "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
+            cardId,
           )
-          .toArray()[0]?.count ?? 0;
-
-        if (isOwned > 0) continue;
-
-        const isStaged = this.ctx.storage.sql
-          .exec<{ count: number }>(
-            `SELECT COUNT(*) AS count
-               FROM attachment_cleanup
-              WHERE object_key = ?
-                AND reason = 'staged'
-                AND delete_after > ?
-                AND claim_token IS NULL
-                AND deleted_at IS NULL`,
-            item.objectKey,
-            now,
-          )
-          .toArray()[0]?.count ?? 0;
-
-        if (isStaged > 0) continue;
-
-        const isTombstone = this.ctx.storage.sql
-          .exec<{ count: number }>(
-            `SELECT COUNT(*) AS count
-               FROM attachment_cleanup
-              WHERE object_key = ?
-                AND deleted_at IS NOT NULL`,
-            item.objectKey,
-          )
-          .toArray()[0]?.count ?? 0;
-
-        if (isTombstone > 0) {
-          redeleteItems.push(item);
-          continue;
-        }
-
-        orphanItems.push(item);
-      }
-
-      if (orphanItems.length > 0 || redeleteItems.length > 0) {
-        this.ctx.storage.setAlarm(now);
-        for (const item of orphanItems) {
-          this.ctx.storage.sql.exec(
-            `INSERT INTO attachment_cleanup(
-               object_key, attachment_id, reason, delete_after
-             ) VALUES (?, ?, 'deleted', 0)
-             ON CONFLICT(object_key) DO UPDATE SET
-               reason = 'deleted',
-               delete_after = 0
-             WHERE attachment_cleanup.claim_token IS NULL
-               AND attachment_cleanup.deleted_at IS NULL`,
-            item.objectKey,
-            item.attachmentId,
-          );
-        }
-        for (const item of redeleteItems) {
-          this.ctx.storage.sql.exec(
-            `UPDATE attachment_cleanup
-                SET delete_after = ?,
-                    reason = 'deleted'
-              WHERE object_key = ?
-                AND deleted_at IS NOT NULL`,
-            now,
-            item.objectKey,
-          );
-        }
-        this.ctx.waitUntil(this.drainAttachmentCleanup());
-      }
-      return Response.json({ queued: orphanItems.length + redeleteItems.length });
-    }
-    if (url.pathname === CHECK_ATTACHMENT_OWNERSHIP_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      let ids: unknown = null;
-      if (typeof raw === "object" && raw !== null && "ids" in raw) ids = raw.ids;
-      if (!Array.isArray(ids) || ids.length > 1000) {
-        return new Response("invalid attachment ids", { status: 400 });
-      }
-      const uniqueIds = new Set<string>();
-      for (const id of ids) {
-        if (typeof id !== "string" || !ATTACHMENT_ID.test(id)) {
-          return new Response("invalid attachment ids", { status: 400 });
-        }
-        uniqueIds.add(id);
-      }
-      const attachmentIds = [...uniqueIds];
-      if (attachmentIds.length === 0) return Response.json({ ownedIds: [] });
-
-      const placeholders = attachmentIds.map(() => "?").join(", ");
-      const ownedIds = this.ctx.storage.sql
-        .exec<{ id: string }>(
-          `SELECT id FROM attachments WHERE id IN (${placeholders})`,
-          ...attachmentIds,
-        )
-        .toArray()
-        .map(({ id }) => id);
-
-      return Response.json({ ownedIds });
-    }
-
-    if (url.pathname === CARD_TRANSFER_OPTIONS_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      const columns = this.ctx.storage.sql
-        .exec<Pick<Column, "id" | "title" | "position">>("SELECT id, title, position FROM columns ORDER BY position, id")
-        .toArray();
-      return Response.json({ columns });
-    }
-
-    if (url.pathname === CARD_TRANSFER_PREPARE_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      if (userId === null || !Identifier.safeParse(userId).success) {
-        return new Response("invalid identity", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      const parsed = CardTransferPreparePayloadSchema.safeParse(raw);
-      if (!parsed.success) {
-        return new Response("invalid transfer payload", { status: 400 });
-      }
-      const { transferId, cardId, destinationBoardId } = parsed.data;
-      // Fail fast on an actor the board no longer admits; the binding verdict is the
-      // second admission below, taken after every await and right before the lock.
-      const earlyAdmission = await this.admitProtectedPath(boardId, userId);
-      if (!earlyAdmission.admitted) return earlyAdmission.response;
-      const now = Date.now();
-
-      // Check if this transferId is already bound in operations history
-      const existingOp = this.ctx.storage.sql
-        .exec<{
-          cardId: string;
-          destinationBoardId: string;
-          state: string;
-        }>(
-          `SELECT card_id AS cardId, destination_board_id AS destinationBoardId, state
-             FROM card_transfer_operations
-            WHERE transfer_id = ?`,
-          transferId,
-        )
-        .toArray()[0];
-      if (existingOp) {
-        if (existingOp.cardId !== cardId) {
-          return Response.json({ error: "transfer id already used for another card", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-        }
-        if (existingOp.destinationBoardId !== destinationBoardId) {
-          return Response.json({ error: "transfer id cannot change destination board", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-        }
-        if (existingOp.state === "finalized" || existingOp.state === "aborted") {
-          return Response.json({ error: "transfer id already used for a terminated transfer", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-        }
-      }
-
-      // Check if this transferId is already bound to another card or destination in active locks
-      const existingByTransferId = this.ctx.storage.sql
-        .exec<{ card_id: string; destination_board_id: string }>(
-          "SELECT card_id, destination_board_id FROM card_transfer_locks WHERE transfer_id = ?",
-          transferId,
-        )
-        .toArray()[0];
-      if (existingByTransferId) {
-        if (existingByTransferId.card_id !== cardId) {
-          return Response.json({ error: "transfer id already used for another card", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-        }
-        if (
-          existingByTransferId.destination_board_id &&
-          existingByTransferId.destination_board_id !== destinationBoardId
-        ) {
-          return Response.json({ error: "transfer id cannot change destination board", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-        }
-      }
-
-      const existingLock = this.ctx.storage.sql
-        .exec<{ transfer_id: string; destination_board_id: string; expires_at: number }>(
-          "SELECT transfer_id, destination_board_id, expires_at FROM card_transfer_locks WHERE card_id = ?",
-          cardId,
-        )
-        .toArray()[0];
-
-      if (existingLock && existingLock.transfer_id !== transferId) {
-        // Another operation holds the card. Only an expired lock may be taken over,
-        // and only once its destination settles it.
-        if (existingLock.expires_at > now) {
+          .toArray()[0];
+        if (recheckLock && recheckLock.transfer_id !== transferId) {
           return Response.json({ error: "card transfer already in progress" }, { status: 409 });
         }
-        if (!existingLock.destination_board_id) {
-          await this.recoverExpiredTransferLocks(now);
-          const recheckLock = this.ctx.storage.sql
-            .exec<{ transfer_id: string }>(
-              "SELECT transfer_id FROM card_transfer_locks WHERE card_id = ?",
-              cardId,
-            )
-            .toArray()[0];
-          if (recheckLock && recheckLock.transfer_id !== transferId) {
-            return Response.json({ error: "card transfer already in progress" }, { status: 409 });
-          }
-        } else {
-          const heldIds = { transferId: existingLock.transfer_id, sourceBoardId: boardId, cardId };
-          const outcome = await settle(
-            heldIds,
-            this.localTransferSource(cardId, existingLock.transfer_id, existingLock.destination_board_id, true),
-            [boardDestination(this.env, { ...heldIds, destinationBoardId: existingLock.destination_board_id })],
-          );
-          // The earlier operation moved the card: there is nothing left to transfer.
-          if (outcome.kind === "finalized") return Response.json({ error: "not found" }, { status: 404 });
-          if (outcome.kind !== "released" || !outcome.cleared) {
-            return Response.json({ error: "card transfer already in progress" }, { status: 409 });
-          }
+      } else {
+        const heldIds = { transferId: existingLock.transfer_id, sourceBoardId: boardId, cardId };
+        const outcome = await settle(
+          heldIds,
+          this.localTransferSource(cardId, existingLock.transfer_id, existingLock.destination_board_id, true),
+          [boardDestination(this.env, { ...heldIds, destinationBoardId: existingLock.destination_board_id })],
+        );
+        // The earlier operation moved the card: there is nothing left to transfer.
+        if (outcome.kind === "finalized") return Response.json({ error: "not found" }, { status: 404 });
+        if (outcome.kind !== "released" || !outcome.cleared) {
+          return Response.json({ error: "card transfer already in progress" }, { status: 409 });
         }
       }
+    }
 
-      const expiresAt = now + TRANSFER_LOCK_TTL_MS;
-      // Schedule before persisting the lock to durably arrange alarm recovery.
-      await this.scheduleAlarmAt(expiresAt);
-      // The actor's access is resolved against this board's current generation with
-      // no await between the verdict and the synchronous lock write, so a revocation
-      // that landed during settlement or scheduling refuses the transfer.
-      const admission = await this.admitProtectedPath(boardId, userId);
-      if (!admission.admitted) return admission.response;
-      try {
-        const bundle = this.ctx.storage.transactionSync(() => {
-          const sql = this.ctx.storage.sql;
+    const expiresAt = now + TRANSFER_LOCK_TTL_MS;
+    // Schedule before persisting the lock to durably arrange alarm recovery.
+    await this.scheduleAlarmAt(expiresAt);
+    // The actor's access is resolved against this board's current generation with
+    // no await between the verdict and the synchronous lock write, so a revocation
+    // that landed during settlement or scheduling refuses the transfer.
+    const admission = await this.admitProtectedPath(boardId, userId);
+    if (!admission.admitted) return admission.response;
+    try {
+      const bundle = this.ctx.storage.transactionSync(() => {
+        const sql = this.ctx.storage.sql;
 
-          const cardRow = sql
-            .exec<CardRow>(
-              `SELECT id, column_id AS columnId, title, description, position,
-                      task_number AS taskNumber, subtask_done AS subtaskDone,
-                      assignee_id AS assigneeId,
-                      priority, task_type AS taskType, due_date AS dueDate, created_at AS createdAt,
-                      updated_at AS updatedAt
-                 FROM cards
-                WHERE id = ? AND archived_at IS NULL`,
-              cardId,
-            )
-            .toArray()[0];
-          if (!cardRow) {
-            return { status: 404, error: "not found" } as const;
-          }
-          const card: Card = { ...cardRow, subtaskDone: isCompleted(sql, cardRow.columnId) };
-
-          const relationRow = sql
-            .exec<{ id: string }>(
-              "SELECT id FROM card_relations WHERE source_card_id = ? OR target_card_id = ? LIMIT 1",
-              cardId,
-              cardId,
-            )
-            .toArray()[0];
-          if (relationRow) {
-            return { status: 409, error: "remove card links before transferring" } as const;
-          }
-
-          const lockRow = sql
-            .exec<{ transfer_id: string; destination_board_id: string }>(
-              "SELECT transfer_id, destination_board_id FROM card_transfer_locks WHERE card_id = ?",
-              cardId,
-            )
-            .toArray()[0];
-          if (lockRow) {
-            if (lockRow.transfer_id !== transferId) {
-              return { status: 409, error: "card transfer already in progress" } as const;
-            }
-            if (lockRow.destination_board_id && lockRow.destination_board_id !== destinationBoardId) {
-              return { status: 409, error: "transfer id cannot change destination board", code: TRANSFER_TERMINAL_CODE } as const;
-            }
-          }
-
-          const existingOpInTx = sql
-            .exec<{ card_id: string; destination_board_id: string; state: string; generation: number }>(
-              "SELECT card_id, destination_board_id, state, generation FROM card_transfer_operations WHERE transfer_id = ?",
-              transferId,
-            )
-            .toArray()[0];
-          if (existingOpInTx) {
-            if (existingOpInTx.card_id !== cardId || existingOpInTx.destination_board_id !== destinationBoardId) {
-              return { status: 409, error: "transfer id already used for another transfer", code: TRANSFER_TERMINAL_CODE } as const;
-            }
-            if (existingOpInTx.state === "finalized" || existingOpInTx.state === "aborted") {
-              return { status: 409, error: "transfer id already used for a terminated transfer", code: TRANSFER_TERMINAL_CODE } as const;
-            }
-          }
-
-          const maxGenRow = sql
-            .exec<{ maxGen: number | null }>(
-              "SELECT MAX(generation) AS maxGen FROM card_transfer_operations WHERE card_id = ?",
-              cardId,
-            )
-            .toArray()[0];
-          const generation = existingOpInTx ? existingOpInTx.generation : ((maxGenRow?.maxGen ?? 0) + 1);
-
-          sql.exec(
-            `INSERT INTO card_transfer_operations(transfer_id, card_id, destination_board_id, generation, state, created_at, updated_at)
-             VALUES (?, ?, ?, ?, 'prepared', ?, ?)
-             ON CONFLICT(transfer_id) DO UPDATE SET
-               updated_at = excluded.updated_at`,
-            transferId,
+        const cardRow = sql
+          .exec<CardRow>(
+            `SELECT id, column_id AS columnId, title, description, position,
+                    task_number AS taskNumber, subtask_done AS subtaskDone,
+                    assignee_id AS assigneeId,
+                    priority, task_type AS taskType, due_date AS dueDate, created_at AS createdAt,
+                    updated_at AS updatedAt
+               FROM cards
+              WHERE id = ? AND archived_at IS NULL`,
             cardId,
-            destinationBoardId,
-            generation,
-            now,
-            now,
-          );
+          )
+          .toArray()[0];
+        if (!cardRow) {
+          return { status: 404, error: "not found" } as const;
+        }
+        const card: Card = { ...cardRow, subtaskDone: isCompleted(sql, cardRow.columnId) };
 
-          sql.exec(
-            `INSERT INTO card_transfer_locks(card_id, transfer_id, destination_board_id, phase, expires_at, generation)
-             VALUES (?, ?, ?, 'prepared', ?, ?)
-             ON CONFLICT(card_id) DO UPDATE SET
-               destination_board_id = CASE
-                 WHEN card_transfer_locks.destination_board_id = '' THEN excluded.destination_board_id
-                 ELSE card_transfer_locks.destination_board_id
-               END,
-               phase = excluded.phase,
-               expires_at = excluded.expires_at,
-               generation = excluded.generation`,
+        const relationRow = sql
+          .exec<{ id: string }>(
+            "SELECT id FROM card_relations WHERE source_card_id = ? OR target_card_id = ? LIMIT 1",
             cardId,
-            transferId,
-            destinationBoardId,
-            expiresAt,
-            generation,
-          );
-
-          const checklistItems = sql
-            .exec<Omit<ChecklistItem, "done"> & { done: number }>(
-              "SELECT id, card_id AS cardId, text, done, position FROM checklist_items WHERE card_id = ? ORDER BY position, id",
-              cardId,
-            )
-            .toArray()
-            .map((item) => ({ ...item, done: item.done === 1 }));
-
-          const attachments = sql
-            .exec<{
-              id: string;
-              cardId: string;
-              fileName: string;
-              contentType: string;
-              size: number;
-              objectKey: string;
-            }>(
-              `SELECT id, card_id AS cardId, file_name AS fileName,
-                      content_type AS contentType, size,
-                      COALESCE(object_key, ? || '/' || id) AS objectKey
-                 FROM attachments
-                WHERE card_id = ?
-                ORDER BY id`,
-              boardId,
-              cardId,
-            )
-            .toArray();
-
-          const comments = sql
-            .exec<{
-              id: string;
-              cardId: string;
-              authorId: string;
-              parentCommentId: string | null;
-              deleted: number;
-              body: string;
-              createdAt: number;
-              updatedAt: number;
-            }>(
-              `SELECT id, card_id AS cardId, author_id AS authorId,
-                      parent_comment_id AS parentCommentId, deleted, body,
-                      created_at AS createdAt, updated_at AS updatedAt
-                 FROM comments
-                WHERE card_id = ?
-                ORDER BY created_at, id`,
-              cardId,
-             )
-            .toArray()
-            .map((c) => ({
-              ...c,
-              deleted: c.deleted === 1,
-            }));
-
-          const activities = sql
-            .exec<{
-              id: string;
-              cardId: string;
-              actorId: string;
-              sequence: number;
-              createdAt: number;
-              detailJson: string;
-            }>(
-              `SELECT id, card_id AS cardId, actor_id AS actorId, sequence,
-                      created_at AS createdAt, detail_json AS detailJson
-                 FROM activities
-                WHERE card_id = ?
-                ORDER BY sequence`,
-              cardId,
-            )
-            .toArray()
-            .map((row) => ({
-              id: row.id,
-              cardId: row.cardId,
-              actorId: row.actorId,
-              sequence: row.sequence,
-              createdAt: row.createdAt,
-              detail: JSON.parse(row.detailJson),
-            }));
-
-          const labels = sql
-            .exec<{
-              id: string;
-              name: string;
-              color: LabelColor;
-              joinId: string;
-            }>(
-              `SELECT labels.id AS id, labels.name AS name, labels.color AS color,
-                      card_labels.id AS joinId
-                 FROM card_labels
-                 JOIN labels ON labels.id = card_labels.label_id
-                WHERE card_labels.card_id = ?
-                ORDER BY labels.name, labels.id`,
-              cardId,
-            )
-            .toArray();
-
-          const pullRequestRow = sql
-            .exec<{ repositoryId: number; number: number; revision: string }>(
-              `SELECT repository_id AS repositoryId, pull_number AS number, revision
-                 FROM card_github_pull_requests
-                WHERE card_id = ?`,
-              cardId,
-            )
-            .toArray()[0];
-          const pulledAssociation = CardPullRequestRowSchema.safeParse(pullRequestRow);
-
-          const bundleResult: PreparedCardTransferBundle = {
-            card,
-            checklistItems,
-            attachments,
-            comments,
-            activities,
-            labels,
-            pullRequestAssociation: pulledAssociation.success ? pulledAssociation.data : null,
-            developmentPullRequests: readCardPullRequests(sql, cardId),
-            developmentBranches: readCardBranchesForTransfer(sql, cardId),
-            developmentUnlinks: readCardUnlinks(sql, cardId),
-          };
-          return { status: 200, bundle: bundleResult } as const;
-        });
-
-        if (bundle.status !== 200) {
-          return Response.json(
-            { error: bundle.error, ...(bundle.code ? { code: bundle.code } : {}) },
-            { status: bundle.status },
-          );
+            cardId,
+          )
+          .toArray()[0];
+        if (relationRow) {
+          return { status: 409, error: "remove card links before transferring" } as const;
         }
-        return Response.json({ bundle: bundle.bundle });
-      } catch (err) {
-        return Response.json(
-          { error: err instanceof Error ? err.message : "could not prepare transfer" },
-          { status: 500 },
-        );
-      }
-    }
 
-    if (url.pathname === CARD_TRANSFER_IMPORT_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      if (userId === null || !Identifier.safeParse(userId).success) {
-        return new Response("invalid identity", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      const parsed = CardTransferImportPayloadSchema.safeParse(raw);
-      if (!parsed.success) {
-        return new Response("invalid import payload", { status: 400 });
-      }
-      const { transferId, sourceBoardId, destinationColumnId, bundle } = parsed.data;
-      const assigneeId = parsed.data.assigneeId ?? null;
-      // The webhook router must know this board before the card arrives: a transferred
-      // card's PR or branch text names the old board's key, so the pointer is its only way in. Written
-      // first so a D1 failure fails the import cleanly; a pointer to an import that never
-      // commits is harmless, the next event for that PR or branch drops it. Before admission, which
-      // must stay right against the transaction.
-      try {
-        await Promise.all([
-          ...bundle.developmentPullRequests.map((pr) => syncPullRequestRoute(this.env, boardId, pr.repositoryId, pr.number, true)),
-          ...bundle.developmentBranches.map((branch) => syncBranchRoute(this.env, boardId, branch.repositoryId, branch.name, true)),
-        ]);
-      } catch (err) {
-        return Response.json({ error: err instanceof Error ? err.message : "could not route pull requests and branches" }, { status: 500 });
-      }
-      // Admission comes after the body so no await separates the verdict from the
-      // synchronous import transaction.
-      const admission = await this.admitProtectedPath(boardId, userId);
-      if (!admission.admitted) return admission.response;
-      try {
-        const importOutcome = this.ctx.storage.transactionSync(() => {
-          const sql = this.ctx.storage.sql;
-
-          const existingReceipt = sql
-            .exec<CardTransferReceipt>(
-              `SELECT source_board_id AS sourceBoardId, card_id AS cardId,
-                      transfer_id AS transferId, task_number AS taskNumber
-                 FROM card_transfer_receipts
-                WHERE transfer_id = ?`,
-              transferId,
-            )
-            .toArray()[0];
-          if (existingReceipt) {
-            if (
-              existingReceipt.sourceBoardId !== sourceBoardId ||
-              existingReceipt.cardId !== bundle.card.id
-            ) {
-              throw new ImportConflictError(409, "transfer id already used for another transfer", TRANSFER_TERMINAL_CODE);
-            }
-            if (existingReceipt.taskNumber < 0) {
-              throw new ImportConflictError(409, "transfer operation was aborted", TRANSFER_TERMINAL_CODE);
-            }
-            return { status: 200, receipt: existingReceipt, existingReceipt: true } as const;
+        const lockRow = sql
+          .exec<{ transfer_id: string; destination_board_id: string }>(
+            "SELECT transfer_id, destination_board_id FROM card_transfer_locks WHERE card_id = ?",
+            cardId,
+          )
+          .toArray()[0];
+        if (lockRow) {
+          if (lockRow.transfer_id !== transferId) {
+            return { status: 409, error: "card transfer already in progress" } as const;
           }
-
-          const existingCard = sql
-            .exec<{ id: string }>(
-              "SELECT id FROM cards WHERE id = ?",
-              bundle.card.id,
-            )
-            .toArray()[0];
-          if (existingCard) {
-            throw new ImportConflictError(409, "card already exists on destination board");
-          }
-
-          const column = sql
-            .exec<{ id: string }>("SELECT id FROM columns WHERE id = ?", destinationColumnId)
-            .toArray()[0];
-          if (!column) {
-            throw new ImportConflictError(400, "destination column not found");
-          }
-
-          const nowMs = Date.now();
-          const resolvedDestKeys = new Map<string, string>();
-          for (const att of bundle.attachments) {
-            const transferKey = attachmentTransferObjectKey(boardId, transferId, att.id);
-            const stagedTransfer = sql
-              .exec<{ count: number }>(
-                `SELECT COUNT(*) AS count
-                   FROM attachment_cleanup
-                  WHERE object_key = ?
-                    AND reason = 'staged'
-                    AND delete_after > ?
-                    AND claim_token IS NULL
-                    AND deleted_at IS NULL`,
-                transferKey,
-                nowMs,
-              )
-              .toArray()[0]?.count ?? 0;
-            if (stagedTransfer > 0) {
-              resolvedDestKeys.set(att.id, transferKey);
-            } else {
-              const legacyKey = attachmentObjectKey(boardId, att.id);
-              const stagedLegacy = sql
-                .exec<{ count: number }>(
-                  `SELECT COUNT(*) AS count
-                     FROM attachment_cleanup
-                    WHERE object_key = ?
-                      AND reason = 'staged'
-                      AND delete_after > ?
-                      AND claim_token IS NULL
-                      AND deleted_at IS NULL`,
-                  legacyKey,
-                  nowMs,
-                )
-                .toArray()[0]?.count ?? 0;
-              if (stagedLegacy > 0) {
-                resolvedDestKeys.set(att.id, legacyKey);
-              } else {
-                throw new ImportConflictError(409, "attachment staging lease expired before import");
-              }
-            }
-          }
-          const destinationCards = sql
-            .exec<{ position: string }>(
-              "SELECT position FROM cards WHERE column_id = ? AND archived_at IS NULL ORDER BY position, id",
-              destinationColumnId,
-            )
-            .toArray();
-          const lastPosition = destinationCards.at(-1)?.position ?? null;
-          const position = generateKeyBetween(lastPosition, null);
-
-          let nextNumberRow = sql
-            .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'next_task_number'")
-            .toArray()[0];
-          if (!nextNumberRow) {
-            const maxRow = sql
-              .exec<{ maxNum: number | null }>("SELECT MAX(task_number) AS maxNum FROM cards")
-              .toArray()[0];
-            const initialNext = (maxRow?.maxNum ?? 0) + 1;
-            sql.exec("INSERT INTO meta(key, value) VALUES ('next_task_number', ?)", initialNext);
-            nextNumberRow = { value: initialNext };
-          }
-          const taskNumber = nextNumberRow.value;
-          sql.exec(
-            "UPDATE meta SET value = ? WHERE key = 'next_task_number'",
-            taskNumber + 1,
-          );
-
-          sql.exec(
-            `INSERT INTO cards(id, column_id, title, description, position,
-                               task_number, subtask_done, assignee_id, priority, task_type, due_date,
-                               created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            bundle.card.id,
-            destinationColumnId,
-            bundle.card.title,
-            bundle.card.description,
-            position,
-            taskNumber,
-            bundle.card.subtaskDone ? 1 : 0,
-            assigneeId,
-            bundle.card.priority,
-            bundle.card.taskType === "subtask" ? "task" : bundle.card.taskType,
-            bundle.card.dueDate ?? null,
-            bundle.card.createdAt,
-            bundle.card.updatedAt,
-          );
-
-          for (const item of bundle.checklistItems) {
-            sql.exec(
-              `INSERT INTO checklist_items(id, card_id, text, done, position)
-               VALUES (?, ?, ?, ?, ?)`,
-              item.id,
-              bundle.card.id,
-              item.text,
-              item.done ? 1 : 0,
-              item.position,
-            );
-          }
-
-          for (const att of bundle.attachments) {
-            const destObjectKey = resolvedDestKeys.get(att.id)!;
-            sql.exec(
-              "DELETE FROM attachment_cleanup WHERE object_key = ? AND reason = 'staged' AND claim_token IS NULL AND deleted_at IS NULL",
-              destObjectKey,
-            );
-            sql.exec(
-              `INSERT INTO attachments(id, card_id, file_name, content_type, size, object_key)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              att.id,
-              bundle.card.id,
-              att.fileName,
-              att.contentType,
-              att.size,
-              destObjectKey,
-            );
-          }
-
-          for (const comment of bundle.comments) {
-            sql.exec(
-              `INSERT INTO comments(id, card_id, author_id, parent_comment_id, deleted, body, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-              comment.id,
-              bundle.card.id,
-              comment.authorId,
-              comment.parentCommentId,
-              comment.deleted ? 1 : 0,
-              comment.body,
-              comment.createdAt,
-              comment.updatedAt,
-            );
-          }
-
-          for (const act of bundle.activities) {
-            sql.exec(
-              `INSERT INTO activities(id, card_id, actor_id, detail_json, created_at)
-               VALUES (?, ?, ?, ?, ?)`,
-              act.id,
-              bundle.card.id,
-              act.actorId,
-              JSON.stringify(act.detail),
-              act.createdAt,
-            );
-          }
-
-          const existingLabels = sql
-            .exec<Label>("SELECT id, name, color FROM labels")
-            .toArray();
-
-          for (const srcLabel of bundle.labels) {
-            const match = existingLabels.find(
-              (l) => l.name === srcLabel.name && l.color === srcLabel.color,
-            );
-            let targetLabelId: string;
-            if (match) {
-              targetLabelId = match.id;
-            } else {
-              targetLabelId = crypto.randomUUID();
-              sql.exec(
-                "INSERT INTO labels(id, name, color) VALUES (?, ?, ?)",
-                targetLabelId,
-                srcLabel.name,
-                srcLabel.color,
-              );
-              existingLabels.push({
-                id: targetLabelId,
-                name: srcLabel.name,
-                color: srcLabel.color,
-              });
-            }
-            const freshJoinId = crypto.randomUUID();
-            sql.exec(
-              "INSERT INTO card_labels(id, card_id, label_id) VALUES (?, ?, ?)",
-              freshJoinId,
-              bundle.card.id,
-              targetLabelId,
-            );
-          }
-
-          // The link travels with the card. A fresh revision marks the destination's
-          // own identity for it; a link naming another repository stays dormant.
-          if (bundle.pullRequestAssociation) {
-            sql.exec(
-              `INSERT INTO card_github_pull_requests(card_id, repository_id, pull_number, revision)
-               VALUES (?, ?, ?, ?)`,
-              bundle.card.id,
-              bundle.pullRequestAssociation.repositoryId,
-              bundle.pullRequestAssociation.number,
-              crypto.randomUUID(),
-            );
-          }
-          importCardPullRequests(sql, bundle.card.id, bundle.developmentPullRequests);
-          importCardBranches(sql, bundle.card.id, bundle.developmentBranches);
-          importCardUnlinks(sql, bundle.card.id, bundle.developmentUnlinks);
-
-          sql.exec(
-            `INSERT INTO card_transfer_receipts(transfer_id, source_board_id, card_id, task_number)
-             VALUES (?, ?, ?, ?)`,
-            transferId,
-            sourceBoardId,
-            bundle.card.id,
-            taskNumber,
-          );
-
-          const newReceipt: CardTransferReceipt = {
-            sourceBoardId,
-            cardId: bundle.card.id,
-            transferId,
-            taskNumber,
-          };
-          return { status: 200, receipt: newReceipt, existingReceipt: false } as const;
-        });
-
-
-        // Re-asserts the pointers written above, in case an event for one of these PRs or branches
-        // arrived in between and dropped it while the card was not here yet.
-        this.ctx.waitUntil(this.settleDevelopmentRoutes({ pullRequests: bundle.developmentPullRequests, branches: bundle.developmentBranches }));
-
-        const snapshotMessage = this.snapshot();
-        for (const socket of this.ctx.getWebSockets()) {
-          try {
-            this.send(socket, snapshotMessage);
-          } catch {
-            // Ignore closed sockets during fan-out
+          if (lockRow.destination_board_id && lockRow.destination_board_id !== destinationBoardId) {
+            return { status: 409, error: "transfer id cannot change destination board", code: TRANSFER_TERMINAL_CODE } as const;
           }
         }
 
-        return Response.json({ receipt: importOutcome.receipt, existingReceipt: importOutcome.existingReceipt });
-      } catch (err) {
-        if (err instanceof ImportConflictError) {
-          return Response.json(
-            { error: err.message, ...(err.code ? { code: err.code } : {}) },
-            { status: err.status },
-          );
-        }
-        return Response.json(
-          { error: err instanceof Error ? err.message : "could not import card" },
-          { status: 500 },
-        );
-      }
-    }
-
-    if (url.pathname === CARD_TRANSFER_FINALIZE_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      const parsed = CardTransferFinalizePayloadSchema.safeParse(raw);
-      if (!parsed.success) {
-        return new Response("invalid finalize payload", { status: 400 });
-      }
-      const { transferId, cardId, destinationBoardId } = parsed.data;
-      try {
-        const outcome = this.ctx.storage.transactionSync(() => {
-          const sql = this.ctx.storage.sql;
-
-          const op = sql
-            .exec<{
-              cardId: string;
-              destinationBoardId: string;
-              generation: number;
-              state: string;
-            }>(
-              `SELECT card_id AS cardId, destination_board_id AS destinationBoardId,
-                      generation, state
-                 FROM card_transfer_operations
-                WHERE transfer_id = ?`,
-              transferId,
-            )
-            .toArray()[0];
-
-          if (op) {
-            if (op.cardId !== cardId) {
-              return { status: 409, error: "transfer operation identity mismatch", code: TRANSFER_TERMINAL_CODE } as const;
-            }
-            if (destinationBoardId && op.destinationBoardId !== destinationBoardId) {
-              return { status: 409, error: "transfer destination board mismatch", code: TRANSFER_TERMINAL_CODE } as const;
-            }
-            if (op.state === "finalized") {
-              return { status: 200, absent: true } as const;
-            }
-            if (op.state === "aborted") {
-              return { status: 410, error: "transfer operation was aborted", code: TRANSFER_TERMINAL_CODE } as const;
-            }
-          }
-
-          const card = sql
-            .exec<{ id: string }>("SELECT id FROM cards WHERE id = ?", cardId)
-            .toArray()[0];
-          if (!card) {
-            sql.exec("DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?", cardId, transferId);
-            if (op) {
-              sql.exec("UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?", Date.now(), transferId);
-            }
-            return { status: 200, absent: true } as const;
-          }
-
-          const lock = sql
-            .exec<{ transfer_id: string; destination_board_id: string; generation: number }>(
-              "SELECT transfer_id, destination_board_id, generation FROM card_transfer_locks WHERE card_id = ?",
-              cardId,
-            )
-            .toArray()[0];
-          if (!lock || lock.transfer_id !== transferId) {
-            return { status: 409, error: "transfer lock mismatch", code: TRANSFER_TERMINAL_CODE } as const;
-          }
-          if (destinationBoardId && lock.destination_board_id && lock.destination_board_id !== destinationBoardId) {
-            return { status: 409, error: "transfer destination board mismatch", code: TRANSFER_TERMINAL_CODE } as const;
-          }
-          if (op && lock.generation !== op.generation) {
-            return { status: 409, error: "transfer generation mismatch", code: TRANSFER_TERMINAL_CODE } as const;
-          }
-
-          this.deleteCardAggregate([cardId]);
-          sql.exec("DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?", cardId, transferId);
-          if (op) {
-            sql.exec("UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?", Date.now(), transferId);
-          }
-          return { status: 200, absent: false } as const;
-        });
-
-        if (outcome.status !== 200) {
-          return Response.json(
-            { error: outcome.error, ...(outcome.code ? { code: outcome.code } : {}) },
-            { status: outcome.status },
-          );
-        }
-
-        const snapshotMessage = this.snapshot();
-        for (const socket of this.ctx.getWebSockets()) {
-          try {
-            this.send(socket, snapshotMessage);
-          } catch {
-            // Ignore closed sockets
-          }
-        }
-
-        this.ctx.waitUntil(this.drainAttachmentCleanup());
-        return Response.json({ ok: true });
-      } catch (err) {
-        return Response.json(
-          { error: err instanceof Error ? err.message : "could not finalize transfer" },
-          { status: 500 },
-        );
-      }
-    }
-
-    if (url.pathname === CARD_TRANSFER_RELEASE_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      const parsed = CardTransferReleasePayloadSchema.safeParse(raw);
-      if (!parsed.success) {
-        return new Response("invalid release payload", { status: 400 });
-      }
-      const { transferId, cardId, destinationBoardId } = parsed.data;
-
-      const curLock = this.ctx.storage.sql
-        .exec<{ transfer_id: string; destination_board_id: string; generation: number }>(
-          "SELECT transfer_id, destination_board_id, generation FROM card_transfer_locks WHERE card_id = ?",
-          cardId,
-        )
-        .toArray()[0];
-
-      if (!curLock) {
-        const op = this.ctx.storage.sql
-          .exec<{ state: string }>(
-            "SELECT state FROM card_transfer_operations WHERE transfer_id = ?",
+        const existingOpInTx = sql
+          .exec<{ card_id: string; destination_board_id: string; state: string; generation: number }>(
+            "SELECT card_id, destination_board_id, state, generation FROM card_transfer_operations WHERE transfer_id = ?",
             transferId,
           )
           .toArray()[0];
-        if (op && (op.state === "aborted" || op.state === "finalized")) {
-          return Response.json({ ok: true });
+        if (existingOpInTx) {
+          if (existingOpInTx.card_id !== cardId || existingOpInTx.destination_board_id !== destinationBoardId) {
+            return { status: 409, error: "transfer id already used for another transfer", code: TRANSFER_TERMINAL_CODE } as const;
+          }
+          if (existingOpInTx.state === "finalized" || existingOpInTx.state === "aborted") {
+            return { status: 409, error: "transfer id already used for a terminated transfer", code: TRANSFER_TERMINAL_CODE } as const;
+          }
         }
-        return Response.json({ ok: true });
-      }
 
-      if (curLock.transfer_id !== transferId) {
-        return Response.json({ error: "transfer lock mismatch", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-      }
+        const maxGenRow = sql
+          .exec<{ maxGen: number | null }>(
+            "SELECT MAX(generation) AS maxGen FROM card_transfer_operations WHERE card_id = ?",
+            cardId,
+          )
+          .toArray()[0];
+        const generation = existingOpInTx ? existingOpInTx.generation : ((maxGenRow?.maxGen ?? 0) + 1);
 
-      const targetDestBoardId = destinationBoardId || curLock.destination_board_id;
-      if (!targetDestBoardId) {
+        sql.exec(
+          `INSERT INTO card_transfer_operations(transfer_id, card_id, destination_board_id, generation, state, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'prepared', ?, ?)
+           ON CONFLICT(transfer_id) DO UPDATE SET
+             updated_at = excluded.updated_at`,
+          transferId,
+          cardId,
+          destinationBoardId,
+          generation,
+          now,
+          now,
+        );
+
+        sql.exec(
+          `INSERT INTO card_transfer_locks(card_id, transfer_id, destination_board_id, phase, expires_at, generation)
+           VALUES (?, ?, ?, 'prepared', ?, ?)
+           ON CONFLICT(card_id) DO UPDATE SET
+             destination_board_id = CASE
+               WHEN card_transfer_locks.destination_board_id = '' THEN excluded.destination_board_id
+               ELSE card_transfer_locks.destination_board_id
+             END,
+             phase = excluded.phase,
+             expires_at = excluded.expires_at,
+             generation = excluded.generation`,
+          cardId,
+          transferId,
+          destinationBoardId,
+          expiresAt,
+          generation,
+        );
+
+        const checklistItems = sql
+          .exec<Omit<ChecklistItem, "done"> & { done: number }>(
+            "SELECT id, card_id AS cardId, text, done, position FROM checklist_items WHERE card_id = ? ORDER BY position, id",
+            cardId,
+          )
+          .toArray()
+          .map((item) => ({ ...item, done: item.done === 1 }));
+
+        const attachments = sql
+          .exec<{
+            id: string;
+            cardId: string;
+            fileName: string;
+            contentType: string;
+            size: number;
+            objectKey: string;
+          }>(
+            `SELECT id, card_id AS cardId, file_name AS fileName,
+                    content_type AS contentType, size,
+                    COALESCE(object_key, ? || '/' || id) AS objectKey
+               FROM attachments
+              WHERE card_id = ?
+              ORDER BY id`,
+            boardId,
+            cardId,
+          )
+          .toArray();
+
+        const comments = sql
+          .exec<{
+            id: string;
+            cardId: string;
+            authorId: string;
+            parentCommentId: string | null;
+            deleted: number;
+            body: string;
+            createdAt: number;
+            updatedAt: number;
+          }>(
+            `SELECT id, card_id AS cardId, author_id AS authorId,
+                    parent_comment_id AS parentCommentId, deleted, body,
+                    created_at AS createdAt, updated_at AS updatedAt
+               FROM comments
+              WHERE card_id = ?
+              ORDER BY created_at, id`,
+            cardId,
+           )
+          .toArray()
+          .map((c) => ({
+            ...c,
+            deleted: c.deleted === 1,
+          }));
+
+        const activities = sql
+          .exec<{
+            id: string;
+            cardId: string;
+            actorId: string;
+            sequence: number;
+            createdAt: number;
+            detailJson: string;
+          }>(
+            `SELECT id, card_id AS cardId, actor_id AS actorId, sequence,
+                    created_at AS createdAt, detail_json AS detailJson
+               FROM activities
+              WHERE card_id = ?
+              ORDER BY sequence`,
+            cardId,
+          )
+          .toArray()
+          .map((row) => ({
+            id: row.id,
+            cardId: row.cardId,
+            actorId: row.actorId,
+            sequence: row.sequence,
+            createdAt: row.createdAt,
+            detail: JSON.parse(row.detailJson),
+          }));
+
+        const labels = sql
+          .exec<{
+            id: string;
+            name: string;
+            color: LabelColor;
+            joinId: string;
+          }>(
+            `SELECT labels.id AS id, labels.name AS name, labels.color AS color,
+                    card_labels.id AS joinId
+               FROM card_labels
+               JOIN labels ON labels.id = card_labels.label_id
+              WHERE card_labels.card_id = ?
+              ORDER BY labels.name, labels.id`,
+            cardId,
+          )
+          .toArray();
+
+        const pullRequestRow = sql
+          .exec<{ repositoryId: number; number: number; revision: string }>(
+            `SELECT repository_id AS repositoryId, pull_number AS number, revision
+               FROM card_github_pull_requests
+              WHERE card_id = ?`,
+            cardId,
+          )
+          .toArray()[0];
+        const pulledAssociation = CardPullRequestRowSchema.safeParse(pullRequestRow);
+
+        const bundleResult: PreparedCardTransferBundle = {
+          card,
+          checklistItems,
+          attachments,
+          comments,
+          activities,
+          labels,
+          pullRequestAssociation: pulledAssociation.success ? pulledAssociation.data : null,
+          developmentPullRequests: readCardPullRequests(sql, cardId),
+          developmentBranches: readCardBranchesForTransfer(sql, cardId),
+          developmentUnlinks: readCardUnlinks(sql, cardId),
+        };
+        return { status: 200, bundle: bundleResult } as const;
+      });
+
+      if (bundle.status !== 200) {
         return Response.json(
-          { error: "destination board identity unknown; lock retained", code: TRANSFER_TERMINAL_CODE },
-          { status: 409 },
+          { error: bundle.error, ...(bundle.code ? { code: bundle.code } : {}) },
+          { status: bundle.status },
         );
       }
-      const releaseIds = { transferId, sourceBoardId: boardId, cardId };
-      const outcome = await settle(
-        releaseIds,
-        this.localTransferSource(cardId, transferId, null, true),
-        [boardDestination(this.env, { ...releaseIds, destinationBoardId: targetDestBoardId })],
+      return Response.json({ bundle: bundle.bundle });
+    } catch (err) {
+      return Response.json(
+        { error: err instanceof Error ? err.message : "could not prepare transfer" },
+        { status: 500 },
       );
-      if (outcome.kind === "finalized") return Response.json({ ok: true, committed: true });
-      if (outcome.kind === "released") return Response.json({ ok: true });
-      if (outcome.why === "unreachable") {
-        return Response.json({ error: "destination unreachable; lock retained" }, { status: 500 });
-      }
-      if (outcome.why === "mismatch") {
-        return Response.json({ error: "destination abort receipt mismatch; lock retained", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-      }
-      return Response.json({ error: "destination abort fence failed; lock retained" }, { status: 500 });
     }
+  }
 
-    if (url.pathname === CARD_TRANSFER_RECEIPT_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      const parsed = z.strictObject({
-        transferId: Identifier,
-        sourceBoardId: Identifier,
-        cardId: Identifier,
-      }).safeParse(raw);
-      if (!parsed.success) {
-        return new Response("invalid receipt query payload", { status: 400 });
-      }
-      const { transferId, sourceBoardId, cardId } = parsed.data;
-      const receipt = this.ctx.storage.sql
-        .exec<CardTransferReceipt>(
-          `SELECT source_board_id AS sourceBoardId, card_id AS cardId,
-                  transfer_id AS transferId, task_number AS taskNumber
-             FROM card_transfer_receipts
-            WHERE transfer_id = ?`,
-          transferId,
-        )
-        .toArray()[0];
-      if (!receipt) {
-        return Response.json({ error: "not found" }, { status: 404 });
-      }
-      if (receipt.sourceBoardId !== sourceBoardId || receipt.cardId !== cardId) {
-        return Response.json({ error: "transfer id already used for another transfer", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
-      }
-      if (receipt.taskNumber < 0) {
-        return Response.json({ error: "transfer operation was aborted", aborted: true, code: TRANSFER_TERMINAL_CODE }, { status: 410 });
-      }
-      return Response.json({ receipt });
+  private async importTransfer(
+    boardId: string,
+    userId: string,
+    input: RouteInput<"transferImport">,
+  ): Promise<Response> {
+    const { transferId, sourceBoardId, destinationColumnId, bundle } = input;
+    const assigneeId = input.assigneeId ?? null;
+    // The webhook router must know this board before the card arrives: a transferred
+    // card's PR or branch text names the old board's key, so the pointer is its only way in. Written
+    // first so a D1 failure fails the import cleanly; a pointer to an import that never
+    // commits is harmless, the next event for that PR or branch drops it. Before admission, which
+    // must stay right against the transaction.
+    try {
+      await Promise.all([
+        ...bundle.developmentPullRequests.map((pr) => syncPullRequestRoute(this.env, boardId, pr.repositoryId, pr.number, true)),
+        ...bundle.developmentBranches.map((branch) => syncBranchRoute(this.env, boardId, branch.repositoryId, branch.name, true)),
+      ]);
+    } catch (err) {
+      return Response.json({ error: err instanceof Error ? err.message : "could not route pull requests and branches" }, { status: 500 });
     }
-
-    if (url.pathname === CARD_TRANSFER_ABORT_PATH) {
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (boardId === null || !ATTACHMENT_BOARD_ID.test(boardId)) {
-        return new Response("invalid board id", { status: 400 });
-      }
-      const raw: unknown = await request.json().catch(() => null);
-      const parsed = CardTransferAbortPayloadSchema.safeParse(raw);
-      if (!parsed.success) {
-        return new Response("invalid abort payload", { status: 400 });
-      }
-      const { transferId, sourceBoardId, cardId } = parsed.data;
-      const outcome = this.ctx.storage.transactionSync(() => {
+    // Admission comes after the body so no await separates the verdict from the
+    // synchronous import transaction.
+    const admission = await this.admitProtectedPath(boardId, userId);
+    if (!admission.admitted) return admission.response;
+    try {
+      const importOutcome = this.ctx.storage.transactionSync(() => {
         const sql = this.ctx.storage.sql;
-        const receipt = sql
+
+        const existingReceipt = sql
           .exec<CardTransferReceipt>(
             `SELECT source_board_id AS sourceBoardId, card_id AS cardId,
                     transfer_id AS transferId, task_number AS taskNumber
@@ -2771,41 +2049,498 @@ export class BoardDO extends DurableObject<Env> {
             transferId,
           )
           .toArray()[0];
-
-        if (receipt) {
-          if (receipt.sourceBoardId !== sourceBoardId || receipt.cardId !== cardId) {
-            return { status: 409, error: "transfer id already used for another transfer", code: TRANSFER_TERMINAL_CODE } as const;
+        if (existingReceipt) {
+          if (
+            existingReceipt.sourceBoardId !== sourceBoardId ||
+            existingReceipt.cardId !== bundle.card.id
+          ) {
+            throw new ImportConflictError(409, "transfer id already used for another transfer", TRANSFER_TERMINAL_CODE);
           }
-          if (receipt.taskNumber >= 0) {
-            return { status: 200, committed: true, receipt } as const;
+          if (existingReceipt.taskNumber < 0) {
+            throw new ImportConflictError(409, "transfer operation was aborted", TRANSFER_TERMINAL_CODE);
           }
-          return { status: 200, committed: false, aborted: true, receipt } as const;
+          return { status: 200, receipt: existingReceipt, existingReceipt: true } as const;
         }
+
+        const existingCard = sql
+          .exec<{ id: string }>(
+            "SELECT id FROM cards WHERE id = ?",
+            bundle.card.id,
+          )
+          .toArray()[0];
+        if (existingCard) {
+          throw new ImportConflictError(409, "card already exists on destination board");
+        }
+
+        const column = sql
+          .exec<{ id: string }>("SELECT id FROM columns WHERE id = ?", destinationColumnId)
+          .toArray()[0];
+        if (!column) {
+          throw new ImportConflictError(400, "destination column not found");
+        }
+
+        const nowMs = Date.now();
+        const resolvedDestKeys = new Map<string, string>();
+        for (const att of bundle.attachments) {
+          const transferKey = attachmentTransferObjectKey(boardId, transferId, att.id);
+          const stagedTransfer = sql
+            .exec<{ count: number }>(
+              `SELECT COUNT(*) AS count
+                 FROM attachment_cleanup
+                WHERE object_key = ?
+                  AND reason = 'staged'
+                  AND delete_after > ?
+                  AND claim_token IS NULL
+                  AND deleted_at IS NULL`,
+              transferKey,
+              nowMs,
+            )
+            .toArray()[0]?.count ?? 0;
+          if (stagedTransfer > 0) {
+            resolvedDestKeys.set(att.id, transferKey);
+          } else {
+            const legacyKey = attachmentObjectKey(boardId, att.id);
+            const stagedLegacy = sql
+              .exec<{ count: number }>(
+                `SELECT COUNT(*) AS count
+                   FROM attachment_cleanup
+                  WHERE object_key = ?
+                    AND reason = 'staged'
+                    AND delete_after > ?
+                    AND claim_token IS NULL
+                    AND deleted_at IS NULL`,
+                legacyKey,
+                nowMs,
+              )
+              .toArray()[0]?.count ?? 0;
+            if (stagedLegacy > 0) {
+              resolvedDestKeys.set(att.id, legacyKey);
+            } else {
+              throw new ImportConflictError(409, "attachment staging lease expired before import");
+            }
+          }
+        }
+        const destinationCards = sql
+          .exec<{ position: string }>(
+            "SELECT position FROM cards WHERE column_id = ? AND archived_at IS NULL ORDER BY position, id",
+            destinationColumnId,
+          )
+          .toArray();
+        const lastPosition = destinationCards.at(-1)?.position ?? null;
+        const position = generateKeyBetween(lastPosition, null);
+
+        let nextNumberRow = sql
+          .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'next_task_number'")
+          .toArray()[0];
+        if (!nextNumberRow) {
+          const maxRow = sql
+            .exec<{ maxNum: number | null }>("SELECT MAX(task_number) AS maxNum FROM cards")
+            .toArray()[0];
+          const initialNext = (maxRow?.maxNum ?? 0) + 1;
+          sql.exec("INSERT INTO meta(key, value) VALUES ('next_task_number', ?)", initialNext);
+          nextNumberRow = { value: initialNext };
+        }
+        const taskNumber = nextNumberRow.value;
+        sql.exec(
+          "UPDATE meta SET value = ? WHERE key = 'next_task_number'",
+          taskNumber + 1,
+        );
+
+        sql.exec(
+          `INSERT INTO cards(id, column_id, title, description, position,
+                             task_number, subtask_done, assignee_id, priority, task_type, due_date,
+                             created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          bundle.card.id,
+          destinationColumnId,
+          bundle.card.title,
+          bundle.card.description,
+          position,
+          taskNumber,
+          bundle.card.subtaskDone ? 1 : 0,
+          assigneeId,
+          bundle.card.priority,
+          bundle.card.taskType === "subtask" ? "task" : bundle.card.taskType,
+          bundle.card.dueDate ?? null,
+          bundle.card.createdAt,
+          bundle.card.updatedAt,
+        );
+
+        for (const item of bundle.checklistItems) {
+          sql.exec(
+            `INSERT INTO checklist_items(id, card_id, text, done, position)
+             VALUES (?, ?, ?, ?, ?)`,
+            item.id,
+            bundle.card.id,
+            item.text,
+            item.done ? 1 : 0,
+            item.position,
+          );
+        }
+
+        for (const att of bundle.attachments) {
+          const destObjectKey = resolvedDestKeys.get(att.id)!;
+          sql.exec(
+            "DELETE FROM attachment_cleanup WHERE object_key = ? AND reason = 'staged' AND claim_token IS NULL AND deleted_at IS NULL",
+            destObjectKey,
+          );
+          sql.exec(
+            `INSERT INTO attachments(id, card_id, file_name, content_type, size, object_key)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            att.id,
+            bundle.card.id,
+            att.fileName,
+            att.contentType,
+            att.size,
+            destObjectKey,
+          );
+        }
+
+        for (const comment of bundle.comments) {
+          sql.exec(
+            `INSERT INTO comments(id, card_id, author_id, parent_comment_id, deleted, body, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            comment.id,
+            bundle.card.id,
+            comment.authorId,
+            comment.parentCommentId,
+            comment.deleted ? 1 : 0,
+            comment.body,
+            comment.createdAt,
+            comment.updatedAt,
+          );
+        }
+
+        for (const act of bundle.activities) {
+          sql.exec(
+            `INSERT INTO activities(id, card_id, actor_id, detail_json, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            act.id,
+            bundle.card.id,
+            act.actorId,
+            JSON.stringify(act.detail),
+            act.createdAt,
+          );
+        }
+
+        const existingLabels = sql
+          .exec<Label>("SELECT id, name, color FROM labels")
+          .toArray();
+
+        for (const srcLabel of bundle.labels) {
+          const match = existingLabels.find(
+            (l) => l.name === srcLabel.name && l.color === srcLabel.color,
+          );
+          let targetLabelId: string;
+          if (match) {
+            targetLabelId = match.id;
+          } else {
+            targetLabelId = crypto.randomUUID();
+            sql.exec(
+              "INSERT INTO labels(id, name, color) VALUES (?, ?, ?)",
+              targetLabelId,
+              srcLabel.name,
+              srcLabel.color,
+            );
+            existingLabels.push({
+              id: targetLabelId,
+              name: srcLabel.name,
+              color: srcLabel.color,
+            });
+          }
+          const freshJoinId = crypto.randomUUID();
+          sql.exec(
+            "INSERT INTO card_labels(id, card_id, label_id) VALUES (?, ?, ?)",
+            freshJoinId,
+            bundle.card.id,
+            targetLabelId,
+          );
+        }
+
+        // The link travels with the card. A fresh revision marks the destination's
+        // own identity for it; a link naming another repository stays dormant.
+        if (bundle.pullRequestAssociation) {
+          sql.exec(
+            `INSERT INTO card_github_pull_requests(card_id, repository_id, pull_number, revision)
+             VALUES (?, ?, ?, ?)`,
+            bundle.card.id,
+            bundle.pullRequestAssociation.repositoryId,
+            bundle.pullRequestAssociation.number,
+            crypto.randomUUID(),
+          );
+        }
+        importCardPullRequests(sql, bundle.card.id, bundle.developmentPullRequests);
+        importCardBranches(sql, bundle.card.id, bundle.developmentBranches);
+        importCardUnlinks(sql, bundle.card.id, bundle.developmentUnlinks);
 
         sql.exec(
           `INSERT INTO card_transfer_receipts(transfer_id, source_board_id, card_id, task_number)
-           VALUES (?, ?, ?, -1)`,
+           VALUES (?, ?, ?, ?)`,
           transferId,
           sourceBoardId,
-          cardId,
+          bundle.card.id,
+          taskNumber,
         );
+
         const newReceipt: CardTransferReceipt = {
           sourceBoardId,
-          cardId,
+          cardId: bundle.card.id,
           transferId,
-          taskNumber: -1,
+          taskNumber,
         };
-        return { status: 200, committed: false, aborted: true, receipt: newReceipt } as const;
+        return { status: 200, receipt: newReceipt, existingReceipt: false } as const;
       });
+
+
+      // Re-asserts the pointers written above, in case an event for one of these PRs or branches
+      // arrived in between and dropped it while the card was not here yet.
+      this.ctx.waitUntil(this.settleDevelopmentRoutes({ pullRequests: bundle.developmentPullRequests, branches: bundle.developmentBranches }));
+
+      const snapshotMessage = this.snapshot();
+      for (const socket of this.ctx.getWebSockets()) {
+        try {
+          this.send(socket, snapshotMessage);
+        } catch {
+          // Ignore closed sockets during fan-out
+        }
+      }
+
+      return Response.json({ receipt: importOutcome.receipt, existingReceipt: importOutcome.existingReceipt });
+    } catch (err) {
+      if (err instanceof ImportConflictError) {
+        return Response.json(
+          { error: err.message, ...(err.code ? { code: err.code } : {}) },
+          { status: err.status },
+        );
+      }
+      return Response.json(
+        { error: err instanceof Error ? err.message : "could not import card" },
+        { status: 500 },
+      );
+    }
+  }
+
+  private async finalizeTransfer(input: RouteInput<"transferFinalize">): Promise<Response> {
+    const { transferId, cardId, destinationBoardId } = input;
+    try {
+      const outcome = this.ctx.storage.transactionSync(() => {
+        const sql = this.ctx.storage.sql;
+
+        const op = sql
+          .exec<{
+            cardId: string;
+            destinationBoardId: string;
+            generation: number;
+            state: string;
+          }>(
+            `SELECT card_id AS cardId, destination_board_id AS destinationBoardId,
+                    generation, state
+               FROM card_transfer_operations
+              WHERE transfer_id = ?`,
+            transferId,
+          )
+          .toArray()[0];
+
+        if (op) {
+          if (op.cardId !== cardId) {
+            return { status: 409, error: "transfer operation identity mismatch", code: TRANSFER_TERMINAL_CODE } as const;
+          }
+          if (destinationBoardId && op.destinationBoardId !== destinationBoardId) {
+            return { status: 409, error: "transfer destination board mismatch", code: TRANSFER_TERMINAL_CODE } as const;
+          }
+          if (op.state === "finalized") {
+            return { status: 200, absent: true } as const;
+          }
+          if (op.state === "aborted") {
+            return { status: 410, error: "transfer operation was aborted", code: TRANSFER_TERMINAL_CODE } as const;
+          }
+        }
+
+        const card = sql
+          .exec<{ id: string }>("SELECT id FROM cards WHERE id = ?", cardId)
+          .toArray()[0];
+        if (!card) {
+          sql.exec("DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?", cardId, transferId);
+          if (op) {
+            sql.exec("UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?", Date.now(), transferId);
+          }
+          return { status: 200, absent: true } as const;
+        }
+
+        const lock = sql
+          .exec<{ transfer_id: string; destination_board_id: string; generation: number }>(
+            "SELECT transfer_id, destination_board_id, generation FROM card_transfer_locks WHERE card_id = ?",
+            cardId,
+          )
+          .toArray()[0];
+        if (!lock || lock.transfer_id !== transferId) {
+          return { status: 409, error: "transfer lock mismatch", code: TRANSFER_TERMINAL_CODE } as const;
+        }
+        if (destinationBoardId && lock.destination_board_id && lock.destination_board_id !== destinationBoardId) {
+          return { status: 409, error: "transfer destination board mismatch", code: TRANSFER_TERMINAL_CODE } as const;
+        }
+        if (op && lock.generation !== op.generation) {
+          return { status: 409, error: "transfer generation mismatch", code: TRANSFER_TERMINAL_CODE } as const;
+        }
+
+        this.deleteCardAggregate([cardId]);
+        sql.exec("DELETE FROM card_transfer_locks WHERE card_id = ? AND transfer_id = ?", cardId, transferId);
+        if (op) {
+          sql.exec("UPDATE card_transfer_operations SET state = 'finalized', updated_at = ? WHERE transfer_id = ?", Date.now(), transferId);
+        }
+        return { status: 200, absent: false } as const;
+      });
+
       if (outcome.status !== 200) {
         return Response.json(
           { error: outcome.error, ...(outcome.code ? { code: outcome.code } : {}) },
           { status: outcome.status },
         );
       }
-      return Response.json(outcome);
+
+      const snapshotMessage = this.snapshot();
+      for (const socket of this.ctx.getWebSockets()) {
+        try {
+          this.send(socket, snapshotMessage);
+        } catch {
+          // Ignore closed sockets
+        }
+      }
+
+      this.ctx.waitUntil(this.drainAttachmentCleanup());
+      return Response.json({ ok: true });
+    } catch (err) {
+      return Response.json(
+        { error: err instanceof Error ? err.message : "could not finalize transfer" },
+        { status: 500 },
+      );
+    }
+  }
+
+  private async releaseTransfer(boardId: string, input: RouteInput<"transferRelease">): Promise<Response> {
+    const { transferId, cardId, destinationBoardId } = input;
+
+    const curLock = this.ctx.storage.sql
+      .exec<{ transfer_id: string; destination_board_id: string; generation: number }>(
+        "SELECT transfer_id, destination_board_id, generation FROM card_transfer_locks WHERE card_id = ?",
+        cardId,
+      )
+      .toArray()[0];
+
+    if (!curLock) {
+      const op = this.ctx.storage.sql
+        .exec<{ state: string }>(
+          "SELECT state FROM card_transfer_operations WHERE transfer_id = ?",
+          transferId,
+        )
+        .toArray()[0];
+      if (op && (op.state === "aborted" || op.state === "finalized")) {
+        return Response.json({ ok: true });
+      }
+      return Response.json({ ok: true });
     }
 
+    if (curLock.transfer_id !== transferId) {
+      return Response.json({ error: "transfer lock mismatch", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
+    }
+
+    const targetDestBoardId = destinationBoardId || curLock.destination_board_id;
+    if (!targetDestBoardId) {
+      return Response.json(
+        { error: "destination board identity unknown; lock retained", code: TRANSFER_TERMINAL_CODE },
+        { status: 409 },
+      );
+    }
+    const releaseIds = { transferId, sourceBoardId: boardId, cardId };
+    const outcome = await settle(
+      releaseIds,
+      this.localTransferSource(cardId, transferId, null, true),
+      [boardDestination(this.env, { ...releaseIds, destinationBoardId: targetDestBoardId })],
+    );
+    if (outcome.kind === "finalized") return Response.json({ ok: true, committed: true });
+    if (outcome.kind === "released") return Response.json({ ok: true });
+    if (outcome.why === "unreachable") {
+      return Response.json({ error: "destination unreachable; lock retained" }, { status: 500 });
+    }
+    if (outcome.why === "mismatch") {
+      return Response.json({ error: "destination abort receipt mismatch; lock retained", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
+    }
+    return Response.json({ error: "destination abort fence failed; lock retained" }, { status: 500 });
+  }
+
+  private readTransferReceipt(input: RouteInput<"transferReceipt">): Response {
+    const { transferId, sourceBoardId, cardId } = input;
+    const receipt = this.ctx.storage.sql
+      .exec<CardTransferReceipt>(
+        `SELECT source_board_id AS sourceBoardId, card_id AS cardId,
+                transfer_id AS transferId, task_number AS taskNumber
+           FROM card_transfer_receipts
+          WHERE transfer_id = ?`,
+        transferId,
+      )
+      .toArray()[0];
+    if (!receipt) {
+      return Response.json({ error: "not found" }, { status: 404 });
+    }
+    if (receipt.sourceBoardId !== sourceBoardId || receipt.cardId !== cardId) {
+      return Response.json({ error: "transfer id already used for another transfer", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
+    }
+    if (receipt.taskNumber < 0) {
+      return Response.json({ error: "transfer operation was aborted", aborted: true, code: TRANSFER_TERMINAL_CODE }, { status: 410 });
+    }
+    return Response.json({ receipt });
+  }
+
+  private abortTransfer(input: RouteInput<"transferAbort">): Response {
+    const { transferId, sourceBoardId, cardId } = input;
+    const outcome = this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      const receipt = sql
+        .exec<CardTransferReceipt>(
+          `SELECT source_board_id AS sourceBoardId, card_id AS cardId,
+                  transfer_id AS transferId, task_number AS taskNumber
+             FROM card_transfer_receipts
+            WHERE transfer_id = ?`,
+          transferId,
+        )
+        .toArray()[0];
+
+      if (receipt) {
+        if (receipt.sourceBoardId !== sourceBoardId || receipt.cardId !== cardId) {
+          return { status: 409, error: "transfer id already used for another transfer", code: TRANSFER_TERMINAL_CODE } as const;
+        }
+        if (receipt.taskNumber >= 0) {
+          return { status: 200, committed: true, receipt } as const;
+        }
+        return { status: 200, committed: false, aborted: true, receipt } as const;
+      }
+
+      sql.exec(
+        `INSERT INTO card_transfer_receipts(transfer_id, source_board_id, card_id, task_number)
+         VALUES (?, ?, ?, -1)`,
+        transferId,
+        sourceBoardId,
+        cardId,
+      );
+      const newReceipt: CardTransferReceipt = {
+        sourceBoardId,
+        cardId,
+        transferId,
+        taskNumber: -1,
+      };
+      return { status: 200, committed: false, aborted: true, receipt: newReceipt } as const;
+    });
+    if (outcome.status !== 200) {
+      return Response.json(
+        { error: outcome.error, ...(outcome.code ? { code: outcome.code } : {}) },
+        { status: outcome.status },
+      );
+    }
+    return Response.json(outcome);
+  }
+
+  /** The realtime socket: a plain upgrade request for any path the table does not own. */
+  private async acceptSocket(request: Request, boardId: string | null, userId: string | null): Promise<Response> {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket upgrade", { status: 426 });
     }

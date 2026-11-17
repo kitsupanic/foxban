@@ -1,6 +1,7 @@
 import { DEVELOPMENT_TEXT_MAX } from "@foxban/shared";
 import { z } from "zod";
-import { BRANCH_WRITE_PATH, type BranchWrite } from "./development-info";
+import { BRANCH_WRITE_PATH } from "./board-api";
+import type { BranchWrite } from "./development-info";
 import { createInstallationToken, getBranchHead, type GitHubBranchHead } from "./github";
 import type { loadInstanceGitHubApp } from "./github-app";
 import { routedBranchBoardIds } from "./github-branch-routes";

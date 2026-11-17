@@ -13,19 +13,13 @@ import {
 } from "@foxban/shared";
 import { applyD1Migrations, env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import {
-  RECONCILE_ATTACHMENTS_PATH,
-  STAGE_ATTACHMENT_PATH,
-  attachmentObjectKey,
-  attachmentTransferObjectKey,
-} from "../src/attachment-lifecycle";
+import { attachmentObjectKey, attachmentTransferObjectKey } from "../src/attachment-lifecycle";
 import {
   INTERNAL_BOARD_ID_HEADER,
   INTERNAL_CAN_MANAGE_COLUMNS_HEADER,
   INTERNAL_USER_ID_HEADER,
 } from "../src/internal-headers";
 import { reconcileAttachmentObjects } from "../src/index";
-import { MCP_COMMAND_PATH } from "../src/mcp-contract";
 import { generateKeyBetween } from "fractional-indexing";
 import {
   CARD_TRANSFER_ABORT_PATH,
@@ -34,8 +28,11 @@ import {
   CARD_TRANSFER_PREPARE_PATH,
   CARD_TRANSFER_RECEIPT_PATH,
   DELETE_BOARD_PATH,
-  PreparedCardTransferBundleSchema,
-} from "../src/board-do";
+  MCP_COMMAND_PATH,
+  RECONCILE_ATTACHMENTS_PATH,
+  STAGE_ATTACHMENT_PATH,
+} from "../src/board-api";
+import { PreparedCardTransferBundleSchema } from "../src/board-do";
 import type { z } from "zod";
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);

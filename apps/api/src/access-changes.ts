@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import { boardManageSql, boardOpenSql, canManageBoard, canOpenBoard, isAdminEmail, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
-import { DELETE_BOARD_PATH } from "./board-do";
+import { DELETE_BOARD_PATH } from "./board-api";
 import { INTERNAL_BOARD_ID_HEADER } from "./internal-headers";
 
 export type AccessChangeKind =

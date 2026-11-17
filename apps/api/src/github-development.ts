@@ -1,13 +1,7 @@
 import { BoardDevelopmentSchema, CardDevelopmentSchema, DEVELOPMENT_TEXT_MAX, type BoardDevelopment, type CardDevelopment, type DevelopmentPullRequest } from "@foxban/shared";
 import { z } from "zod";
-import {
-  BOARD_DEVELOPMENT_PATH,
-  PULL_REQUEST_WRITE_PATH,
-  cardDevelopmentBranchesPath,
-  cardDevelopmentPath,
-  cardDevelopmentPullRequestsPath,
-  type PullRequestWrite,
-} from "./development-info";
+import { BOARD_DEVELOPMENT_PATH, PULL_REQUEST_WRITE_PATH, routePath } from "./board-api";
+import type { PullRequestWrite } from "./development-info";
 import { GitHubApiError, createInstallationToken, getPullRequestPayload } from "./github";
 import { loadInstanceGitHubApp } from "./github-app";
 import { routedBoardIds } from "./github-pr-routes";
@@ -150,7 +144,7 @@ const CardDevelopmentReadSchema = CardDevelopmentSchema.extend({
 });
 
 async function readCardDevelopmentFromBoard(env: Env, boardId: string, cardId: string) {
-  const response = await boardFetch(env, boardId, cardDevelopmentPath(cardId));
+  const response = await boardFetch(env, boardId, routePath("cardDevelopment", { cardId }));
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`board ${boardId} could not read development info: ${response.status}`);
   return CardDevelopmentReadSchema.parse(await response.json());
@@ -193,10 +187,10 @@ export async function changeCardLink(
 ): Promise<{ ok: true; development: CardDevelopment } | { ok: false; status: number; code: string; error: string }> {
   const [method, path, sent] =
     "link" in change
-      ? (["POST", cardDevelopmentPullRequestsPath(cardId), { pullRequest: change.link }] as const)
+      ? (["POST", routePath("pullRequestLink", { cardId }), { pullRequest: change.link }] as const)
       : "unlink" in change
-        ? (["DELETE", cardDevelopmentPullRequestsPath(cardId), change.unlink] as const)
-        : (["DELETE", cardDevelopmentBranchesPath(cardId), change.unlinkBranch] as const);
+        ? (["DELETE", routePath("pullRequestUnlink", { cardId }), change.unlink] as const)
+        : (["DELETE", routePath("branchUnlink", { cardId }), change.unlinkBranch] as const);
   const response = await boardFetch(env, boardId, path, {
     method,
     headers: { "Content-Type": "application/json", [INTERNAL_USER_ID_HEADER]: userId },

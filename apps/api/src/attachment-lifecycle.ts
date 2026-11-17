@@ -3,9 +3,6 @@ import { Identifier } from "@foxban/shared";
 export const ATTACHMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const ATTACHMENT_BOARD_ID = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 export const ATTACHMENT_TRANSFER_ID = /^[0-9A-Za-z_-]{1,64}$/;
-export const STAGE_ATTACHMENT_PATH = "/internal/attachments/stage";
-export const RECONCILE_ATTACHMENTS_PATH = "/internal/attachments/reconcile";
-export const CHECK_ATTACHMENT_OWNERSHIP_PATH = "/internal/attachments/ownership";
 export const STAGED_ATTACHMENT_TTL_MS = 60 * 60 * 1000;
 
 export function attachmentObjectKey(boardId: string, attachmentId: string): string {

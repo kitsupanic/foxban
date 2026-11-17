@@ -25,10 +25,6 @@ import {
   ListBoardsOutputSchema,
   ListTasksInputSchema,
   ListTasksOutputSchema,
-  MCP_BOARD_READ_PATH,
-  MCP_COMMAND_PATH,
-  MCP_TASK_LIST_PATH,
-  MCP_TASK_READ_PATH,
   McpToolResultSchema,
   MoveTaskInputSchema,
   TaskMutationOutputSchema,
@@ -44,6 +40,7 @@ import {
   type McpCommand,
   type McpToolResult,
 } from "./mcp-contract";
+import { MCP_BOARD_READ_PATH, MCP_COMMAND_PATH, MCP_TASK_LIST_PATH, MCP_TASK_READ_PATH } from "./board-api";
 import {
   INTERNAL_BOARD_ID_HEADER,
   INTERNAL_CAN_MANAGE_COLUMNS_HEADER,

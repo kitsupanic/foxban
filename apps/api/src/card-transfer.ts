@@ -1,6 +1,16 @@
 import { TRANSFER_TERMINAL_CODE, rewriteAttachmentUrls } from "@foxban/shared";
-import { STAGE_ATTACHMENT_PATH, attachmentTransferObjectKey } from "./attachment-lifecycle";
-import type { CardTransferReceipt, PreparedCardTransferBundle } from "./board-do";
+import { attachmentTransferObjectKey } from "./attachment-lifecycle";
+import {
+  CARD_TRANSFER_ABORT_PATH,
+  CARD_TRANSFER_FINALIZE_PATH,
+  CARD_TRANSFER_IMPORT_PATH,
+  CARD_TRANSFER_PREPARE_PATH,
+  CARD_TRANSFER_RECEIPT_PATH,
+  CARD_TRANSFER_RELEASE_PATH,
+  STAGE_ATTACHMENT_PATH,
+  type CardTransferReceipt,
+  type PreparedCardTransferBundle,
+} from "./board-api";
 import { INTERNAL_USER_ID_HEADER, boardFetch } from "./internal-headers";
 
 /**
@@ -13,14 +23,6 @@ import { INTERNAL_USER_ID_HEADER, boardFetch } from "./internal-headers";
  * It talks to the boards only through `SourceParticipant` / `DestinationParticipant`.
  * The real adapters below call the BoardDOs; tests pass fakes.
  */
-
-export const CARD_TRANSFER_OPTIONS_PATH = "/internal/card-transfer/options";
-export const CARD_TRANSFER_PREPARE_PATH = "/internal/card-transfer/prepare";
-export const CARD_TRANSFER_IMPORT_PATH = "/internal/card-transfer/import";
-export const CARD_TRANSFER_FINALIZE_PATH = "/internal/card-transfer/finalize";
-export const CARD_TRANSFER_RELEASE_PATH = "/internal/card-transfer/release";
-export const CARD_TRANSFER_RECEIPT_PATH = "/internal/card-transfer/receipt";
-export const CARD_TRANSFER_ABORT_PATH = "/internal/card-transfer/abort";
 
 export type TransferIds = { transferId: string; sourceBoardId: string; cardId: string; destinationBoardId: string };
 type ErrorBody = { error?: string; code?: string };

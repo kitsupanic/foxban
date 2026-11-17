@@ -68,8 +68,6 @@ import { findConnectedRepo, listConnectedRepos, refreshConnectedRepos } from "./
 import { handleGitHubWebhook } from "./github-webhook";
 import {
   ATTACHMENT_ID,
-  RECONCILE_ATTACHMENTS_PATH,
-  STAGE_ATTACHMENT_PATH,
   attachmentObjectKey,
   parseAttachmentObjectKey,
   userAvatarObjectKey,
@@ -85,10 +83,12 @@ import {
 import { boardDestination, boardSource, run as runCardTransfer } from "./card-transfer";
 import {
   CARD_TRANSFER_OPTIONS_PATH,
+  RECONCILE_ATTACHMENTS_PATH,
+  STAGE_ATTACHMENT_PATH,
   WriteBackCardSchema,
-  cardWriteBackPath,
+  routePath,
   type WriteBackCard,
-} from "./board-do";
+} from "./board-api";
 import {
   createBranchRef,
   createInstallationToken,
@@ -409,7 +409,7 @@ function classifyPullRequestFailure(err: unknown): {
  * `"unreadable"` means the DO could not answer.
  */
 async function readWriteBackCard(env: Env, boardId: string, cardId: string): Promise<WriteBackCard | null | "unreadable"> {
-  const response = await boardFetch(env, boardId, cardWriteBackPath(cardId));
+  const response = await boardFetch(env, boardId, routePath("writeBack", { cardId }));
   if (response.status === 404) return null;
   if (!response.ok) return "unreadable";
   const parsed = WriteBackCardSchema.safeParse(await response.json().catch(() => null));
