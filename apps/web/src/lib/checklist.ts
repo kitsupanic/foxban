@@ -219,8 +219,8 @@ export function useChecklist(scope: AuthoredScope, live: { cardId: string; items
   );
   const state = useSyncExternalStore(core.subscribe, core.getState, core.getState);
   const { getState, subscribe, hasWork, ...actions } = core;
-  // `state.hasWork` is as of this render; `hasWorkNow` reads the live drafts for callbacks that outlive it.
-  return { ...state, ...actions, hasWorkNow: hasWork };
+  // `state` is as of this render; `current` reads the live state for callbacks that outlive it.
+  return { ...state, ...actions, current: getState };
 }
 
 export type Checklist = ReturnType<typeof useChecklist>;
