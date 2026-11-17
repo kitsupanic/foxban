@@ -25,11 +25,6 @@ import {
   ListBoardsOutputSchema,
   ListTasksInputSchema,
   ListTasksOutputSchema,
-  MCP_BOARD_READ_PATH,
-  MCP_COMMAND_PATH,
-  MCP_TASK_LIST_PATH,
-  MCP_TASK_READ_PATH,
-  McpToolResultSchema,
   MoveTaskInputSchema,
   TaskMutationOutputSchema,
   UnassignLabelInputSchema,
@@ -44,11 +39,7 @@ import {
   type McpCommand,
   type McpToolResult,
 } from "./mcp-contract";
-import {
-  INTERNAL_BOARD_ID_HEADER,
-  INTERNAL_CAN_MANAGE_COLUMNS_HEADER,
-  INTERNAL_USER_ID_HEADER,
-} from "./internal-headers";
+import { boardClient, type McpRoute } from "./board-client";
 
 const MCP_BODY_LIMIT = 1_048_576;
 const BEARER_CHALLENGE = 'Bearer realm="foxban-mcp"';
@@ -147,22 +138,11 @@ async function callBoardDo(
   env: Env,
   principal: AgentPrincipal,
   board: BoardRow,
-  path: string,
+  route: McpRoute,
   body: unknown,
 ): Promise<McpToolResult> {
-  const response = await env.BOARD_DO.get(env.BOARD_DO.idFromName(board.id)).fetch(`https://board.internal${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      [INTERNAL_BOARD_ID_HEADER]: board.id,
-      [INTERNAL_USER_ID_HEADER]: principal.user.id,
-      [INTERNAL_CAN_MANAGE_COLUMNS_HEADER]: String(board.ownerId === principal.user.id || isAdminEmail(env, principal.user.email)),
-    },
-    body: JSON.stringify(body),
-  });
-  if (response.status === 410) return { ok: false, error: { code: "board_deleted", message: "Board was deleted.", retryable: false } };
-  if (!response.ok) return { ok: false, error: { code: "internal_error", message: "Board service failed; retry with the same operationKey.", retryable: true } };
-  return McpToolResultSchema.parse(await response.json());
+  const canManageColumns = board.ownerId === principal.user.id || isAdminEmail(env, principal.user.email);
+  return boardClient(env, board.id).mcp(route, { userId: principal.user.id, canManageColumns }, body);
 }
 
 function toolResponse(result: McpToolResult) {
@@ -270,7 +250,7 @@ function createServer(env: Env, authorization: string, base: string): McpServer 
     try {
       const principal = await currentPrincipal(env, authorization, "boards:read");
       const board = await authorizedBoard(env, principal, input.board);
-      const result = await callBoardDo(env, principal, board, MCP_BOARD_READ_PATH, { board: boardIdentity(board, base), columns: input.columns, labels: input.labels });
+      const result = await callBoardDo(env, principal, board, "mcpBoard", { board: boardIdentity(board, base), columns: input.columns, labels: input.labels });
       if (!result.ok) return result;
       const limit = input.members?.limit ?? 50;
       let after = "";
@@ -322,14 +302,14 @@ function createServer(env: Env, authorization: string, base: string): McpServer 
     try {
       const principal = await currentPrincipal(env, authorization, "boards:read");
       const board = await authorizedBoard(env, principal, input.board);
-      return await callBoardDo(env, principal, board, MCP_TASK_LIST_PATH, { ...input, board: boardIdentity(board, base), query: input.query?.trim().toLowerCase() ?? "" });
+      return await callBoardDo(env, principal, board, "mcpTasks", { ...input, board: boardIdentity(board, base), query: input.query?.trim().toLowerCase() ?? "" });
     } catch (error) { return failure(error); }
   });
   register("get_task", "Read one task with paginated comments, checklist, and subtask context.", GetTaskInputSchema, GetTaskOutputSchema, async (input) => {
     try {
       const principal = await currentPrincipal(env, authorization, "boards:read");
       const board = await authorizedBoard(env, principal, input.board);
-      return await callBoardDo(env, principal, board, MCP_TASK_READ_PATH, { ...input, board: boardIdentity(board, base) });
+      return await callBoardDo(env, principal, board, "mcpTask", { ...input, board: boardIdentity(board, base) });
     } catch (error) { return failure(error); }
   });
 
@@ -341,7 +321,7 @@ function createServer(env: Env, authorization: string, base: string): McpServer 
       // by the time the board object runs, so the board answers it from the policy in
       // force at admission instead of trusting a verdict that travelled with the call.
       const normalized = { boardId: board.id, ...command };
-      return await callBoardDo(env, principal, board, MCP_COMMAND_PATH, {
+      return await callBoardDo(env, principal, board, "mcpCommand", {
         credentialId: principal.credentialId,
         inputHash: await hashInput(normalized), board: boardIdentity(board, base), command,
       });

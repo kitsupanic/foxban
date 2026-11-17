@@ -8,6 +8,20 @@ Uses the WebSocket Hibernation API — `state.acceptWebSocket(ws)` with `webSock
 
 All board mutations (create/move/edit card, etc.) go through the DO, never D1. The DO applies each mutation to its SQLite storage, then broadcasts the change to all connected sockets. Board destruction is handled through private internal POST `/internal/board/delete`: it durably marks the board deleted, atomically clears content and queues, closes all connected WebSockets with code 1000 ("board deleted"), and paginates and deletes R2 objects under the board's key prefix. Schema, policy metadata and transfer receipts survive so identity-bound settlement can finish after deletion or restart; ordinary board access stays terminally refused. Attachment reconciliation still collects late uploads (ADR 0061).
 
+### Internal routes
+
+Everything the Worker asks of a board besides the realtime socket is a route in one table, `apps/api/src/board-api.ts`: its path, method, gate class, body schema, the exact 400 a bad body gets, and whether the DO stamps its identity first. The Worker side is `apps/api/src/board-client.ts` (`boardClient(env, boardId)`), the only module that builds a request to a board; each method decodes its route's answer the way its caller needs. The DO side is `BoardDO.fetch`, a small dispatcher over the same table, with one handler per route in an exhaustive map, so a route cannot exist without a handler or a gate. The wire is unchanged: `fetch` to the board's stub with the board named in `x-foxban-board-id` (and the actor in `x-foxban-user-id` where a route needs one).
+
+A route's gate class says what the dispatcher checks before the handler runs:
+
+- `fence` (access prepare and release, board delete): a board id. Dispatched before the deletion and freeze gates, because it is how a board enters and leaves them.
+- `settlement` (transfer receipt, abort, finalize, release): a board id. Bypasses both gates, so a frozen or deleted board still drains its in-flight transfers.
+- `cleanup` (attachment reconcile): a board id. Bypasses deletion, so a deleted board still collects its objects; a frozen board that is not deleted still answers "access is changing".
+- `open` (write-back read, development reads, webhook writes, attachment key and ownership, transfer options): a board id, behind both gates, no actor.
+- `protected` (the MCP routes, manual PR and branch unlink, attachment staging, transfer prepare and import): a board id and an actor, behind both gates, then `admitProtectedPath` admits the actor on the board's current access before the handler runs. The handler is given the verdict (`canManageColumns`, and whether a named assignee may be assigned). Prepare and import admit again right before they write, because they await in between.
+
+Order for every route but a fence: deletion and freeze gates, then the identity stamp for routes that carry it (the board's `board_id` meta row, the attachment `object_key` backfill, and recovery of expired transfer locks on the first stamp), then method (405), board id and actor (400), body (400 from the route's own response), admission (403/503), handler. A path no route owns passes the same gates and the stamp, then falls through to the WebSocket upgrade.
+
 ## PresenceDO
 
 One global hibernating Durable Object routed via `PRESENCE_DO.idFromName("global")`. Uses the WebSocket Hibernation API exclusively. Authenticated clients connect via `GET /presence/ws` with their browser's detected IANA timezone. The Worker derives the user's effective timezone from their saved `users.timezone` D1 preference override or the query parameter, validates it against IANA standards, and forwards to the global DO.

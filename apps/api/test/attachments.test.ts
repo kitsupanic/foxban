@@ -13,14 +13,15 @@ import { beforeAll, describe, expect, it } from "vitest";
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 });
-import { STAGE_ATTACHMENT_PATH, attachmentTransferObjectKey } from "../src/attachment-lifecycle";
+import { attachmentTransferObjectKey } from "../src/attachment-lifecycle";
 import { INTERNAL_BOARD_ID_HEADER, INTERNAL_USER_ID_HEADER } from "../src/internal-headers";
 import { reconcileAttachmentObjects } from "../src/index";
 import {
   CARD_TRANSFER_IMPORT_PATH,
   CARD_TRANSFER_PREPARE_PATH,
   CARD_TRANSFER_RECEIPT_PATH,
-} from "../src/board-do";
+  STAGE_ATTACHMENT_PATH,
+} from "../src/board-api";
 
 const PASSWORD = "correct horse battery";
 const ORIGIN = "https://foxban.test";

@@ -9,23 +9,6 @@ import { MAX_TASK_KEYS } from "./task-keys";
  * board is two rows. A branch row holds only its latest commit, never history.
  */
 
-/** The Worker's webhook handler writes a pull request to a board here. */
-export const PULL_REQUEST_WRITE_PATH = "/internal/github/pull-request";
-/** The board's pull requests for all its cards, for the card fronts. */
-export const BOARD_DEVELOPMENT_PATH = "/internal/development";
-export function cardDevelopmentPath(cardId: string): string {
-  return `/internal/cards/${encodeURIComponent(cardId)}/development`;
-}
-/** A member's manual link (POST) or unlink (DELETE) of one pull request on a card. */
-export function cardDevelopmentPullRequestsPath(cardId: string): string {
-  return `${cardDevelopmentPath(cardId)}/pull-requests`;
-}
-
-/** A member's unlink (DELETE) of one branch from a card. Branches are only ever linked by name, so there is no link counterpart. */
-export function cardDevelopmentBranchesPath(cardId: string): string {
-  return `${cardDevelopmentPath(cardId)}/branches`;
-}
-
 /** The manual link body the board receives: the PR as the Worker just read it from GitHub. */
 export const PullRequestLinkSchema = z.strictObject({ pullRequest: DevelopmentPullRequestSchema });
 /** The manual unlink body: which pull request to drop from the card. */
@@ -295,9 +278,6 @@ export function readBoardPullRequests(sql: SqlStorage): Array<{ cardId: string; 
   }
   return [...byCard].map(([cardId, pullRequests]) => ({ cardId, pullRequests }));
 }
-
-/** The Worker's webhook handler writes a branch's re-read state to a board here. */
-export const BRANCH_WRITE_PATH = "/internal/github/branch";
 
 /**
  * What a board is told about one branch event: the branch as GitHub answered when

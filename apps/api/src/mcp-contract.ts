@@ -9,11 +9,6 @@ import {
 } from "@foxban/shared";
 import { z } from "zod";
 
-export const MCP_BOARD_READ_PATH = "/internal/mcp/board";
-export const MCP_TASK_LIST_PATH = "/internal/mcp/tasks";
-export const MCP_TASK_READ_PATH = "/internal/mcp/task";
-export const MCP_COMMAND_PATH = "/internal/mcp/command";
-
 export const AgentScopeSchema = z.enum(["boards:read", "tasks:write", "comments:write"]);
 export type AgentScope = z.infer<typeof AgentScopeSchema>;
 
