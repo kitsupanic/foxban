@@ -1,4 +1,4 @@
-import { expect, test, type Browser, type Page } from "@playwright/test";
+import { expect, test, type Browser, type Page, type WebSocketRoute } from "@playwright/test";
 import {
   addCard,
   addColumn,
@@ -382,7 +382,16 @@ test("board creation dialogs preserve selections and cancellation", async ({ bro
 test("an uncertain creation recovers through the connection Retry", async ({ page }) => {
   // The board takes the creation; only its echo is held back. The transport is
   // then taken away, so the retry budget runs out while the form is still locked.
+  // Blocked at the route, not with setOffline: the network-return restart would
+  // otherwise retry on its own and the manual Retry would never be reached.
+  let transportDown = false;
+  let openSocket: WebSocketRoute | undefined;
   await page.routeWebSocket(/\/boards\/[^/]+\/ws(?:\?.*)?$/, (ws) => {
+    if (transportDown) {
+      void ws.close();
+      return;
+    }
+    openSocket = ws;
     const server = ws.connectToServer();
     server.onMessage((message) => {
       const frame = JSON.parse(message.toString());
@@ -400,7 +409,8 @@ test("an uncertain creation recovers through the connection Retry", async ({ pag
   await dialog.getByRole("button", { name: "Create card" }).click();
   await expect(dialog.getByRole("alert")).toContainText("Checking whether creation completed");
 
-  await page.context().setOffline(true);
+  transportDown = true;
+  await openSocket?.close();
   await expect(dialog.getByText("Could not connect.")).toBeVisible({ timeout: 40_000 });
 
   // Terminal failure must not strand the reader: the transport retry stays usable
@@ -409,7 +419,7 @@ test("an uncertain creation recovers through the connection Retry", async ({ pag
   await expect(retry).toBeEnabled();
   await expect(dialog.getByLabel("Title")).toBeDisabled();
 
-  await page.context().setOffline(false);
+  transportDown = false;
   await retry.click();
   await expect(dialog).toHaveCount(0, { timeout: 40_000 });
   await expect(cardIn(todo, "Recovered card")).toHaveCount(1);

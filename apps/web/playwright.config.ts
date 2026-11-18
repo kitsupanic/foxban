@@ -35,7 +35,8 @@ function resolveReporters(): ReporterDescription[] {
 
 export default defineConfig({
   testDir: "./e2e",
-  workers: 1,
+  // Per shard. 3 was faster but flaked on timing-sensitive tests under load; override with E2E_WORKERS.
+  workers: Number(process.env.E2E_WORKERS ?? 2),
   fullyParallel: false,
   forbidOnly: true,
   timeout: 45_000,

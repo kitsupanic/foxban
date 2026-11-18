@@ -1,19 +1,13 @@
-import { expect, test, type Browser, type Locator, type Page } from "@playwright/test";
-import { PASSWORD, createBoard, generateAccountInvite, openAccountInvites, openBoardList, openPersonalWorkspace, signup, submitSignup, uniqueEmail } from "./helpers";
+import { expect, test, type Browser, type Page } from "@playwright/test";
+import { PASSWORD, createBoard, generateAccountInvite, inviteLinkFor, mintedInviteToken, openAccountInvites, openBoardList, openPersonalWorkspace, signup, submitSignup, uniqueEmail } from "./helpers";
 
 /** The signup form's message for a missing, unknown or already-used invite. */
 const REFUSED = "This signup needs a valid invite link. Ask an admin for a new one.";
 
-/** Every pending invite renders its full link in a readonly input. */
-function inviteLinks(page: Page): Locator {
-  return page.getByRole("textbox", { name: /^Invite link for / });
-}
 type Admin = {
   page: Page;
   link: string;
   token: string;
-  /** Invites are one shared pool, so the tests count relative to what was there. */
-  otherPending: number;
 };
 
 /** Registers an admin (an `@admin.test` address from the pool `.dev.vars` lists) and mints one link. */
@@ -21,8 +15,8 @@ async function adminWithInviteLink(browser: Browser, suffix: string): Promise<Ad
   const context = await browser.newContext();
   const page = await context.newPage();
   await signup(page, uniqueEmail(suffix), "Invite Admin");
-  const { link, token, otherPending } = await generateAccountInvite(page);
-  return { page, link, token, otherPending };
+  const { link, token } = await generateAccountInvite(page);
+  return { page, link, token };
 }
 const fixtureDates = {
   oldUse: Date.UTC(2024, 0, 2),
@@ -152,20 +146,24 @@ test("invite mutation locks survive navigation until generation and revocation s
   await signup(page, uniqueEmail("invites-navigation-lock"), "Invite Lock Admin");
   const main = await openAccountInvites(page);
   const seeded = await generateAccountInvite(page);
-  const initialCount = await inviteLinks(page).count();
 
   const postReached = Promise.withResolvers<void>();
   const postRelease = Promise.withResolvers<void>();
+  // Never `times: 1` here: the route would be removed just as the held POST settles, and the
+  // settle-time GET /invites refetch can land in that gap and hang, keeping the lock on.
+  let postHeld = false;
   await page.route("**/invites", async (route) => {
-    if (route.request().resourceType() !== "fetch" || route.request().method() !== "POST") {
-      await route.continue();
+    if (postHeld || route.request().resourceType() !== "fetch" || route.request().method() !== "POST") {
+      await route.fallback();
       return;
     }
+    postHeld = true;
     const response = await route.fetch();
     postReached.resolve();
     await postRelease.promise;
     await route.fulfill({ response });
-  }, { times: 1 });
+  });
+  const minted = mintedInviteToken(page);
   await main.getByRole("button", { name: "Generate invite link" }).click();
   await postReached.promise;
   await page.getByRole("link", { name: "Profile", exact: true }).click();
@@ -173,20 +171,23 @@ test("invite mutation locks survive navigation until generation and revocation s
   await expect(remountedAfterPost.getByRole("button", { name: "Generate invite link" })).toBeDisabled();
   await expect(remountedAfterPost.getByRole("button", { name: /^Revoke invite/ }).first()).toBeDisabled();
   postRelease.resolve();
-  await expect(inviteLinks(page)).toHaveCount(initialCount + 1);
+  const token = await minted;
+  await expect(inviteLinkFor(page, token)).toBeVisible();
   await expect(remountedAfterPost.getByRole("button", { name: "Generate invite link" })).toBeEnabled();
-
-  const generatedLink = await inviteLinks(page).first().inputValue();
-  const token = new URL(generatedLink).searchParams.get("invite");
-  if (!token) throw new Error(`generated invite link carried no token: ${generatedLink}`);
   const deleteReached = Promise.withResolvers<void>();
   const deleteRelease = Promise.withResolvers<void>();
+  let deleteHeld = false;
   await page.route(`**/invites/${token}`, async (route) => {
+    if (deleteHeld) {
+      await route.fallback();
+      return;
+    }
+    deleteHeld = true;
     const response = await route.fetch();
     deleteReached.resolve();
     await deleteRelease.promise;
     await route.fulfill({ response });
-  }, { times: 1 });
+  });
   await page.getByRole("button", { name: `Revoke invite ${token.slice(0, 8)}` }).click();
   await deleteReached.promise;
   await page.getByRole("link", { name: "Profile", exact: true }).click();
@@ -194,10 +195,10 @@ test("invite mutation locks survive navigation until generation and revocation s
   await expect(remountedAfterDelete.getByRole("button", { name: "Generate invite link" })).toBeDisabled();
   await expect(remountedAfterDelete.getByRole("button", { name: /^Revoke invite/ }).first()).toBeDisabled();
   deleteRelease.resolve();
-  await expect(inviteLinks(page)).toHaveCount(initialCount);
+  await expect(inviteLinkFor(page, token)).toHaveCount(0);
   await expect(remountedAfterDelete.getByRole("button", { name: "Generate invite link" })).toBeEnabled();
   await page.getByRole("button", { name: `Revoke invite ${seeded.token.slice(0, 8)}` }).click();
-  await expect(inviteLinks(page)).toHaveCount(initialCount - 1);
+  await expect(inviteLinkFor(page, seeded.token)).toHaveCount(0);
 });
 
 test("account invites is a reloadable admin workspace route with guarded direct access", async ({ browser }) => {
@@ -265,11 +266,7 @@ test("an admin's invite link registers one plain user and is then spent", async 
   await admin.page.reload();
   const invitesDialog = await openAccountInvites(admin.page);
   await expect(invitesDialog.getByText("Used", { exact: true }).first()).toBeVisible();
-  await expect(inviteLinks(admin.page)).toHaveCount(admin.otherPending);
-  const remaining = await inviteLinks(admin.page).evaluateAll((nodes) =>
-    nodes.map((node) => (node as HTMLInputElement).value),
-  );
-  expect(remaining).not.toContain(admin.link);
+  await expect(inviteLinkFor(admin.page, admin.token)).toHaveCount(0);
 
   await admin.page.context().close();
   await guestContext.close();
@@ -309,11 +306,7 @@ test("a revoked invite link is refused", async ({ browser }) => {
   await expect(
     admin.page.getByRole("status").filter({ hasText: "Invite revoked." }),
   ).toHaveText("Invite revoked.");
-  await expect(inviteLinks(admin.page)).toHaveCount(admin.otherPending);
-  const remaining = await inviteLinks(admin.page).evaluateAll((nodes) =>
-    nodes.map((node) => (node as HTMLInputElement).value),
-  );
-  expect(remaining).not.toContain(admin.link);
+  await expect(inviteLinkFor(admin.page, admin.token)).toHaveCount(0);
 
   const guestContext = await browser.newContext();
   const guest = await guestContext.newPage();
@@ -370,27 +363,8 @@ test("pending invites have distinct token-qualified accessible names and copy re
 
   await expect(page.getByRole("heading", { name: "Account invites" })).toBeVisible();
   await expect(page.getByText("loading invites…")).toHaveCount(0);
-  const initialPending = await inviteLinks(page).count();
-
-  // Generate first invite link
-  await page.getByRole("button", { name: "Generate invite link" }).click();
-  await expect(
-    page.getByRole("status").filter({ hasText: "Invite link generated." }),
-  ).toHaveText("Invite link generated.");
-  await expect(inviteLinks(page)).toHaveCount(initialPending + 1);
-  const link1 = await inviteLinks(page).first().inputValue();
-  const token1 = new URL(link1).searchParams.get("invite");
-  if (!token1) throw new Error(`first invite link had no token: ${link1}`);
-
-  // Generate second invite link
-  await page.getByRole("button", { name: "Generate invite link" }).click();
-  await expect(
-    page.getByRole("status").filter({ hasText: "Invite link generated." }),
-  ).toHaveText("Invite link generated.");
-  await expect(inviteLinks(page)).toHaveCount(initialPending + 2);
-  const link2 = await inviteLinks(page).first().inputValue();
-  const token2 = new URL(link2).searchParams.get("invite");
-  if (!token2) throw new Error(`second invite link had no token: ${link2}`);
+  const { link: link1, token: token1 } = await generateAccountInvite(page);
+  const { link: link2, token: token2 } = await generateAccountInvite(page);
 
   expect(token1).not.toBe(token2);
   const short1 = token1.slice(0, 8);

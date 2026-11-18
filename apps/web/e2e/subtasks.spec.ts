@@ -74,6 +74,8 @@ async function addSubtask(
     await composer.getByRole("button", { name: "Add", exact: true }).click();
   }
   await expect(dialog.getByRole("button", { name: `Open subtask ${childTitle}` })).toBeVisible();
+  // Settled: a write still in flight keeps the card dirty, so a close would park behind the discard strip.
+  await expect(dialog.getByRole("button", { name: "Adding…" })).toHaveCount(0);
 }
 
 test("creates and completes nested subtasks", async ({ page }) => {

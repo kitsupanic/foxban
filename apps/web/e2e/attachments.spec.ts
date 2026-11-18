@@ -174,11 +174,11 @@ test("the toolbar Image button embeds the upload, lists it and badges the card",
   await expect(
     descView.getByRole("button", { name: "Preview attachment external.png" }),
   ).toHaveCount(0);
-  const externalImg = descView.locator('img[src="https://example.com/external.png"]');
-  await expect(externalImg).toBeVisible();
-  await externalImg.click();
-  await expect(page.getByRole("dialog", { name: "photo.png" })).toHaveCount(0);
-  await expect(dialog.getByLabel("Card description")).not.toBeVisible();
+  // The CSP blocks off-origin images, so an external one renders as a link to it.
+  await expect(descView.locator('img[src="https://example.com/external.png"]')).toHaveCount(0);
+  const externalLink = descView.getByRole("link", { name: "external image" });
+  await expect(externalLink).toHaveAttribute("href", "https://example.com/external.png");
+  await expect(externalLink).toHaveAttribute("rel", "noreferrer");
   // Linked attachment image renders as an anchor without nested interactive controls.
   const linkedAnchor = descView.locator('a[href="https://example.com/dest"]');
   await expect(linkedAnchor).toBeVisible();
