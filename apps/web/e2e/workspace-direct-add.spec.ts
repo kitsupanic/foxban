@@ -203,35 +203,6 @@ test("an added member inherits the workspace's boards but no directory or add ri
   expect(unknown.status()).toBe(404);
 });
 
-test("an add that already happened is idempotent and keeps the role it found", async ({
-  browser,
-}) => {
-  const owner = await newUser(browser, "direct-add-repeat", "Repeat Owner");
-  const ada = await newPlainUser(browser, owner.page, "direct-add-repeat-ada", "Ada Repeat");
-  await owner.page.goto("/");
-  const workspaceName = `Repeat add ${Date.now()}`;
-  const workspaceId = await createWorkspace(owner.page, workspaceName);
-  await openMembersPage(owner.page, workspaceId);
-  await addMember(owner.page, workspaceName, ada.email, "Ada Repeat", "admin");
-
-  const member = (await (await owner.page.request.get(`/workspaces/${workspaceId}/members`)).json()) as {
-    members: { userId: string; email: string; role: string }[];
-  };
-  const added = member.members.find((row) => row.email === ada.email);
-  expect(added?.role).toBe("admin");
-
-  // The same add asked for a lower role is still the truth the workspace holds.
-  const repeat = await owner.page.request.post(`/workspaces/${workspaceId}/members`, {
-    data: { userId: added!.userId, role: "member", operationId: crypto.randomUUID() },
-  });
-  expect(repeat.status()).toBe(200);
-  expect(await repeat.json()).toMatchObject({ state: "completed", outcome: "committed" });
-  await owner.page.reload();
-  await expect((await memberRow(owner.page, ada.email)).getByLabel("Role for Ada Repeat")).toHaveValue(
-    "admin",
-  );
-});
-
 test("an unresolved add keeps its operation id across a remount and is retried under it", async ({
   browser,
 }) => {

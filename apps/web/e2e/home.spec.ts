@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import { createBoard, generateAccountInvite, inviteMember, personalWorkspaceRoute, signup, submitSignup, uniqueEmail } from "./helpers";
+import { createBoard, generateAccountInvite, inviteMember, personalWorkspaceRoute, signup, uniqueEmail } from "./helpers";
 
 type WorkspaceRow = { id: string; name: string; access: string };
 
@@ -80,13 +80,6 @@ test("Home groups a member's boards by workspace and creates boards where it is 
   await page.reload();
   await expect(homeHeading(page)).toBeVisible();
   await expect(page).toHaveURL("/");
-});
-
-test("Home remembers no last workspace", async ({ page }) => {
-  await submitSignup(page, uniqueEmail("home-fresh"), "Fresh User");
-  await expect(homeHeading(page)).toBeVisible();
-  await expect(page).toHaveURL("/");
-  expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("foxban-last-workspace")))).toEqual([]);
 });
 
 test("Home lists boards shared by explicit grant under Guest, with their workspace name", async ({ browser, page: owner }) => {

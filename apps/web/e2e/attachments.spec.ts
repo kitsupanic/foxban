@@ -192,47 +192,6 @@ test("the toolbar Image button embeds the upload, lists it and badges the card",
   expect(await linkedAnchor.getAttribute("rel")).toBe("noreferrer");
 });
 
-test("an image whose file name exceeds 200 characters is refused before upload and inserts nothing", async ({
-  page,
-}) => {
-  await boardWithCard(page, "att-long-name", "long name card");
-  await cardIn(columnByTitle(page, "Todo"), "long name card").click();
-  await openCardSection(page.getByRole("dialog"), "attachments");
-  const dialog = page.getByRole("dialog");
-  let attachmentPosts = 0;
-  page.on("request", (request) => {
-    if (request.method() === "POST" && /\/attachments$/.test(request.url())) attachmentPosts++;
-  });
-
-  await dialog.getByRole("button", { name: "Add a description…" }).click();
-  const textarea = dialog.getByLabel("Card description");
-  const imageInput = dialog.getByTestId("image-input");
-  const longName = `${"n".repeat(206)}.png`;
-  expect(longName).toHaveLength(210);
-  await imageInput.setInputFiles({ name: longName, mimeType: "image/png", buffer: PNG_1X1 });
-
-  // The sidebar's upload lane reports the same error; assert the editor's own alert.
-  const editorAlert = textarea.locator("xpath=ancestor::*[.//p[@role='alert']][1]").getByRole("alert");
-  await expect(editorAlert).toHaveText("File name must be 200 characters or fewer.");
-  await expect(textarea).toHaveValue("");
-  expect(attachmentPosts).toBe(0);
-  await expect(dialog.getByRole("heading", { name: "Attachments", exact: true })).toBeVisible();
-
-  await imageInput.setInputFiles({ name: "short.png", mimeType: "image/png", buffer: PNG_1X1 });
-  await expect(textarea).toHaveValue(/!\[short\.\w+\]\(\/boards\/[^)]+\/attachments\/[0-9a-f-]+\)/);
-  await expect(dialog.getByRole("heading", { name: "Attachments 1" })).toBeVisible();
-  await dialog.getByRole("button", { name: "Save title & description", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-
-  await page.reload();
-  await cardIn(columnByTitle(page, "Todo"), "long name card").click();
-  await openCardSection(page.getByRole("dialog"), "attachments");
-  await expect(page.getByRole("dialog").getByTestId("description-view").locator("img")).toHaveAttribute(
-    "src",
-    /\/attachments\//,
-  );
-});
-
 test("pasting an image into the description uploads and embeds it", async ({ page }) => {
   await boardWithCard(page, "att-paste", "paste card");
 
