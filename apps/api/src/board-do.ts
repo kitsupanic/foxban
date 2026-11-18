@@ -38,7 +38,7 @@ import {
   INTERNAL_CAN_MANAGE_COLUMNS_HEADER,
   INTERNAL_USER_ID_HEADER,
 } from "./internal-headers";
-import { readActivities } from "./activity";
+import { readCardActivities } from "./activity";
 import {
   completionFor,
   isCompleted,
@@ -1021,6 +1021,7 @@ export class BoardDO extends DurableObject<Env> {
     writeBack: ({ params }) => this.readWriteBackCard(params.cardId),
     boardDevelopment: () => Response.json({ cards: readBoardPullRequests(this.ctx.storage.sql) } satisfies BoardDevelopment),
     cardDevelopment: ({ params }) => this.readCardDevelopment(params.cardId),
+    cardActivity: ({ params }) => Response.json({ activities: readCardActivities(this.ctx.storage.sql, params.cardId) }),
     pullRequestWrite: ({ boardId }, input) => this.acceptPullRequestWrite(boardId, input),
     branchWrite: ({ boardId }, input) => this.acceptBranchWrite(boardId, input),
     attachmentKey: ({ params }) => this.readAttachmentKey(params.attachmentId),
@@ -1514,28 +1515,6 @@ export class BoardDO extends DurableObject<Env> {
               seenKeys.add(obj.key);
               items.push({ objectKey: obj.key, attachmentId: obj.attachmentId });
             }
-          }
-        }
-      }
-    } else if ("keys" in rawObj && Array.isArray(rawObj.keys)) {
-      for (const key of rawObj.keys) {
-        if (typeof key === "string") {
-          const parsed = parseAttachmentObjectKey(key);
-          if (parsed && parsed.boardId === boardId) {
-            if (!seenKeys.has(key)) {
-              seenKeys.add(key);
-              items.push({ objectKey: key, attachmentId: parsed.attachmentId });
-            }
-          }
-        }
-      }
-    } else if ("ids" in rawObj && Array.isArray(rawObj.ids)) {
-      for (const id of rawObj.ids) {
-        if (typeof id === "string" && ATTACHMENT_ID.test(id)) {
-          const key = attachmentObjectKey(boardId, id);
-          if (!seenKeys.has(key)) {
-            seenKeys.add(key);
-            items.push({ objectKey: key, attachmentId: id });
           }
         }
       }
@@ -2526,9 +2505,9 @@ export class BoardDO extends DurableObject<Env> {
       this.broadcast({ type: "archive.purged", cardIds });
     }
 
-    // Receipts never keep an alarm alive: they are pruned when one runs for other work.
+    // Inserting a receipt schedules an alarm for its expiry, and this reschedules for the oldest one left below, so a quiet board still prunes them.
     // shortcut: a full scan, since the table is keyed by credential and operation key; index created_at if a board ever holds enough receipts to notice.
-    this.ctx.storage.sql.exec("DELETE FROM mcp_operation_receipts WHERE created_at < ?", now - MCP_RECEIPT_RETENTION_MS);
+    this.ctx.storage.sql.exec("DELETE FROM mcp_operation_receipts WHERE created_at <= ?", now - MCP_RECEIPT_RETENTION_MS);
 
     const drained = await this.drainAttachmentCleanup();
     // A failed R2 delete already scheduled its own retry, and counting the rows still due behind it would spin
@@ -2565,7 +2544,12 @@ export class BoardDO extends DurableObject<Env> {
       )
       .toArray()[0]?.expireAt;
 
-    const candidates = [nextAttachment, nextArchive, nextLock].filter((at): at is number => at !== null && at !== undefined);
+    // Everything due was just deleted, so the oldest receipt left expires strictly later and this cannot spin.
+    const nextReceipt = this.ctx.storage.sql
+      .exec<{ expireAt: number | null }>("SELECT MIN(created_at) + ? AS expireAt FROM mcp_operation_receipts", MCP_RECEIPT_RETENTION_MS)
+      .toArray()[0]?.expireAt;
+
+    const candidates = [nextAttachment, nextArchive, nextLock, nextReceipt].filter((at): at is number => at !== null && at !== undefined);
     if (candidates.length > 0) {
       await this.scheduleAlarmAt(Math.max(Date.now(), Math.min(...candidates)));
     }
@@ -3663,6 +3647,8 @@ export class BoardDO extends DurableObject<Env> {
       }
     });
     if (heldRoutes) this.settleHeldRoutes(heldRoutes);
+    // The new receipt expires on its own: wake the board then, even if no other work ever does.
+    if (!replayed) this.ctx.waitUntil(this.scheduleAlarmAt(now + MCP_RECEIPT_RETENTION_MS));
     if (!replayed && message !== null) {
       this.fanOutMutation(JSON.stringify(message), message, activities, [], [], numberedCard);
     }
@@ -3872,7 +3858,6 @@ export class BoardDO extends DurableObject<Env> {
           ...c,
           deleted: c.deleted === 1,
         })),
-      activities: readActivities(sql),
       relations: sql
         .exec<CardRelation>(
           `SELECT id, source_card_id AS sourceCardId, target_card_id AS targetCardId, kind

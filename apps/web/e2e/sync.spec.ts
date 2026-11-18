@@ -280,7 +280,6 @@ test("circuit breaker stops reconnect loop when valid snapshot is followed by im
       checklistItems: [],
       attachments: [],
       comments: [],
-      activities: [],
       relations: [],
       labels: [],
       cardLabels: [],

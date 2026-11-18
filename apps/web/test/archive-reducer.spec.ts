@@ -1,7 +1,6 @@
 import { createBoardReconciler } from "../src/lib/reconciliation";
 import { expect, test } from "@playwright/test";
 import type {
-  Activity,
   ArchivedCard,
   Attachment,
   Card,
@@ -60,14 +59,6 @@ test.describe("archive reducer and rollback state transitions", () => {
       createdAt: 1000,
       updatedAt: 1000,
     };
-    const activity: Activity = {
-      id: "act-1",
-      cardId: "card-1",
-      actorId: "user-1",
-      sequence: 1,
-      createdAt: 1000,
-      detail: { type: "card.created" },
-    };
     const label: Label = { id: "lbl-1", name: "Bug", color: "red" };
     const cardLabel: CardLabel = { id: "cl-1", cardId: "card-1", labelId: "lbl-1" };
     const relation: CardRelation = {
@@ -84,7 +75,6 @@ test.describe("archive reducer and rollback state transitions", () => {
       checklistItems: [checklistItem],
       attachments: [attachment],
       comments: [comment],
-      activities: [activity],
       relations: [relation],
       labels: [label],
       cardLabels: [cardLabel],
@@ -104,7 +94,6 @@ test.describe("archive reducer and rollback state transitions", () => {
     expect(stateAfterOptimisticDelete.checklistItems).toEqual(initialState.checklistItems);
     expect(stateAfterOptimisticDelete.attachments).toEqual(initialState.attachments);
     expect(stateAfterOptimisticDelete.comments).toEqual(initialState.comments);
-    expect(stateAfterOptimisticDelete.activities).toEqual(initialState.activities);
     expect(stateAfterOptimisticDelete.relations).toEqual(initialState.relations);
     expect(stateAfterOptimisticDelete.labels).toEqual(initialState.labels);
     expect(stateAfterOptimisticDelete.cardLabels).toEqual(initialState.cardLabels);
@@ -116,7 +105,6 @@ test.describe("archive reducer and rollback state transitions", () => {
     expect(stateAfterRejectedDelete.checklistItems).toEqual(initialState.checklistItems);
     expect(stateAfterRejectedDelete.attachments).toEqual(initialState.attachments);
     expect(stateAfterRejectedDelete.comments).toEqual(initialState.comments);
-    expect(stateAfterRejectedDelete.activities).toEqual(initialState.activities);
     expect(stateAfterRejectedDelete.relations).toEqual(initialState.relations);
     expect(stateAfterRejectedDelete.cardLabels).toEqual(initialState.cardLabels);
 
@@ -233,14 +221,6 @@ test.describe("archive reducer and rollback state transitions", () => {
       createdAt: 1200,
       updatedAt: 1200,
     };
-    const activity: Activity = {
-      id: "act-archived",
-      cardId: "card-archived",
-      actorId: "user-1",
-      sequence: 1,
-      createdAt: 1000,
-      detail: { type: "card.created" },
-    };
     const sourceRelation: CardRelation = {
       id: "rel-source",
       sourceCardId: "card-archived",
@@ -267,7 +247,6 @@ test.describe("archive reducer and rollback state transitions", () => {
       checklistItems: [checklistItem],
       attachments: [attachment],
       comments: [comment],
-      activities: [activity],
       relations: [sourceRelation, targetRelation],
       labels: [label],
       cardLabels: [cardLabel],
@@ -307,7 +286,6 @@ test.describe("archive reducer and rollback state transitions", () => {
     expect(stateAfterPurge.checklistItems.some((i) => i.cardId === "card-archived")).toBe(false);
     expect(stateAfterPurge.attachments.some((a) => a.cardId === "card-archived")).toBe(false);
     expect(stateAfterPurge.comments.some((c) => c.cardId === "card-archived")).toBe(false);
-    expect(stateAfterPurge.activities.some((a) => a.cardId === "card-archived")).toBe(false);
     expect(
       stateAfterPurge.relations.some(
         (r) => r.sourceCardId === "card-archived" || r.targetCardId === "card-archived",
@@ -324,7 +302,6 @@ test.describe("archive reducer and rollback state transitions", () => {
     expect(stateAfterRollback.checklistItems.some((i) => i.cardId === "card-archived")).toBe(false);
     expect(stateAfterRollback.attachments.some((a) => a.cardId === "card-archived")).toBe(false);
     expect(stateAfterRollback.comments.some((c) => c.cardId === "card-archived")).toBe(false);
-    expect(stateAfterRollback.activities.some((a) => a.cardId === "card-archived")).toBe(false);
     expect(
       stateAfterRollback.relations.some(
         (r) => r.sourceCardId === "card-archived" || r.targetCardId === "card-archived",
@@ -352,7 +329,6 @@ test.describe("column.move reducer and rollback state transitions", () => {
       checklistItems: [],
       attachments: [],
       comments: [],
-      activities: [],
       relations: [],
       labels: [],
       cardLabels: [],
@@ -416,7 +392,6 @@ test.describe("card.retype reducer and rollback state transitions", () => {
       checklistItems: [],
       attachments: [],
       comments: [],
-      activities: [],
       relations: [],
       labels: [],
       cardLabels: [],
@@ -493,7 +468,6 @@ test.describe("subtask families through archive interleavings", () => {
     checklistItems: [],
     attachments: [],
     comments: [],
-    activities: [],
     relations: [{ id: "rel-1", sourceCardId: "parent", targetCardId: "child", kind: "subtask" }],
     labels: [],
     cardLabels: [],

@@ -48,7 +48,6 @@ function state(cards: Card[], relations: CardRelation[] = []): BoardState {
     checklistItems: [],
     attachments: [],
     comments: [],
-    activities: [],
     relations,
     labels: [],
     cardLabels: [],

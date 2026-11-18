@@ -12,7 +12,7 @@ function fixture(): BoardState {
     // P (done) has S (done) and C (todo); Q (todo) has an open child K; R is a root in done.
     cards: [card("P", "a0", "done"), card("S", "a1", "done"), card("R", "a5", "done"), card("C", "a2", "todo"), card("Q", "a3", "todo"), card("K", "a4", "todo"), card("L", "a6", "work")],
     relations: [sub("P", "S"), sub("P", "C"), sub("Q", "K"), { id: "rel", kind: "relates", sourceCardId: "L", targetCardId: "R" }],
-    archivedCards: [{ ...card("A", "a0", "work"), archivedAt: 1 } as never], checklistItems: [{ id: "i1", cardId: "L", text: "x", done: false, position: "a0" } as never], attachments: [], comments: [], activities: [],
+    archivedCards: [{ ...card("A", "a0", "work"), archivedAt: 1 } as never], checklistItems: [{ id: "i1", cardId: "L", text: "x", done: false, position: "a0" } as never], attachments: [], comments: [],
     labels: [{ id: "lab", name: "bug", color: "red" } as never], cardLabels: [{ id: "j1", cardId: "L", labelId: "lab" } as never],
   };
 }

@@ -24,6 +24,7 @@ export function boardPrivateCacheKeys(identity: { boardId?: string; boardKey?: s
       ["board-membership-candidates", identity.boardId],
       ["board-transfer-options", identity.boardId],
       ["card-development", identity.boardId],
+      ["card-activity", identity.boardId],
       ["board-development", identity.boardId],
       ["connected-repos", identity.boardId],
     );

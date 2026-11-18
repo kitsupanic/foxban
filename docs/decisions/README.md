@@ -36,7 +36,7 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0026 — Profile route and account settings](0026-profile-route-account-settings.md)
 - [0027 — Arbitrary file attachments with download isolation](0027-arbitrary-file-attachments.md) (superseded by 0028)
 - [0028 — Durable attachment blob cleanup](0028-durable-attachment-blob-cleanup.md) (amended by 0048 and schema v19)
-- [0029 — Server-attributed card activity](0029-server-attributed-card-activity.md)
+- [0029 — Server-attributed card activity](0029-server-attributed-card-activity.md) (snapshot clause amended by 0073)
 - [0030 — Source-owned shadcn dual themes](0030-source-owned-shadcn-dual-themes.md) (superseded by 0052)
 - [0031 — Isolated dev deployment](0031-isolated-dev-deployment.md) (partly superseded by 0032, 0063 and 0070)
 - [0032 — Dev deploy validation gate](0032-dev-deploy-validation-gate.md) (CI parts superseded by 0070)
@@ -80,3 +80,4 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0070 — No CI or deploy workflow for now](0070-no-ci-for-now.md)
 - [0071 — `ADMIN_EMAILS` takes exact addresses only](0071-admin-emails-exact-only.md) (amends 0012)
 - [0072 — The board member picker is scoped to the workspace](0072-member-picker-workspace-scope.md)
+- [0073 — Card activity loads per card, not in the snapshot](0073-per-card-activity-loading.md) (amends 0029)

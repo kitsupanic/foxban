@@ -1,7 +1,10 @@
 import { expect, test } from "@playwright/test";
-import type { Comment } from "@foxban/shared";
+import { QueryClient } from "@tanstack/react-query";
+import type { Activity, Comment } from "@foxban/shared";
 import {
   activityTimeline,
+  cardActivityQueryKey,
+  recordActivities,
   type ActivityTimelineItem,
   type CommentTimelineItem,
 } from "../src/lib/activity";
@@ -43,4 +46,25 @@ test("groups replies under prototype-named roots without leaking between roots",
   expect(repliesOf("__proto__")).toEqual(["r-proto"]);
   expect(repliesOf("constructor")).toEqual(["r-ctor"]);
   expect(repliesOf("ordinary")).toEqual(["r-ordinary-early", "r-ordinary-late"]);
+});
+
+const recorded = (sequence: number, cardId = "card-1"): Activity => ({
+  id: `act-${cardId}-${sequence}`,
+  cardId,
+  actorId: "user-1",
+  sequence,
+  createdAt: sequence,
+  detail: { type: "card.created" },
+});
+
+test("a recorded frame joins a loaded history in sequence order, once, and skips unloaded cards", () => {
+  const client = new QueryClient();
+  const key = cardActivityQueryKey("board-1", "card-1");
+  client.setQueryData(key, [recorded(1), recorded(3)]);
+
+  recordActivities(client, "board-1", [recorded(2), recorded(3), recorded(9, "card-2")]);
+
+  expect(client.getQueryData<Activity[]>(key)?.map((activity) => activity.sequence)).toEqual([1, 2, 3]);
+  expect(client.getQueryData(cardActivityQueryKey("board-1", "card-2"))).toBeUndefined();
+  client.clear();
 });

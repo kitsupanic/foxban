@@ -134,6 +134,63 @@ describe("CardTransfer.run", () => {
     const f = fakes({ prepare: "throw" });
     await expect(run(ids, f.source, f.destination, "col", new Set())).rejects.toThrow("prepare unreachable");
   });
+
+  it("releases the losing source when two transfers share a transferId", async () => {
+    // One destination's receipt table; receipt, import and abort answer as the BoardDO does.
+    const table = new Map<string, typeof receipt>();
+    const anotherTransfer = r(409, { error: "transfer id already used for another transfer", code: TRANSFER_TERMINAL_CODE });
+    let firstSettled!: () => void;
+    const firstDone = new Promise<void>((resolve) => (firstSettled = resolve));
+    const transfer = (op: typeof ids, gate?: Promise<void>) => {
+      const mine = (x: typeof receipt) => x.sourceBoardId === op.sourceBoardId && x.cardId === op.cardId;
+      const card = { locked: false, gone: false };
+      const source: SourceParticipant = {
+        prepare: async () => ((card.locked = true), r(200, { bundle: bundle() })),
+        finalize: async () => ((card.locked = false), (card.gone = true), r(200)),
+        release: async () => ((card.locked = false), r(200)),
+      };
+      const destination: DestinationParticipant = {
+        ...fakes().destination,
+        receipt: async () => {
+          const x = table.get(op.transferId);
+          return !x ? r(404) : mine(x) ? r(200, { receipt: x }) : r(409);
+        },
+        import: async () => {
+          await gate;
+          const x = table.get(op.transferId);
+          if (x) return mine(x) ? r(200, { receipt: x }) : anotherTransfer;
+          const written = { transferId: op.transferId, sourceBoardId: op.sourceBoardId, cardId: op.cardId, taskNumber: table.size + 1 };
+          table.set(op.transferId, written);
+          return r(200, { receipt: written });
+        },
+        abort: async () => {
+          const x = table.get(op.transferId);
+          if (x && !mine(x)) return anotherTransfer;
+          if (x) return r(200, { committed: x.taskNumber >= 0, aborted: x.taskNumber < 0, receipt: x });
+          const tombstone = { transferId: op.transferId, sourceBoardId: op.sourceBoardId, cardId: op.cardId, taskNumber: -1 };
+          table.set(op.transferId, tombstone);
+          return r(200, { aborted: true, receipt: tombstone });
+        },
+      };
+      return { card, source, destination };
+    };
+
+    const first = { ...ids, sourceBoardId: "s1", cardId: "c1" };
+    const second = { ...ids, sourceBoardId: "s2", cardId: "c2" };
+    const a = transfer(first);
+    const b = transfer(second, firstDone);
+    // Both pass the receipt lookup before either imports; the second import then meets the first's receipt.
+    const [outcomeA, outcomeB] = await Promise.all([
+      run(first, a.source, a.destination, "col", new Set()).finally(firstSettled),
+      run(second, b.source, b.destination, "col", new Set()),
+    ]);
+
+    expect(outcomeA.kind).toBe("moved");
+    expect(outcomeB).toEqual(refused(409, "transfer id already used for another transfer", TRANSFER_TERMINAL_CODE));
+    expect(a.card).toEqual({ locked: false, gone: true });
+    expect(b.card).toEqual({ locked: false, gone: false });
+    expect([...table.values()].filter((x) => x.taskNumber >= 0).map((x) => x.cardId)).toEqual(["c1"]);
+  });
 });
 
 describe("CardTransfer.settle", () => {

@@ -737,7 +737,7 @@ describe("boards and membership", () => {
     expect(nonMemberWrong.status).toBe(403);
   });
 
-  it("attributes card activity to the authenticated user, not a spoofed header", async () => {
+  it("attributes card activity to the authenticated user, not a spoofed header, and serves it per card to members only", async () => {
     const signupResponse = await post("/auth/signup", {
       email: "socket-actor@foxban.test",
       name: "Socket Actor",
@@ -808,6 +808,22 @@ describe("boards and membership", () => {
         },
       ],
     });
+
+    // The snapshot carries no history (ADR 0073): a card's own read does, for members only.
+    const history = await get(`/boards/${boardId}/cards/card-1/activity`, cookie);
+    expect(history.status).toBe(200);
+    expect(await history.json()).toMatchObject({ activities: [{ cardId: "card-1", actorId: userId, detail: { type: "card.created" } }] });
+    const reconnected = await get(`/boards/${boardId}/ws?realtimeVersion=${REALTIME_PROTOCOL_VERSION}`, cookie, { Upgrade: "websocket" });
+    const snapshot = await new Promise<Record<string, unknown>>((resolve) => {
+      reconnected.webSocket!.addEventListener("message", (event: MessageEvent) => resolve(JSON.parse(event.data as string)), { once: true });
+      reconnected.webSocket!.accept();
+    });
+    expect(snapshot).toMatchObject({ type: "snapshot", cards: [{ id: "card-1" }] });
+    expect(snapshot).not.toHaveProperty("activities");
+    reconnected.webSocket!.close(1000, "test finished");
+    const stranger = await signupWithInvite("activity-stranger@user.test", await mintInvite(cookie));
+    expect((await get(`/boards/${boardId}/cards/card-1/activity`, stranger)).status).toBe(403);
+    expect((await get(`/boards/${boardId}/cards/card-1/activity`)).status).toBe(401);
     socket.close(1000, "test finished");
   });
 

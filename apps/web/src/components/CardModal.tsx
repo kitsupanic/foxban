@@ -33,7 +33,7 @@ import {
   type TaskType,
 } from "@foxban/shared";
 import type { Member } from "../lib/api";
-import { cardAssigneeHistory, cardCreatorId } from "../lib/activity";
+import { cardActivityQueryOptions, cardAssigneeHistory, cardCreatorId } from "../lib/activity";
 import type { SendMutation, MutationSettledCallback } from "../lib/socket";
 import { useAttachmentView, type BoardAttachments } from "../lib/attachments";
 import { type BoardState, type CardLabelView } from "../lib/apply-mutation";
@@ -64,6 +64,10 @@ import { useChecklist } from "../lib/checklist";
 import { useSubtaskComposer } from "../lib/subtask-composer";
 import { useAuthoredScope, type AuthoredScope } from "../lib/authored-operation";
 import "./card-detail.css";
+
+/** A stable empty history while a card's own read is loading, so the memos downstream hold still. */
+const NO_ACTIVITIES: Activity[] = [];
+
 /** Which shell the card details render in: the overlay modal or full screen. */
 export type CardViewMode = "modal" | "full";
 
@@ -112,7 +116,6 @@ export function CardModal({
   comments,
   boardAttachments,
   uploadScope,
-  activities,
   relations,
   hierarchy,
   labels,
@@ -155,8 +158,6 @@ export function CardModal({
   uploadScope: AuthoredScope;
   /** This card's comments, oldest first; the live cache, not a draft. */
   comments: Comment[];
-  /** This card's immutable history in server sequence order. */
-  activities: Activity[];
   /** Every relation naming this card on either side; the live cache, not a draft. */
   relations: CardRelation[];
   /**
@@ -296,6 +297,8 @@ export function CardModal({
   // Already cached by the router guard, so this is a read, not a fetch.
   const me = useQuery(meQuery).data ?? null;
 
+  // This card's immutable history in server sequence order, read on demand (ADR 0073); empty until it loads.
+  const activities = useQuery(cardActivityQueryOptions(boardId, card.id)).data ?? NO_ACTIVITIES;
   const development = useQuery(cardDevelopmentQueryOptions(boardId, card.id)).data;
   const developmentPullRequests = development?.pullRequests ?? [];
   const developmentBranches = development?.branches ?? [];

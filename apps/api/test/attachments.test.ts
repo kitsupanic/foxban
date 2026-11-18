@@ -1336,6 +1336,36 @@ describe("scheduled attachment and avatar reconciliation", () => {
     expect(await env.ATTACHMENTS.head(orphanAvatarKey)).toBeNull();
   });
 
+  it("keeps reconciling later pages when a board refuses an earlier one, then fails once at the end", async () => {
+    const [refusing, serving] = ["board-sweep-refusing", "board-sweep-serving"];
+    const keys = [refusing, serving].map((board) => `${board}/${crypto.randomUUID()}`);
+    let pages = 0;
+    const listed = [
+      { objects: [{ key: keys[0] }], truncated: true, cursor: "page-2" },
+      { objects: [{ key: keys[1] }], truncated: false },
+    ];
+    const reached: string[] = [];
+    const sweep = {
+      ...env,
+      ATTACHMENTS: { list: async () => listed[pages++] },
+      BOARD_DO: {
+        idFromName: (name: string) => name,
+        get: (name: string) => ({
+          fetch: async (...args: Parameters<DurableObjectStub["fetch"]>) => {
+            reached.push(name);
+            return name === refusing
+              ? new Response("access is changing", { status: 503 })
+              : env.BOARD_DO.get(env.BOARD_DO.idFromName(name)).fetch(...args);
+          },
+        }),
+      },
+    } as unknown as typeof env;
+
+    await expect(reconcileAttachmentObjects(sweep)).rejects.toThrow(refusing);
+    expect(pages).toBe(2);
+    expect(reached).toEqual([refusing, serving]);
+  });
+
   it("protects in-flight destination transfer staging from being deleted by the sweep", async () => {
     const cookie = await signup("stage-protect@foxban.test", "Stage Protect User");
     const boardId = await createBoard(cookie, "Transfer Destination Board");

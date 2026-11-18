@@ -29,7 +29,6 @@ const state = {
     { id: "m2", cardId: "a", createdAt: 2, deleted: true },
     { id: "m3", cardId: "b", createdAt: 3, deleted: false },
   ],
-  activities: [],
   relations: [
     { id: "r1", sourceCardId: "a", targetCardId: "b", kind: "blocks" },
     { id: "r2", sourceCardId: "b", targetCardId: "gone", kind: "relates" },

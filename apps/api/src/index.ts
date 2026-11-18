@@ -226,6 +226,7 @@ const ADMIN_NOT_CONFIGURED = { error: "no admin is configured", code: "ADMIN_NOT
  * keep/delete decision; the global Worker only enumerates R2 keys.
  */
 export async function reconcileAttachmentObjects(env: Env): Promise<void> {
+  const failures = new Set<string>();
   let cursor: string | undefined;
   do {
     const listed = await env.ATTACHMENTS.list(cursor === undefined ? undefined : { cursor });
@@ -302,20 +303,15 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
       await env.DB.prepare("DELETE FROM avatar_leases WHERE expires_at <= ?").bind(now).run();
     }
 
-    const failures: string[] = [];
     for (const [boardId, items] of attachmentItemsByBoard) {
-      const queued = await boardClient(env, boardId).reconcileAttachments({
-        keys: items.map((i) => i.key),
-        ids: items.map((i) => i.attachmentId),
-        objects: items,
-      });
-      if (!queued) failures.push(boardId);
-    }
-    if (failures.length > 0) {
-      throw new Error(`attachment reconciliation failed for boards: ${failures.join(", ")}`);
+      if (!(await boardClient(env, boardId).reconcileAttachments(items))) failures.add(boardId);
     }
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor !== undefined);
+  // Later pages still run when a board refused; the run fails once, at the end.
+  if (failures.size > 0) {
+    throw new Error(`attachment reconciliation failed for boards: ${[...failures].join(", ")}`);
+  }
 }
 
 /** A connected repo as a write-back route uses it. */
@@ -1457,12 +1453,15 @@ const app = new Hono<AppEnv>()
     const key = c.req.param("key");
     if (!ATTACHMENT_ID.test(key)) return c.json({ error: "not found" } as const, 404);
     const boardId = c.get("board").id;
-    let resolvedKey: string | null = null;
+    let resolvedKey: string | null;
     try {
       resolvedKey = await boardClient(c.env, boardId).attachmentKey(key);
     } catch {
-      // Fall back to default key if BoardDO lookup fails
+      // Guessing `boardId/id` would miss a transferred object and answer a false 404.
+      c.header("Retry-After", "2");
+      return c.json({ error: "could not read the attachment; please retry" } as const, 503);
     }
+    // No row: the pre-lookup key an older upload still lives under.
     const targetKey = resolvedKey ?? attachmentObjectKey(boardId, key);
     const object = await c.env.ATTACHMENTS.get(targetKey);
     if (object === null) return c.json({ error: "not found" } as const, 404);
@@ -1496,21 +1495,16 @@ const app = new Hono<AppEnv>()
       .bind(currentBoardId, user.id, user.id, user.id)
       .all<RawBoardRecord>();
     const destinationBoards = destinationBoardsRaw.map(toBoardRow);
-    try {
-      const boardsWithOptions = await Promise.all(
-        destinationBoards.map(async (board) => {
-          return {
-            id: board.id,
-            name: board.name,
-            key: board.key,
-            columns: await boardClient(c.env, board.id).transferOptions(),
-          };
-        }),
-      );
-      return c.json({ boards: boardsWithOptions });
-    } catch {
-      return c.json({ error: "could not load transfer options" } as const, 500);
-    }
+    // A board that refuses (mid access change, say) is left out, not a failure of the whole list.
+    const settled = await Promise.allSettled(
+      destinationBoards.map(async (board) => ({
+        id: board.id,
+        name: board.name,
+        key: board.key,
+        columns: await boardClient(c.env, board.id).transferOptions(),
+      })),
+    );
+    return c.json({ boards: settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])) });
   })
 
   .post(
@@ -1608,6 +1602,10 @@ const app = new Hono<AppEnv>()
     }
     return c.json(development);
   })
+  // One card's history (ADR 0073): the board snapshot carries none, so the card modal reads it here.
+  .get("/boards/:id/cards/:cardId/activity", requireAuth, requireMember, async (c) =>
+    c.json({ activities: await boardClient(c.env, c.get("board").id).cardActivity(c.req.param("cardId")) }),
+  )
   // The repos a card may create its branch or pull request in (ADR 0064): the instance's, read from D1 with no GitHub call.
   .get("/boards/:id/connected-repos", requireAuth, requireMember, async (c) => c.json({ repos: await listConnectedRepos(c.env) }))
   // Manual link (ADR 0064): a PR that names no task key, by number plus a connected repo, or by URL.

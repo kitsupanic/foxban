@@ -8,7 +8,8 @@ import {
   requireAuth,
   SESSION_USER_COLS,
   sha256Hex,
-  toBoardRow,
+  boardOpenSql,
+  isAdminEmail,
   toSessionUser,
   type AppEnv,
   type RawBoardRecord,
@@ -244,13 +245,15 @@ export const agentCredentialsRouter = new Hono<AppEnv>()
 export async function listAuthorizedBoards(env: Env, principal: AgentPrincipal): Promise<RawBoardRecord[]> {
   if (principal.boardIds.length === 0) return [];
   const placeholders = principal.boardIds.map(() => "?").join(", ");
+  const user = principal.user;
+  // One query: the same open rule (and operator term) `findAccessibleBoard` applies, for every granted board at once.
   const { results } = await env.DB.prepare(
-    `SELECT ${BOARD_SELECT_COLS} FROM boards WHERE boards.id IN (${placeholders}) ORDER BY boards.id`,
-  ).bind(...principal.boardIds).all<RawBoardRecord>();
-  const accessible: RawBoardRecord[] = [];
-  for (const raw of results) {
-    const board = toBoardRow(raw);
-    if ((await findAccessibleBoard(env, principal.user, board.id)) !== null) accessible.push(raw);
-  }
-  return accessible;
+    `SELECT ${BOARD_SELECT_COLS}
+       FROM boards
+       JOIN workspaces ON workspaces.id=boards.workspace_id
+      WHERE boards.id IN (${placeholders})
+        AND ${boardOpenSql("boards", "?", "?=1")}
+      ORDER BY boards.id`,
+  ).bind(...principal.boardIds, isAdminEmail(env, user.email) ? 1 : 0, user.id, user.id, user.id).all<RawBoardRecord>();
+  return results;
 }

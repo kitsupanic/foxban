@@ -83,7 +83,7 @@ async function mutate(board: TestBoard, message: { type: string; [field: string]
 }
 
 const archive = (board: TestBoard, cardId = board.cardIds[0]!) => mutate(board, { type: "card.delete", id: cardId });
-const restore = (board: TestBoard, cardId = board.cardIds[0]!) => mutate(board, { type: "card.restore", id: cardId, columnId: "col", position: "b0" });
+const restore = (board: TestBoard, cardId = board.cardIds[0]!) => mutate(board, { type: "card.restore", id: cardId, columnId: "col", position: "a1" });
 async function purge(board: TestBoard, cardId = board.cardIds[0]!) {
   await archive(board, cardId);
   await mutate(board, { type: "card.purge", id: cardId });

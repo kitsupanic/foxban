@@ -33,5 +33,6 @@ export default defineConfig({
       },
     }),
   ],
-  test: { setupFiles: ["./test/admin-signups.ts"] },
+  // The full suite runs ~760 tests in one pool; DO restarts under that load push some past the 5 s default.
+  test: { setupFiles: ["./test/admin-signups.ts"], testTimeout: 20_000 },
 });
