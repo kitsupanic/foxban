@@ -155,7 +155,7 @@ test("board row reflows at 375px without horizontal overflow, keeps controls rea
   await addMemberItem.click();
   const dialog = page.getByRole("dialog", { name: `Add member to ${name}` });
   await expect(dialog).toBeVisible();
-  const searchInput = dialog.getByRole("combobox", { name: "Search registered users" });
+  const searchInput = dialog.getByRole("combobox", { name: "Find a person" });
   await expect(searchInput).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
@@ -999,7 +999,52 @@ test("ordinary member has no Edit control, and configured admin outside board_me
   await adminContext.close();
 });
 
-test("Add member dialog allows searching registered users, displays candidate details, supports keyboard/escape/focus, and announces success upon member addition", async ({
+test("Add member dialog lists the workspace only, and finds a person outside it by their full email", async ({
+  browser,
+}) => {
+  const ownerContext = await browser.newContext();
+  const ownerPage = await ownerContext.newPage();
+  await signup(ownerPage, uniqueEmail("lookup-owner"), "Lookup Owner");
+  const boardName = `Lookup Board ${Date.now()}`;
+  await createBoard(ownerPage, boardName);
+
+  const outsiderContext = await browser.newContext();
+  const outsiderPage = await outsiderContext.newPage();
+  const outsiderEmail = uniqueEmail("lookup-outsider");
+  const outsiderName = `Outsider ${Date.now()}`;
+  await signup(outsiderPage, outsiderEmail, outsiderName);
+
+  const row = ownerPage.getByRole("listitem").filter({ has: ownerPage.getByRole("link", { name: boardName }) });
+  await row.getByRole("button", { name: `Board settings for ${boardName}` }).click();
+  await row.getByRole("menuitem", { name: "Add member" }).click();
+  const dialog = ownerPage.getByRole("dialog", { name: `Add member to ${boardName}` });
+  await expect(dialog).toBeVisible();
+  const searchInput = dialog.getByRole("combobox", { name: "Find a person" });
+
+  // No account outside the workspace is listed or found by name or by part of an address.
+  await expect(dialog.getByText("Loading users…")).toHaveCount(0);
+  await expect(dialog.getByRole("option")).toHaveCount(0);
+  for (const partial of [outsiderName, outsiderEmail.split("@")[0]!, `${outsiderEmail.split("@")[0]}@`]) {
+    await searchInput.fill(partial);
+    await expect(dialog.getByText("No matching users.")).toBeVisible();
+    await expect(dialog.getByRole("option")).toHaveCount(0);
+  }
+
+  // The full address finds exactly that person, who can then be added.
+  await searchInput.fill(outsiderEmail);
+  const option = dialog.getByRole("option").filter({ hasText: outsiderEmail });
+  await expect(option).toBeVisible();
+  await expect(dialog.getByRole("option")).toHaveCount(1);
+  await option.click();
+  await dialog.getByRole("button", { name: "Add member" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(ownerPage.getByRole("status").filter({ hasText: `Added ${outsiderName} as member.` })).toBeVisible();
+
+  await outsiderContext.close();
+  await ownerContext.close();
+});
+
+test("Add member dialog allows searching workspace members, displays candidate details, supports keyboard/escape/focus, and announces success upon member addition", async ({
   browser,
 }) => {
   // Admin creates invites for the test users (admin sees global boards, but owner should only see their own)
@@ -1057,6 +1102,18 @@ test("Add member dialog allows searching registered users, displays candidate de
   await user1Page.goto(`/board/${boardKey}`);
   await expectBoardAccessDenied(user1Page, boardName);
 
+  // The dialog lists the board's workspace and nobody else (ADR 0072), so Zoe and Alex join the
+  // owner's workspace: it is a Private board, so that alone gives them no access to it.
+  for (const candidatePage of [user1Page, user2Page]) {
+    const { id } = await (await candidatePage.request.get("/me")).json();
+    const joined = await ownerPage.request.post(`/workspaces/${boardWorkspaceId}/members`, {
+      data: { userId: id, role: "member", operationId: crypto.randomUUID() },
+    });
+    expect(joined.ok()).toBe(true);
+  }
+  await user1Page.goto(`/board/${boardKey}`);
+  await expectBoardAccessDenied(user1Page, boardName);
+
   // Return to owner page to test dialog interactions
   await openBoardList(ownerPage);
   const boardRow = ownerPage.getByRole("listitem").filter({ has: ownerPage.getByRole("link", { name: boardName }) });
@@ -1092,7 +1149,7 @@ test("Add member dialog allows searching registered users, displays candidate de
   await settingsBtn.click();
   await boardRow.getByRole("menuitem", { name: "Add member" }).click();
   await expect(dialog).toBeVisible();
-  const searchInput = dialog.getByRole("combobox", { name: "Search registered users" });
+  const searchInput = dialog.getByRole("combobox", { name: "Find a person" });
   await expect(searchInput).toBeFocused();
   // Already added section contains the current board member (Board Owner) with "Added" status
   // and is not selectable or a listbox option

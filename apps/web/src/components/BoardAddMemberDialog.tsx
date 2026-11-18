@@ -12,15 +12,19 @@ import {
   useAccessAttempts,
 } from "../lib/access-attempt";
 import { meQuery } from "../lib/auth";
+import { useDebounced } from "../lib/use-debounced";
 import { Avatar } from "./Avatar";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+
+/** A full email address; the server finds an exact match only, so this only decides when to ask. */
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const ROW_CLASS =
   "h-9 w-full justify-start px-2 font-normal text-popover-foreground hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus:outline-none";
 
 export interface BoardAddMemberDialogProps {
-  board: { id: string; name: string; ownerId: string };
+  board: { id: string; name: string; ownerId: string; capabilities: { canManageBoard: boolean } };
   currentUserId?: string;
   onClose: () => void;
   /** Called once the server has committed the addition, never while it is pending. */
@@ -69,6 +73,7 @@ export function BoardAddMemberDialog({
     queryFn: async (): Promise<MemberCandidate[]> => {
       const response = await api.boards[":id"]["membership-candidates"].$get({
         param: { id: board.id },
+        query: {},
       });
       if (!response.ok) {
         throw new Error("Could not load users.");
@@ -219,9 +224,33 @@ export function BoardAddMemberDialog({
     );
   }, [members, needle]);
 
+  // The list is this board's workspace. Someone outside it is found only by their full email
+  // address (ADR 0072): when the typed text is one and nobody in the list matches, ask the server.
+  // Debounced: the lookup is rate limited per user, so typing must not spend a request per keystroke.
+  const settledNeedle = useDebounced(needle, 400);
+  const lookupEmail = filteredCandidates.length === 0 && settledNeedle === needle && EMAIL_PATTERN.test(needle) ? needle : null;
+  const lookupQuery = useQuery({
+    queryKey: ["board-membership-candidates", board.id, lookupEmail],
+    enabled: lookupEmail !== null && candidatesQuery.isSuccess,
+    queryFn: async (): Promise<MemberCandidate[]> => {
+      const response = await api.boards[":id"]["membership-candidates"].$get({
+        param: { id: board.id },
+        query: { email: lookupEmail ?? "" },
+      });
+      if (!response.ok) {
+        throw new Error("Could not look up that email.");
+      }
+      const data = await response.json();
+      return data.candidates;
+    },
+    retry: false,
+  });
+  const lookedUp = lookupQuery.isSuccess && !lookupQuery.isFetching ? (lookupQuery.data ?? []) : [];
+  const shownCandidates = filteredCandidates.length > 0 ? filteredCandidates : lookedUp;
+
   const selectedCandidate = useMemo(
-    () => filteredCandidates.find((c) => c.id === selectedId) ?? null,
-    [filteredCandidates, selectedId],
+    () => shownCandidates.find((c) => c.id === selectedId) ?? null,
+    [shownCandidates, selectedId],
   );
 
   useEffect(() => {
@@ -231,10 +260,10 @@ export function BoardAddMemberDialog({
       }
       return;
     }
-    if (selectedId && !filteredCandidates.some((c) => c.id === selectedId)) {
+    if (selectedId && !shownCandidates.some((c) => c.id === selectedId)) {
       setSelectedId(null);
     }
-  }, [isLoadingCandidates, filteredCandidates, selectedId]);
+  }, [isLoadingCandidates, shownCandidates, selectedId]);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -327,8 +356,8 @@ export function BoardAddMemberDialog({
       if (confirmingRemoveMemberId !== null) return;
       if (selectedCandidate) {
         handleAdd();
-      } else if (filteredCandidates.length === 1) {
-        setSelectedId(filteredCandidates[0].id);
+      } else if (shownCandidates.length === 1) {
+        setSelectedId(shownCandidates[0].id);
       }
     }
   };
@@ -353,6 +382,11 @@ export function BoardAddMemberDialog({
     searchInputRef.current?.focus();
     void candidatesQuery.refetch();
   };
+
+  const handleRetryLookup = () => {
+    searchInputRef.current?.focus();
+    void lookupQuery.refetch();
+  };
   return (
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay p-4">
       <div
@@ -372,7 +406,7 @@ export function BoardAddMemberDialog({
         <div className="mt-4 flex flex-col gap-3 min-h-0">
           <div>
             <label htmlFor={searchId} className="block text-xs font-medium text-muted-foreground">
-              Search registered users
+              Find a person
             </label>
             <Input
               ref={searchInputRef}
@@ -389,7 +423,7 @@ export function BoardAddMemberDialog({
               }}
               onKeyDown={handleSearchKeyDown}
               disabled={isBusy}
-              placeholder="Filter by name or email…"
+              placeholder="A name, or a full email address…"
               autoComplete="off"
               className="mt-1 h-8 text-xs"
             />
@@ -437,9 +471,14 @@ export function BoardAddMemberDialog({
                       removeMember.isPending && removeMember.variables?.id === member.id;
                     // Removal only ever drops an explicit board grant. A member
                     // who reaches the board through the workspace is removed on
-                    // the workspace Members page instead.
+                    // the workspace Members page instead. A board manager is
+                    // removed only by someone who manages the board; the server
+                    // refuses anyone else.
                     const canRemoveGrant =
-                      !isOwner && !isSelf && member.explicitRole !== null;
+                      !isOwner &&
+                      !isSelf &&
+                      member.explicitRole !== null &&
+                      (member.explicitRole !== "manager" || board.capabilities.canManageBoard);
 
                     return (
                       <li
@@ -572,15 +611,33 @@ export function BoardAddMemberDialog({
                       Retry
                     </Button>
                   </div>
-                ) : candidates.length === 0 ? (
-                  <p className="p-3 text-xs text-muted-foreground">
-                    All registered users are already members of this board.
+                ) : lookupQuery.isFetching ? (
+                  <p role="status" className="p-3 text-xs text-muted-foreground">
+                    Looking up that email…
                   </p>
-                ) : filteredCandidates.length === 0 ? (
-                  <p className="p-3 text-xs text-muted-foreground">No matching users.</p>
+                ) : lookupQuery.isError ? (
+                  <div role="alert" className="space-y-2 p-3 text-xs text-destructive">
+                    <p>Could not look up that email.</p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      disabled={isBusy}
+                      onClick={handleRetryLookup}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                ) : shownCandidates.length === 0 ? (
+                  <p className="p-3 text-xs text-muted-foreground">
+                    {candidates.length === 0 && !needle
+                      ? "Everyone in this workspace is already on this board."
+                      : "No matching users."}{" "}
+                    To add someone from outside it, type their full email address.
+                  </p>
                 ) : (
                   <ul id={listboxId} ref={listboxRef} role="listbox" aria-label="Users">
-                    {filteredCandidates.map((candidate) => {
+                    {shownCandidates.map((candidate) => {
                       const isSelected = candidate.id === selectedId;
                       return (
                         <li key={candidate.id}>

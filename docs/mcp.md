@@ -70,7 +70,7 @@ node apps/api/scripts/mcp-client.mjs call move_task '{"board":{"key":"FOX"},"ope
 node apps/api/scripts/mcp-client.mjs call add_comment '{"board":{"key":"FOX"},"operationKey":"44444444-4444-4444-8444-444444444444","task":{"key":"FOX-42"},"body":"Typecheck and focused integration tests passed; PR: <url>."}'
 ```
 
-Reuse the exact same operation key and arguments after an ambiguous mutation failure. Foxban returns the original committed result and does not replay the write, even if later edits changed the task. Receipts are retained until board deletion. Retry support lasts only while the original credential remains valid and currently authorized; never move an uncertain operation to a new credential/key without reading current state first. The helper deliberately does not auto-retry or replace operation keys.
+Reuse the exact same operation key and arguments after an ambiguous mutation failure. Foxban returns the original committed result and does not replay the write, even if later edits changed the task. Receipts are kept for at least 30 days; the board's lifecycle alarm may prune older ones. Retry support lasts only while the original credential remains valid and currently authorized; never move an uncertain operation to a new credential/key without reading current state first. The helper deliberately does not auto-retry or replace operation keys.
 
 ## Harness instruction
 

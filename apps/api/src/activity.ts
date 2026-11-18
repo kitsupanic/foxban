@@ -1,5 +1,4 @@
 import {
-  ActivityDetailSchema,
   type Activity,
   type ActivityDetail,
   type ClientMessage,
@@ -423,9 +422,10 @@ export function activityDrafts(sql: SqlStorage, message: ClientMessage): Activit
 
     case "comment.update":
     case "comment.delete": {
+      // A deleted comment is a tombstone: an edit or a second delete that lost to the first changes nothing and must not log.
       const comment = sql
         .exec<{ cardId: string }>(
-          "SELECT card_id AS cardId FROM comments WHERE id = ?",
+          "SELECT card_id AS cardId FROM comments WHERE id = ? AND deleted = 0",
           message.id,
         )
         .toArray()[0];
@@ -470,7 +470,7 @@ export function insertActivities(
   return activities;
 }
 
-/** Read every immutable activity row; malformed stored details are fatal. */
+/** Read every immutable activity row. Details were validated when written, so a read only parses the JSON: this runs on every snapshot. */
 export function readActivities(sql: SqlStorage): Activity[] {
   return sql
     .exec<{
@@ -489,6 +489,6 @@ export function readActivities(sql: SqlStorage): Activity[] {
     .toArray()
     .map(({ detailJson, ...row }) => ({
       ...row,
-      detail: ActivityDetailSchema.parse(JSON.parse(detailJson)),
+      detail: JSON.parse(detailJson) as ActivityDetail,
     }));
 }

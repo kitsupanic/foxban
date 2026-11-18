@@ -61,41 +61,66 @@ const YOUTUBE_HINT = /youtu/i;
 const GFM_EXTENSIONS = [gfm()];
 const GFM_MDAST_EXTENSIONS = [gfmFromMarkdown()];
 
-export function hasYouTubeVideo(description: string): boolean {
-  if (!description || !YOUTUBE_HINT.test(description)) return false;
-  let tree;
-  try {
-    tree = fromMarkdown(description, {
-      extensions: GFM_EXTENSIONS,
-      mdastExtensions: GFM_MDAST_EXTENSIONS,
-    });
-  } catch {
+type MdNode = ReturnType<typeof fromMarkdown>["children"][number];
+
+/** Mirrors MarkdownEditor's `p` renderer: a paragraph holding only a bare YouTube link. */
+function isBareYouTubeParagraph(node: Extract<MdNode, { type: "paragraph" }>): boolean {
+  const contentNodes = node.children.filter(
+    (child) => child.type !== "text" || child.value.trim() !== "",
+  );
+  if (contentNodes.length !== 1) return false;
+  const linkNode = contentNodes[0];
+  if (
+    linkNode?.type !== "link" ||
+    typeof linkNode.url !== "string" ||
+    linkNode.children.length !== 1 ||
+    linkNode.children[0]?.type !== "text"
+  ) {
     return false;
   }
+  const href = linkNode.url;
+  const label = linkNode.children[0].value.trim();
+  return (
+    (label === href || label === href.replace(/^https?:\/\//i, "")) &&
+    parseYouTubeUrl(href) !== null
+  );
+}
 
-  for (const node of tree.children) {
-    if (node.type !== "paragraph") continue;
-    const contentNodes = node.children.filter(
-      (child) => child.type !== "text" || child.value.trim() !== "",
-    );
-    if (contentNodes.length !== 1) continue;
-    const linkNode = contentNodes[0];
-    if (
-      linkNode?.type === "link" &&
-      typeof linkNode.url === "string" &&
-      linkNode.children.length === 1 &&
-      linkNode.children[0]?.type === "text"
-    ) {
-      const href = linkNode.url;
-      const label = linkNode.children[0].value.trim();
-      if (label === href || label === href.replace(/^https?:\/\//i, "")) {
-        if (parseYouTubeUrl(href) !== null) {
-          return true;
-        }
-      }
+// Paragraphs embed at any depth (quotes, list items), so the walk does too, except where the renderer
+// never sees a `<p>`: mdast-util-to-hast unwraps the paragraphs directly inside a tight list's items.
+function containsYouTubeParagraph(nodes: readonly MdNode[], tight = false): boolean {
+  return nodes.some((node) => {
+    if (node.type === "paragraph") return !tight && isBareYouTubeParagraph(node);
+    if (node.type === "list") {
+      const loose = node.spread || node.children.some((item) => item.spread);
+      return node.children.some((item) => containsYouTubeParagraph(item.children, !loose));
     }
+    return "children" in node && containsYouTubeParagraph(node.children as MdNode[]);
+  });
+}
+
+const YOUTUBE_CACHE_LIMIT = 500;
+const youTubeCache = new Map<string, boolean>();
+
+/** Cached by description: card faces ask on every render and parsing markdown is the cost. */
+export function hasYouTubeVideo(description: string): boolean {
+  if (!description || !YOUTUBE_HINT.test(description)) return false;
+  const cached = youTubeCache.get(description);
+  if (cached !== undefined) return cached;
+  let found = false;
+  try {
+    found = containsYouTubeParagraph(
+      fromMarkdown(description, {
+        extensions: GFM_EXTENSIONS,
+        mdastExtensions: GFM_MDAST_EXTENSIONS,
+      }).children,
+    );
+  } catch {
+    // Unparseable text embeds nothing.
   }
-  return false;
+  if (youTubeCache.size >= YOUTUBE_CACHE_LIMIT) youTubeCache.clear();
+  youTubeCache.set(description, found);
+  return found;
 }
 
 function parseStartSeconds(url: URL): number {

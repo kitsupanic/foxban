@@ -30,6 +30,14 @@ export type HeldRoutes = {
 /** SQLite has no boolean type: `subtask_done` reads back as 0/1, so a SELECT declares this row shape and maps it. */
 export type ArchivedCardRow = Omit<ArchivedCard, "subtaskDone"> & { subtaskDone: number };
 
+/** The one SELECT that reads an `ArchivedCardRow`; callers append their own WHERE. */
+export const ARCHIVED_CARD_SELECT = `SELECT id, column_id AS columnId, title, description, position,
+       task_number AS taskNumber, subtask_done AS subtaskDone,
+       assignee_id AS assigneeId, priority, task_type AS taskType, due_date AS dueDate,
+       created_at AS createdAt, updated_at AS updatedAt,
+       archived_at AS archivedAt, archived_column_title AS archivedColumnTitle
+  FROM cards`;
+
 type MutationOutcome = {
   activities: Activity[];
   archivedCards: ArchivedCard[];
@@ -189,7 +197,7 @@ function syncAutoRoles(sql: SqlStorage): void {
 }
 
 /** Reads, consumes and increments the board's monotonic task number. */
-function allocateTaskNumber(sql: SqlStorage): number {
+export function allocateTaskNumber(sql: SqlStorage): number {
   let nextNumberRow = sql
     .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'next_task_number'")
     .toArray()[0];
@@ -245,6 +253,17 @@ function insertCard(
     now,
   );
   return taskNumber;
+}
+
+/**
+ * A child row needs a live card to belong to. The gate refuses archived and locked
+ * cards but lets a missing one through (a card a transfer finalized away): there are
+ * no foreign keys, so the write would commit an orphan. Throwing rolls it back.
+ */
+function requireLiveCard(sql: SqlStorage, cardId: string, message = "card is unavailable"): void {
+  if (!sql.exec("SELECT 1 FROM cards WHERE id = ? AND archived_at IS NULL", cardId).toArray()[0]) {
+    throw new Error(message);
+  }
 }
 
 /**
@@ -318,18 +337,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       );
 
       const archivedCards = sql
-        .exec<ArchivedCardRow>(
-          `SELECT id, column_id AS columnId, title, description, position,
-                  task_number AS taskNumber, subtask_done AS subtaskDone,
-                  assignee_id AS assigneeId, priority, task_type AS taskType, due_date AS dueDate,
-                  created_at AS createdAt, updated_at AS updatedAt,
-                  archived_at AS archivedAt,
-                  archived_column_title AS archivedColumnTitle
-           FROM cards
-           WHERE column_id = ? AND archived_at = ?`,
-          message.id,
-          now,
-        )
+        .exec<ArchivedCardRow>(`${ARCHIVED_CARD_SELECT} WHERE column_id = ? AND archived_at = ?`, message.id, now)
         .toArray()
         .map((row) => ({ ...row, subtaskDone: isCompleted(sql, row.columnId) }));
 
@@ -454,17 +462,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
         message.id,
       );
       const archivedCards = sql
-        .exec<ArchivedCardRow>(
-          `SELECT id, column_id AS columnId, title, description, position,
-                  task_number AS taskNumber, subtask_done AS subtaskDone,
-                  assignee_id AS assigneeId, priority, task_type AS taskType,
-                  due_date AS dueDate, created_at AS createdAt, updated_at AS updatedAt,
-                  archived_at AS archivedAt,
-                  archived_column_title AS archivedColumnTitle
-             FROM cards
-            WHERE id = ?`,
-          message.id,
-        )
+        .exec<ArchivedCardRow>(`${ARCHIVED_CARD_SELECT} WHERE id = ?`, message.id)
         .toArray()
         .map((row) => ({ ...row, subtaskDone: row.subtaskDone === 1 }));
       return { archivedCards, purgedCardIds: [] };
@@ -511,6 +509,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       return NO_LIFECYCLE_CHANGES;
     }
     case "checklist.create":
+      requireLiveCard(sql, message.cardId);
       sql.exec(
         "INSERT INTO checklist_items(id, card_id, text, done, position) VALUES (?, ?, ?, 0, ?)",
         message.id,
@@ -557,9 +556,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
 
       // A purged or archived card cannot own a new attachment: refusing here rolls
       // the whole mutation back, so the lease survives and expires into the collector.
-      if (!sql.exec("SELECT 1 FROM cards WHERE id = ? AND archived_at IS NULL", message.cardId).toArray()[0]) {
-        throw new Error("attachment card is unavailable");
-      }
+      requireLiveCard(sql, message.cardId, "attachment card is unavailable");
 
       sql.exec(
         "DELETE FROM attachment_cleanup WHERE object_key = ? AND reason = 'staged' AND claim_token IS NULL AND deleted_at IS NULL",
@@ -610,6 +607,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
     // Legacy comment attribution and timestamps stay on the wire for
     // compatibility (ADR 0015); activity attribution uses socket identity.
     case "comment.create": {
+      requireLiveCard(sql, message.cardId);
       if (message.parentCommentId !== null) {
         const parent = sql
           .exec<{ card_id: string; parent_comment_id: string | null }>(
@@ -786,6 +784,8 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       if (message.kind === "subtask") {
         checkSubtaskLink(sql, message.sourceCardId, message.targetCardId);
       }
+      requireLiveCard(sql, message.sourceCardId);
+      requireLiveCard(sql, message.targetCardId);
       sql.exec(
         "INSERT INTO card_relations(id, source_card_id, target_card_id, kind) VALUES (?, ?, ?, ?)",
         message.id,
@@ -838,6 +838,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       sql.exec("DELETE FROM labels WHERE id = ?", message.id);
       return NO_LIFECYCLE_CHANGES;
     case "label.assign":
+      requireLiveCard(sql, message.cardId);
       sql.exec(
         "INSERT INTO card_labels(id, card_id, label_id) VALUES (?, ?, ?)",
         message.id,

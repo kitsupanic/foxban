@@ -1,13 +1,42 @@
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 import { expect, type Locator, type Page } from "@playwright/test";
 
 /**
+ * How many admin addresses `apps/api/.dev.vars` lists: `e2e-0@admin.test` to
+ * `e2e-<ADMIN_POOL - 1>@admin.test`. `ADMIN_EMAILS` holds exact addresses only (ADR 0071),
+ * so an admin account cannot be a made-up address any more.
+ */
+export const ADMIN_POOL = 1000;
+
+/**
+ * Claims the next unused admin address. An address signs up once per database, so a claim is
+ * a directory named after it: `mkdirSync` fails for everyone but the first, across workers and
+ * runs. The directory lives with the database (the runner's persistence directory, or
+ * wrangler's own state), so a fresh database starts the pool over.
+ */
+function claimAdminAddress(): string {
+  const claims = process.env.E2E_SLOT_DIR ?? path.resolve(process.cwd(), "../../.wrangler/state/e2e-admin-slots");
+  mkdirSync(claims, { recursive: true });
+  for (let slot = 0; slot < ADMIN_POOL; slot += 1) {
+    try {
+      mkdirSync(path.join(claims, `${slot}`));
+      return `e2e-${slot}@admin.test`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error(`all ${ADMIN_POOL} e2e admin addresses are used: start from a fresh database or raise ADMIN_POOL and the list in apps/api/.dev.vars`);
+}
+
+/**
  * Every spec registers its own users, so emails must never collide across runs.
- * The default domain is the one the dev Worker treats as admin (`ADMIN_EMAILS`
- * is `*@admin.test`), so helper signups need no invite token. Pass a domain to
- * register a plain user — those do require an invite.
+ * The default domain is admin (an address from the pool `.dev.vars` lists), so
+ * helper signups need no invite token, and `suffix` only names the caller. Pass
+ * another domain to register a plain user: those do require an invite.
  */
 export function uniqueEmail(suffix: string, domain = "admin.test"): string {
-  return `e2e-${crypto.randomUUID()}-${suffix}@${domain}`;
+  return domain === "admin.test" ? claimAdminAddress() : `e2e-${crypto.randomUUID()}-${suffix}@${domain}`;
 }
 
 export const PASSWORD = "foxban-e2e-pw";
@@ -163,7 +192,8 @@ export async function inviteMember(page: Page, boardName: string, queryOrEmail: 
   const dialog = page.getByRole("dialog", { name: `Add member to ${boardName}` });
   await expect(dialog).toBeVisible();
 
-  const searchInput = dialog.getByRole("combobox", { name: "Search registered users" });
+  // A person outside the board's workspace is found by their full email address (ADR 0072).
+  const searchInput = dialog.getByRole("combobox", { name: "Find a person" });
   await searchInput.fill(queryOrEmail);
 
   const option = dialog.getByRole("option").filter({ hasText: queryOrEmail });

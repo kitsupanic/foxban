@@ -51,8 +51,8 @@
     "GITHUB_OAUTH_BASE": "https://github.com",
     "GITHUB_API_BASE": "https://api.github.com"
     // ADMIN_EMAILS is a secret, not a var (a var and a secret of the same name
-    // conflict): comma-separated full addresses or `*@domain` wildcards. Admins
-    // may sign up without an invite and are the only ones who can mint them.
+    // conflict): comma-separated full addresses (a `*@domain` entry is ignored, ADR
+    // 0071). Admins may sign up without an invite and are the only ones who can mint them.
     // Locally it comes from apps/api/.dev.vars.
     // GITHUB_APP_ENCRYPTION_KEY is a secret too: scripts/deploy.mjs generates it
     // once and never overwrites it. It seals the instance GitHub App's secrets in D1.

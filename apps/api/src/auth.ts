@@ -90,9 +90,13 @@ export function canOpenBoard(f: BoardAccessFacts): boolean {
   );
 }
 
-/** Manage rights (ADR 0066), in TS. `boardManageSql` is the same rule in SQL. */
+/**
+ * Manage rights (ADR 0066), in TS. `boardManageSql` is the same rule in SQL. The creator
+ * manages only while still a member of the board's workspace (`workspaceRole`): one who was
+ * removed or left keeps the open right (`canOpenBoard`) but not the manage right.
+ */
 export function canManageBoard(f: BoardAccessFacts): boolean {
-  return f.operator || f.owner || f.explicitRole === "manager" || f.workspaceRole === "admin";
+  return f.operator || (f.owner && f.workspaceRole != null) || f.explicitRole === "manager" || f.workspaceRole === "admin";
 }
 
 /**
@@ -113,13 +117,13 @@ export function boardOpenSql(board: string, viewer: string, operator?: string): 
 }
 
 /**
- * Manage rights (ADR 0066) as one SQL condition: owner, explicit manager, or an
- * admin of the board's workspace. Arguments and binds as in `boardOpenSql`.
+ * Manage rights (ADR 0066) as one SQL condition: an explicit board manager, or a member
+ * of the board's workspace who administers it or created the board (`canManageBoard`).
+ * Arguments and binds as in `boardOpenSql`.
  */
 export function boardManageSql(board: string, viewer: string, operator?: string): string {
-  return `(${operator ? `${operator} OR ` : ""}${board}.owner_id=${viewer}
-    OR EXISTS(SELECT 1 FROM board_members manage_bm WHERE manage_bm.board_id=${board}.id AND manage_bm.user_id=${viewer} AND manage_bm.role='manager')
-    OR EXISTS(SELECT 1 FROM workspace_members manage_wm WHERE manage_wm.workspace_id=${board}.workspace_id AND manage_wm.user_id=${viewer} AND manage_wm.role='admin'))`;
+  return `(${operator ? `${operator} OR ` : ""}EXISTS(SELECT 1 FROM board_members manage_bm WHERE manage_bm.board_id=${board}.id AND manage_bm.user_id=${viewer} AND manage_bm.role='manager')
+    OR EXISTS(SELECT 1 FROM workspace_members manage_wm WHERE manage_wm.workspace_id=${board}.workspace_id AND manage_wm.user_id=${viewer} AND (manage_wm.role='admin' OR ${board}.owner_id=${viewer})))`;
 }
 
 /**
@@ -252,23 +256,22 @@ export async function sha256Hex(value: string): Promise<string> {
 }
 
 /**
- * Admins are configured, not stored: `ADMIN_EMAILS` is a comma-separated list of
- * full addresses or `*@domain` wildcards, matched case-insensitively. Keeping it
- * in the environment means the first account on a fresh deployment can sign up
- * without an invite that nobody could have minted yet.
+ * The exact addresses in `ADMIN_EMAILS`, a comma-separated list, lower case. A `*@domain`
+ * entry is skipped, never matched: nobody verifies an email, so a domain pattern would let
+ * any stranger sign up as an admin (ADR 0071).
+ */
+export function adminEmails(env: Env): string[] {
+  return (env.ADMIN_EMAILS?.split(",") ?? []).map((entry) => entry.trim().toLowerCase()).filter((entry) => entry && !entry.startsWith("*@"));
+}
+
+/**
+ * Admins are configured, not stored: an address listed in `ADMIN_EMAILS`, matched
+ * case-insensitively. Keeping it in the environment means the first account on a
+ * fresh deployment can sign up without an invite that nobody could have minted yet.
  */
 export function isAdminEmail(env: Env, email: string): boolean {
   const candidate = email.trim().toLowerCase();
-  if (!candidate) return false;
-  for (const entry of env.ADMIN_EMAILS?.split(",") ?? []) {
-    const pattern = entry.trim().toLowerCase();
-    if (!pattern) continue;
-    // `*@example.com` matches the domain; anything else is an exact address.
-    if (pattern.startsWith("*@")) {
-      if (candidate.endsWith(pattern.slice(1))) return true;
-    } else if (pattern === candidate) return true;
-  }
-  return false;
+  return candidate !== "" && adminEmails(env).includes(candidate);
 }
 
 /** Configured `APP_ORIGIN`, or the request's own origin when it is unset or empty. */
@@ -500,7 +503,7 @@ export async function signUpWithGitHub(
   // Admin is derived from the address, and signing up with GitHub never grants it: an account whose address is
   // on the admin list (or with no verified address at all) gets GitHub's private no-reply address instead.
   const email = emails[0] !== undefined && !isAdminEmail(env, emails[0]) ? emails[0] : `${account.id}+${account.login}@users.noreply.github.com`;
-  // A list that reaches the no-reply address too (`*@users.noreply.github.com`) leaves no safe address: refuse.
+  // A list that names the no-reply address itself leaves no safe address: refuse.
   if (isAdminEmail(env, email)) return { ok: false, problem: "error" };
   const userId = crypto.randomUUID();
   try {
@@ -616,6 +619,21 @@ export const rateLimitAuth = createMiddleware<AppEnv>(async (c, next) => {
   await next();
 });
 
+/**
+ * Caps exact-email lookups (ADR 0072) per signed-in user, so the one-address-at-a-time
+ * answer cannot be run down a list of guesses. Runs after `requireAuth`, only for a request that
+ * carries `?email=`, and skips local and test requests the way `rateLimitAuth` does.
+ */
+export const rateLimitLookup = createMiddleware<AppEnv>(async (c, next) => {
+  const limiter = c.env.AUTH_RATE_LIMITER;
+  const ip = c.req.header("CF-Connecting-IP");
+  if (limiter && ip && !LOOPBACK_IPS[ip] && c.req.query("email") !== undefined) {
+    const { success } = await limiter.limit({ key: `lookup:${c.get("user").id}` });
+    if (!success) return c.json({ error: "too many requests" } as const, 429);
+  }
+  await next();
+});
+
 async function findAccessibleBoardWhere(
   env: Env,
   user: SessionUser,
@@ -673,10 +691,10 @@ export function findAccessibleBoardByKey(
 /**
  * Requires the authenticated user to be a member of `:id`, and exposes the board
  * row so member routes need no second query. Membership is only ever checked
- * when a request arrives — for the WebSocket that means at connect time, so
- * removing a member does not drop their live socket (fine for a 2-user tool).
- * Account admins bypass membership at request/connect time without writing
- * membership rows.
+ * when a request arrives — for the WebSocket that means at connect time. A
+ * change that takes someone's access away runs as an access change, which fences
+ * the board and drops their open sockets (`access-changes.ts`). Account admins
+ * bypass membership at request/connect time without writing membership rows.
  */
 export const requireMember = createMiddleware<AppEnv>(async (c, next) => {
   const user = c.get("user");

@@ -8,7 +8,7 @@ import { createInstanceGitHubApp } from "../src/github-app";
  * https://api.github.example. The App the instance owns is made by the real manifest
  * conversion path, with a freshly generated RSA key in the PKCS#1 form GitHub hands
  * out, and the fake GitHub checks every App JWT against that key's public half.
- * Admin status comes from vitest.config.ts's ADMIN_EMAILS (`*@foxban.test`).
+ * A signup on `@foxban.test` is an admin (admin-signups.ts).
  * Call `useFakeGitHub()` once at the top of a test file.
  */
 export const ORIGIN = "https://foxban.test";

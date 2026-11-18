@@ -11,9 +11,10 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "../../wrangler.jsonc" },
-      // ADMIN_EMAILS is a secret in production and absent from wrangler.jsonc: the
-      // suite's own accounts live on @foxban.test, and it exercises both entry forms
-      // (wildcard plus an exact address written in a different case). The rate
+      // ADMIN_EMAILS is a secret in production and absent from wrangler.jsonc. Only
+      // exact addresses count (ADR 0071): the exact entry is written in a different
+      // case, and the wildcard must stay ignored. The suite's own admins on
+      // @foxban.test add themselves at signup (test/admin-signups.ts). The rate
       // limiter needs no override — `SELF.fetch` sends no CF-Connecting-IP, so
       // the middleware has no client to key on and stands aside.
       // The GitHub bases are pinned too, so the redirect assertions are
@@ -21,7 +22,7 @@ export default defineConfig({
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: migrations,
-          ADMIN_EMAILS: "*@foxban.test, Mixed@Case.Test",
+          ADMIN_EMAILS: "*@wild.test, Mixed@Case.Test",
           GITHUB_OAUTH_BASE: "https://github.example",
           GITHUB_API_BASE: "https://api.github.example",
           APP_ORIGIN: "https://app.example",
@@ -32,4 +33,5 @@ export default defineConfig({
       },
     }),
   ],
+  test: { setupFiles: ["./test/admin-signups.ts"] },
 });

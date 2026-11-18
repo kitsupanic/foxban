@@ -5,8 +5,9 @@ import worker from "../src/index";
 /**
  * Invite-gated signup driven through the real Worker, like auth.test.ts: admin
  * status comes from the ADMIN_EMAILS binding that vitest.config.ts injects
- * (`*@foxban.test, Mixed@Case.Test`), so @foxban.test accounts are admins and
- * anything on @user.test needs a token.
+ * (`*@wild.test, Mixed@Case.Test`): exact addresses only, so the wildcard counts
+ * for nothing. @foxban.test accounts are admins because their signup lists them
+ * (test/admin-signups.ts); anything on @user.test needs a token.
  */
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -79,9 +80,9 @@ async function listOwn(cookie: string, ...tokens: string[]): Promise<InviteRow[]
 }
 
 describe("admin identification", () => {
-  it("reports isAdmin on signup, login and /me for a wildcard entry", async () => {
-    const signedUp = await signup("wildcard@foxban.test");
-    expect(await signedUp.json()).toMatchObject({ email: "wildcard@foxban.test", isAdmin: true });
+  it("reports isAdmin on signup, login and /me for a listed address", async () => {
+    const signedUp = await signup("listed@foxban.test");
+    expect(await signedUp.json()).toMatchObject({ email: "listed@foxban.test", isAdmin: true });
 
     const cookie = sessionCookie(signedUp);
     expect(await (await request("GET", "/me", undefined, cookie)).json()).toMatchObject({
@@ -89,7 +90,7 @@ describe("admin identification", () => {
     });
 
     const loggedIn = await request("POST", "/auth/login", {
-      email: "wildcard@foxban.test",
+      email: "listed@foxban.test",
       password: PASSWORD,
     });
     expect(await loggedIn.json()).toMatchObject({ isAdmin: true });
@@ -100,6 +101,21 @@ describe("admin identification", () => {
     const response = await signup("MIXED@case.test");
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ email: "mixed@case.test", isAdmin: true });
+  });
+
+  it("ignores a *@domain entry: nobody can sign up as an admin on that domain", async () => {
+    // The binding lists `*@wild.test`. Anyone can type an address on a domain, so it grants nothing.
+    const refused = await signup("stranger@wild.test");
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "a valid invite is required to sign up" });
+    expect(await env.DB.prepare("SELECT 1 FROM users WHERE email = ?").bind("stranger@wild.test").first()).toBeNull();
+
+    // With an invite the account exists, as a plain user and with no admin power.
+    const admin = await adminSession("wildcard-gate@foxban.test");
+    const invited = await signup("member@wild.test", await mintInvite(admin));
+    expect(await invited.json()).toMatchObject({ email: "member@wild.test", isAdmin: false });
+    expect((await request("GET", "/invites", undefined, sessionCookie(invited))).status).toBe(403);
+    expect((await request("GET", "/invites", undefined, admin)).status).toBe(200);
   });
 
   it("does not treat a lookalike domain or address as admin", async () => {
@@ -186,7 +202,7 @@ describe("invite-gated signup", () => {
   });
 });
 
-describe("signup with no admin configured", () => {
+describe("signup with no usable admin configured", () => {
   const noAdmin = (env_: string | undefined) => worker.fetch!(new Request(`${ORIGIN}/auth/signup`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -199,6 +215,18 @@ describe("signup with no admin configured", () => {
       expect(response.status).toBe(403);
       expect(await response.json()).toMatchObject({ code: "ADMIN_NOT_CONFIGURED" });
     }
+  });
+
+  it("counts only exact addresses as an admin being configured: a list of wildcards alone is none", async () => {
+    for (const value of ["*@user.test", " *@user.test , *@other.test"]) {
+      const response = await noAdmin(value);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ code: "ADMIN_NOT_CONFIGURED" });
+    }
+    // An exact entry is a configured admin, even next to a wildcard: the stranger now just needs an invite.
+    const response = await noAdmin("*@user.test, someone@else.test");
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "a valid invite is required to sign up" });
   });
 
   it("keeps a bad invite generic even then", async () => {

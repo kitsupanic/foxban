@@ -47,9 +47,15 @@ test.beforeAll(() => {
   g.location = { protocol: "http:", host: "localhost" };
   g.WebSocket = FakeSocket;
   g.IS_REACT_ACT_ENVIRONMENT = true;
+  // The reconnect loop listens for `online` on window and `visibilitychange` on document.
+  const windowBus = new EventTarget();
+  g.addEventListener = windowBus.addEventListener.bind(windowBus);
+  g.removeEventListener = windowBus.removeEventListener.bind(windowBus);
+  g.dispatchEvent = windowBus.dispatchEvent.bind(windowBus);
+  g.document = Object.assign(new EventTarget(), { visibilityState: "visible" });
 });
 test.afterAll(() => {
-  for (const key of ["window", "location", "WebSocket", "IS_REACT_ACT_ENVIRONMENT"]) delete g[key];
+  for (const key of ["window", "location", "WebSocket", "IS_REACT_ACT_ENVIRONMENT", "addEventListener", "removeEventListener", "dispatchEvent", "document"]) delete g[key];
 });
 
 const boardId = crypto.randomUUID();
@@ -158,3 +164,47 @@ test("a denied close halts the attachments module", async () => {
   expect(calls).toEqual(["halted"]);
   await unmount();
 });
+
+const wait = (ms: number) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
+
+test("an instant mutation a reconnect leaves uncertain is forgotten once its snapshot verifies it absent", async () => {
+  const { calls, ws, deleteAttachment, unmount } = await mount();
+  const mutationId = await deleteAttachment();
+  await act(async () => ws.onclose?.({ code: 1006 }));
+  await wait(600);
+  const reconnected = FakeSocket.last!;
+  expect(reconnected).not.toBe(ws);
+  // The snapshot still holds the attachment: verified-retry, and nobody subscribed to retry it.
+  await act(async () => {
+    reconnected.open();
+    reconnected.receive(snapshot());
+  });
+  calls.length = 0;
+  await act(async () => reconnected.receive({ type: "attachment.delete", mutationId, id: attachmentId } as ServerMessage));
+  expect(calls).toContain("message attachment.delete own=false");
+  await unmount();
+});
+
+for (const [name, fire] of [
+  ["online", () => g.dispatchEvent(new Event("online"))],
+  ["visibilitychange", () => (g.document as EventTarget).dispatchEvent(new Event("visibilitychange"))],
+] as const) {
+  test(`a board socket that gave up reconnects on ${name}`, async () => {
+    const { ws, unmount } = await mount();
+    let current = ws;
+    // Three transport failures spend the budget: retries after 500 ms and 1 s, then it stops.
+    for (const delay of [600, 1100]) {
+      await act(async () => current.onclose?.({ code: 1006 }));
+      await wait(delay);
+      expect(FakeSocket.last).not.toBe(current);
+      current = FakeSocket.last!;
+    }
+    await act(async () => current.onclose?.({ code: 1006 }));
+    await wait(50);
+    expect(FakeSocket.last).toBe(current);
+    await act(async () => fire());
+    await wait(20);
+    expect(FakeSocket.last).not.toBe(current);
+    await unmount();
+  });
+}

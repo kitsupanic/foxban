@@ -39,7 +39,7 @@ async function signup(email: string, invite?: string): Promise<string> {
   return response.headers.get("set-cookie")!.split(";")[0]!;
 }
 
-/** `*@foxban.test` is an instance Admin: an Operator wherever it is not a member. */
+/** A signup on `@foxban.test` is an instance Admin (admin-signups.ts): an Operator wherever it is not a member. */
 let operator: Person;
 beforeAll(async () => {
   const cookie = await signup(`operator-${crypto.randomUUID()}@foxban.test`);

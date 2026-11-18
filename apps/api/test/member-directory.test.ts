@@ -128,7 +128,8 @@ describe("member directory current access", () => {
       const candidates = await request(`/boards/${board.id}/membership-candidates`, cookie);
       expect(candidates.status).toBe(200);
       const body = await candidates.json<{ candidates: Array<{ id: string }> }>();
-      expect(body.candidates.map((candidate) => candidate.id)).toEqual(expect.arrayContaining([member.id, owner.id]));
+      // The board's workspace is the owner's own: only its members are offered, not the board's new owner.
+      expect(body.candidates.map((candidate) => candidate.id)).toEqual([owner.id]);
       for (const candidate of body.candidates) {
         expect(Object.keys(candidate).sort()).toEqual(["avatarVersion", "email", "githubLogin", "id", "name"]);
       }

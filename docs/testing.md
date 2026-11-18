@@ -25,6 +25,8 @@ member, candidate and transfer reads, and the write routes. A row that disagrees
 with the others is the bug. It also proves a role change drops open connections
 and tells the people it affects.
 
+Admin is an exact address on `ADMIN_EMAILS` (ADR 0071). The vitest config lists `*@wild.test` (which must stay ignored) and `Mixed@Case.Test`; the suite's own admins live on `@foxban.test`, and `test/admin-signups.ts` (a setup file) lists each such address as its signup goes through `SELF.fetch`, by wrapping `SELF` with `vi.mock`. The Worker and the Durable Objects read the same `env`, so both see the entry. A signup that does not go through `SELF.fetch` (a direct `worker.fetch`) must list its address itself, as `auth.test.ts` does for the GitHub cases.
+
 MCP coverage uses the published `@modelcontextprotocol/client` 2.0.0 against
 `SELF.fetch`, real D1 migrations and real BoardDO SQLite. `mcp.test.ts` proves
 transport negotiation/discovery and the read/task/comment/subtask-completion/label-management paths;

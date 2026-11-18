@@ -7,7 +7,7 @@ import { loadInstanceGitHubApp } from "../src/github-app";
  * The instance GitHub App (ADR 0064), driven through the real Worker like
  * auth.test.ts. GitHub is faked at fetch: `GITHUB_API_BASE` is
  * https://api.github.example and `GITHUB_OAUTH_BASE` https://github.example.
- * Admin status comes from vitest.config.ts's ADMIN_EMAILS (`*@foxban.test`).
+ * A signup on `@foxban.test` is an admin (admin-signups.ts).
  */
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);

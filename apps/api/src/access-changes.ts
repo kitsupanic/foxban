@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 
-import { boardManageSql, boardOpenSql, canManageBoard, canOpenBoard, isAdminEmail, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
+import { adminEmails, boardManageSql, boardOpenSql, canManageBoard, canOpenBoard, isAdminEmail, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
 import { boardClient } from "./board-client";
 
 export type AccessChangeKind =
@@ -64,7 +64,6 @@ export const ACCESS_CHANGE_ABORT = {
   boardNotFound: "board not found",
   memberNotFound: "member not found",
   lastAdmin: "last workspace admin",
-  boardOwnerProtected: "board owner protected",
   inviteUnavailable: "invite unavailable",
   invalidPayload: "invalid payload",
 } as const;
@@ -219,22 +218,15 @@ type CapturedRecipient = { id: string; workspaces: string[]; boards: string[] };
  */
 const RECIPIENT_BOARD_ACCESS = boardOpenSql("b", "u.id");
 
-/** The configured operator accounts, matched the same way everywhere in this module. */
+/**
+ * The configured operator accounts, matched the same way everywhere in this module. The list is one
+ * bound JSON array however long it is: D1 caps bound parameters per statement, one bind per use.
+ */
 function operatorEmailClauses(env: Env, column: string): { sql: string; binds: unknown[] } {
-  const clauses: string[] = [];
-  const binds: unknown[] = [];
-  for (const raw of env.ADMIN_EMAILS?.split(",") ?? []) {
-    const entry = raw.trim().toLowerCase();
-    if (!entry) continue;
-    if (entry.startsWith("*@")) {
-      clauses.push(`${column} LIKE ?`);
-      binds.push(`%${entry.slice(1)}`);
-    } else {
-      clauses.push(`${column}=?`);
-      binds.push(entry);
-    }
-  }
-  return { sql: clauses.length > 0 ? `(${clauses.join(" OR ")})` : "0", binds };
+  const emails = adminEmails(env);
+  return emails.length > 0
+    ? { sql: `${column} IN (SELECT value FROM json_each(?))`, binds: [JSON.stringify(emails)] }
+    : { sql: "0", binds: [] };
 }
 
 /**
@@ -256,6 +248,16 @@ function boardAccessPredicate(boardIdExpression: string, ops: number): string {
 function boardManagementPredicate(boardIdExpression: string, ops: number): string {
   return `EXISTS(SELECT 1 FROM boards b WHERE b.id=${boardIdExpression}
     AND ${boardManageSql("b", "?", `${ops}=1`)})`;
+}
+
+/**
+ * Removing a board member who is a manager takes manage rights; removing anyone else takes
+ * only the open right the caller already asserts. Binds: board, target, then those of
+ * `boardManagementPredicate` (board, actor x3).
+ */
+function managerRemovalGuard(ops: number): string {
+  return `(NOT EXISTS(SELECT 1 FROM board_members mt WHERE mt.board_id=? AND mt.user_id=? AND mt.role='manager')
+    OR ${boardManagementPredicate("?", ops)})`;
 }
 
 /**
@@ -582,16 +584,17 @@ async function evaluateCommit(
       if (!row) return { ok: false, reason: ACCESS_CHANGE_ABORT.boardNotFound };
       if (row.pendingOperationId !== op.id)
         return { ok: false, reason: ACCESS_CHANGE_ABORT.staleContext };
-      const access = canOpenBoard({
+      const facts = {
         operator,
         owner: row.ownerId === op.actorId,
         accessMode: row.accessMode,
         explicitRole: row.explicitRole,
         workspaceRole: row.workspaceRole,
-      });
-      if (!access) return { ok: false, reason: ACCESS_CHANGE_ABORT.forbidden };
-      if (op.kind === "board-member-remove" && row.targetRole === "owner")
-        return { ok: false, reason: ACCESS_CHANGE_ABORT.boardOwnerProtected };
+      };
+      if (!canOpenBoard(facts)) return { ok: false, reason: ACCESS_CHANGE_ABORT.forbidden };
+      // Taking a board manager away is itself a management act (the owner is protected by the reservation).
+      if (op.kind === "board-member-remove" && row.targetRole === "manager" && !canManageBoard(facts))
+        return { ok: false, reason: ACCESS_CHANGE_ABORT.forbidden };
       return { ok: true };
     }
   }
@@ -853,9 +856,9 @@ function commitStatements(
         preparedAck,
         assertion(
           env,
-          `${boardAccessPredicate("?", ops)}${op.kind === "board-member-remove" ? ` AND NOT EXISTS(SELECT 1 FROM boards b WHERE b.id=? AND b.owner_id=?)` : ""}`,
+          `${boardAccessPredicate("?", ops)}${op.kind === "board-member-remove" ? ` AND NOT EXISTS(SELECT 1 FROM boards b WHERE b.id=? AND b.owner_id=?) AND ${managerRemovalGuard(ops)}` : ""}`,
           op.kind === "board-member-remove"
-            ? [...permissionBinds, boardId, userId]
+            ? [...permissionBinds, boardId, userId, boardId, userId, ...permissionBinds]
             : permissionBinds,
         ),
         write,
@@ -1185,22 +1188,33 @@ async function deliverNotification(env: Env, op: OperationRow): Promise<void> {
     await markNotified();
     return;
   }
-  // Sent in bounded batches for the same reason the visibility read is: a long-lived
-  // board can name more recipients than one request may carry.
+  if (await sendPresenceInvalidate(env, targets)) await markNotified();
+}
+
+/**
+ * The one sender of the presence `invalidate` hint: each target is a user and the
+ * workspaces and boards that user should refetch. Sent in bounded batches for the same
+ * reason the visibility read is: a long-lived board can name more recipients than one
+ * request may carry. Resolves false when a batch was not accepted, and rejects on a
+ * network failure or timeout; callers decide whether the hint is worth a retry.
+ */
+export async function sendPresenceInvalidate(
+  env: Env,
+  targets: Array<{ userId: string; workspaceIds: string[]; boardIds: string[] }>,
+): Promise<boolean> {
   for (let index = 0; index < targets.length; index += RECIPIENT_PARAMETER_BUDGET) {
-    const batch = targets.slice(index, index + RECIPIENT_PARAMETER_BUDGET);
     const response = await env.PRESENCE_DO.get(env.PRESENCE_DO.idFromName("global")).fetch(
       "https://presence.internal/internal/workspaces/invalidate",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ targets: batch }),
+        body: JSON.stringify({ targets: targets.slice(index, index + RECIPIENT_PARAMETER_BUDGET) }),
         signal: AbortSignal.timeout(PARTICIPANT_CALL_TIMEOUT_MS),
       },
     );
-    if (!response.ok) return;
+    if (!response.ok) return false;
   }
-  await markNotified();
+  return true;
 }
 
 function pendingOf(state: AccessChangePending["state"], operationId: string): AccessChangePending {
@@ -1439,8 +1453,8 @@ function authorityAssertions(
       return [
         assertion(
           env,
-          `${boardPermission} AND NOT EXISTS(SELECT 1 FROM boards o WHERE o.id=? AND o.owner_id=?)`,
-          [boardId, actor.id, actor.id, actor.id, boardId, payload.userId as string],
+          `${boardPermission} AND NOT EXISTS(SELECT 1 FROM boards o WHERE o.id=? AND o.owner_id=?) AND ${managerRemovalGuard(ops)}`,
+          [boardId, actor.id, actor.id, actor.id, boardId, payload.userId as string, boardId, payload.userId as string, boardId, actor.id, actor.id, actor.id],
         ),
       ];
   }
@@ -1636,28 +1650,63 @@ export const accessChangesRouter = new Hono<AppEnv>()
   });
 
 /**
+ * Settled journal rows are kept for a replay window: a client that lost the response to an
+ * attempt can retry it with the same operation id and get the recorded answer for this long.
+ * After that the row is deleted (it is the table's only growth), and a replay finds no
+ * attempt: `resolveAccessChangeAttempt` answers null and the route treats the request as a
+ * new attempt, which the board's current state either repeats idempotently or refuses.
+ */
+const SETTLED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const PRUNE_BATCH = 500;
+
+/**
+ * Deletes completed, notified operations older than the retention window, with their
+ * participant rows (the scope rows are already gone at completion). One batch, so a row
+ * never loses its children alone; a backlog drains `PRUNE_BATCH` rows per cron pass.
+ */
+export async function pruneAccessChanges(env: Env, now = Date.now()): Promise<void> {
+  const stale = `SELECT id FROM access_change_operations
+     WHERE phase='completed' AND notified=1 AND updated_at<?
+     ORDER BY updated_at LIMIT ${PRUNE_BATCH}`;
+  const cutoff = now - SETTLED_RETENTION_MS;
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM access_change_boards WHERE operation_id IN (${stale})`).bind(cutoff),
+    env.DB.prepare(`DELETE FROM access_change_operations WHERE id IN (${stale})`).bind(cutoff),
+  ]);
+}
+
+/**
  * Cron recovery: resumes preparing attempts through commit/abort, releases and
  * completes them, and retries notifications that were lost after completion.
  * Every step is idempotent, so simultaneous passes and restarts converge.
  */
 export async function recoverAccessChanges(env: Env): Promise<void> {
+  // The (phase,notified,updated_at) index serves this as range scans: a bare
+  // `phase<>'completed'` would read every settled row (the table's bulk) instead.
   const { results } = await env.DB.prepare(
     `SELECT id,actor_id AS actorId,kind,payload_json AS payloadJson,payload_hash AS payloadHash,
             phase,outcome,result_json AS resultJson,notify_user_ids_json AS notifyUserIdsJson,
             notified,effect_started AS effectStarted
        FROM access_change_operations
-      WHERE phase<>'completed' OR notified=0
+      WHERE phase IN ('preparing','committed','aborted') OR (phase='completed' AND notified=0)
       ORDER BY updated_at LIMIT ?`,
   )
     .bind(RECOVERY_OPERATION_LIMIT)
     .all<OperationRow>();
-  if (results.length === 0) return;
-  const deadline = Date.now() + RECOVERY_PASS_BUDGET_MS;
-  await mapChunks(results, RECOVERY_CONCURRENCY, async (operation) => {
-    try {
-      await driveOperation(env, operation, Budget.until(deadline));
-    } catch {
-      // A dependency failure leaves the row for the next pass; time never unlocks.
-    }
-  });
+  if (results.length > 0) {
+    const deadline = Date.now() + RECOVERY_PASS_BUDGET_MS;
+    await mapChunks(results, RECOVERY_CONCURRENCY, async (operation) => {
+      try {
+        await driveOperation(env, operation, Budget.until(deadline));
+      } catch {
+        // A dependency failure leaves the row for the next pass; time never unlocks.
+      }
+    });
+  }
+  // Housekeeping goes last: a database error here must never keep stuck operations from being recovered.
+  try {
+    await pruneAccessChanges(env);
+  } catch (error) {
+    console.warn("[access-changes] prune failed:", error instanceof Error ? error.message : error);
+  }
 }

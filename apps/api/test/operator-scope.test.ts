@@ -25,7 +25,7 @@ async function signup(email: string, invite?: string): Promise<string> {
   return response.headers.get("set-cookie")!.split(";")[0]!;
 }
 
-/** `*@foxban.test` is an instance Admin (the test environment's ADMIN_EMAILS). */
+/** A signup on `@foxban.test` is an instance Admin (admin-signups.ts) (the test environment's ADMIN_EMAILS). */
 async function admin(): Promise<Person> {
   const cookie = await signup(`admin-${crypto.randomUUID()}@foxban.test`);
   return { cookie, id: (await (await get("/me", cookie)).json<{ id: string }>()).id };

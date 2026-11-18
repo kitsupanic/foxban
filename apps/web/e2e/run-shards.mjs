@@ -134,6 +134,8 @@ function childEnv() {
     E2E_RUN_ID: runId,
     E2E_SHARD: `${shard}`,
     E2E_NO_WEBSERVER: "1",
+    // Admin addresses already used in this shard's database (helpers.ts uniqueEmail): they go with it.
+    E2E_SLOT_DIR: path.join(persistDir, "e2e-admin-slots"),
   };
   if (outDir) env.E2E_OUTPUT_DIR = outDir;
   if (blobDir && !missingBlob) {

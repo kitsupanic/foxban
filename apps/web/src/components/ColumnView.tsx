@@ -5,7 +5,7 @@ import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-
 import { CSS } from "@dnd-kit/utilities";
 import type { Card, Column, SubtaskHierarchy } from "@foxban/shared";
 import type { Member } from "../lib/api";
-import { boardAncestors, type BoardState } from "../lib/apply-mutation";
+import { boardAncestors, type BoardIndex, type BoardState } from "../lib/apply-mutation";
 import type { BoardCommands } from "../lib/board-commands";
 import { CardView, getCardFaceProps } from "./CardView";
 import { CardSubtaskFamily } from "./SubtaskList";
@@ -23,7 +23,7 @@ export function ColumnView({
   totalCardCount,
   matchingCardCount,
   isFilterActive,
-  activeCardIds,
+  index,
   state,
   hierarchy,
   collapsedSubtasks,
@@ -48,8 +48,9 @@ export function ColumnView({
   /** Direct matches in this column; a context ancestor is not one of them. */
   matchingCardCount: number;
   isFilterActive: boolean;
-  activeCardIds: ReadonlySet<string>;
-  /** Read only for the cards' checklist badges; the cards themselves arrive in `cards`. */
+  /** The board's card lookup and per-card face aggregates, built once per board state. */
+  index: BoardIndex;
+  /** Read by the subtask families; the cards themselves arrive in `cards`. */
   state: BoardState;
   /** The board's shared subtask forest, so each card renders its own family. */
   hierarchy: SubtaskHierarchy;
@@ -68,14 +69,14 @@ export function ColumnView({
   /** Opens the board's create dialog for this column, from the control that was used. */
   onAddCard: (trigger: HTMLButtonElement) => void;
 }) {
-  const renderChild = (child: Card): ReactNode => <CardView key={child.id} dropPlacement={dropHint?.cardId === child.id ? dropHint.placement : undefined} {...getCardFaceProps(state, child, activeCardIds, membersById, boardKey, pullRequestBadges.get(child.id) ?? null)} subtaskContent={<CardSubtaskFamily state={state} hierarchy={hierarchy} cardId={child.id} visibleCardIds={visibleCards} disclosure={{ collapsed: collapsedSubtasks, onToggle: onToggleSubtasks }} renderChild={renderChild} />} onOpen={onOpenCard} />;
+  const renderChild = (child: Card): ReactNode => <CardView key={child.id} dropPlacement={dropHint?.cardId === child.id ? dropHint.placement : undefined} {...getCardFaceProps(index, child, membersById, boardKey, pullRequestBadges.get(child.id) ?? null)} subtaskContent={<CardSubtaskFamily state={state} hierarchy={hierarchy} cardId={child.id} visibleCardIds={visibleCards} disclosure={{ collapsed: collapsedSubtasks, onToggle: onToggleSubtasks }} renderChild={renderChild} />} onOpen={onOpenCard} />;
   const localContext = new Set<string>();
   if (visibleCards !== null) for (const id of visibleCards) {
-    if (state.cards.find(c => c.id === id)?.columnId !== column.id) continue;
-    for (const parent of boardAncestors(state, hierarchy, id)) localContext.add(parent);
+    if (index.cardsById.get(id)?.columnId !== column.id) continue;
+    for (const parent of boardAncestors(state, hierarchy, id, index.cardsById)) localContext.add(parent);
   }
   const collectIds = (card: Card): string[] => [card.id, ...(!collapsedSubtasks.has(card.id) ? (hierarchy.childrenByParent.get(card.id) ?? []).flatMap(id => {
-    const child = state.cards.find(c => c.id === id);
+    const child = index.cardsById.get(id);
     return child?.columnId === column.id && (visibleCards === null || visibleCards.has(id) || localContext.has(id)) ? collectIds(child) : [];
   }) : [])];
   const renderedIds = cards.flatMap(collectIds);
@@ -260,9 +261,8 @@ export function ColumnView({
         >
           {cards.map((card) => {
             const faceProps = getCardFaceProps(
-              state,
+              index,
               card,
-              activeCardIds,
               membersById,
               boardKey,
               pullRequestBadges.get(card.id) ?? null,
@@ -274,7 +274,7 @@ export function ColumnView({
                 {...faceProps}
                 subtaskContent={
                   <>
-                  {hierarchy.parentByChild.has(card.id) && <button type="button" className="w-full truncate border-t px-2 py-1 text-left text-xs text-muted-foreground" onClick={() => onOpenCard(hierarchy.parentByChild.get(card.id)!)}>Parent: {state.cards.find(c => c.id === hierarchy.parentByChild.get(card.id))?.title}</button>}
+                  {hierarchy.parentByChild.has(card.id) && <button type="button" className="w-full truncate border-t px-2 py-1 text-left text-xs text-muted-foreground" onClick={() => onOpenCard(hierarchy.parentByChild.get(card.id)!)}>Parent: {index.cardsById.get(hierarchy.parentByChild.get(card.id)!)?.title}</button>}
                   <CardSubtaskFamily
                     renderChild={renderChild}
                     state={state}

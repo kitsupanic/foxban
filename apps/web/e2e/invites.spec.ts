@@ -16,7 +16,7 @@ type Admin = {
   otherPending: number;
 };
 
-/** Registers an admin (dev `ADMIN_EMAILS` is `*@admin.test`) and mints one link. */
+/** Registers an admin (an `@admin.test` address from the pool `.dev.vars` lists) and mints one link. */
 async function adminWithInviteLink(browser: Browser, suffix: string): Promise<Admin> {
   const context = await browser.newContext();
   const page = await context.newPage();

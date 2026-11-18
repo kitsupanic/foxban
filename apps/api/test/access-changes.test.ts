@@ -1,9 +1,9 @@
 import { SELF, abortAllDurableObjects, applyD1Migrations, env, runInDurableObject } from "cloudflare:test";
 import { scheduler } from "node:timers/promises";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { PresenceServerMessageSchema, REALTIME_PROTOCOL_VERSION } from "@foxban/shared";
-import { ACCESS_CHANGE_ABORT, AccessChangeConflict, recoverAccessChanges, runAccessChange } from "../src/access-changes";
+import { ACCESS_CHANGE_ABORT, AccessChangeConflict, pruneAccessChanges, recoverAccessChanges, runAccessChange } from "../src/access-changes";
 import type { SessionUser } from "../src/auth";
 import type { BoardDO } from "../src/board-do";
 import { INTERNAL_BOARD_ID_HEADER, INTERNAL_USER_ID_HEADER } from "../src/internal-headers";
@@ -62,7 +62,7 @@ async function signup(email: string, invite?: string): Promise<string> {
   return cookieOf(response);
 }
 
-/** The test config's `ADMIN_EMAILS` covers `*@foxban.test`, so these are operators. */
+/** A signup on `@foxban.test` is listed as an admin (admin-signups.ts), so these are operators. */
 const signupAdmin = () => signup(`admin-${crypto.randomUUID()}@foxban.test`);
 
 /** Ordinary users need an account invitation, minted by a configured administrator. */
@@ -1244,19 +1244,25 @@ describe("access change journal", () => {
     const workspace = await createWorkspace(admin, "Large audience");
     const board = await createBoard(admin, workspace, "workspace");
 
-    // The configured operator wildcard matches every one of these accounts, so this
-    // board has far more captured recipients than D1 allows bound parameters in one
-    // statement. Reading them in one query made the notification throw after the
-    // policy had already committed, which surfaced as a failed delete.
+    // Every one of these accounts is a member of the workspace, so this board has far
+    // more captured recipients than D1 allows bound parameters in one statement.
+    // Reading them in one query made the notification throw after the policy had
+    // already committed, which surfaced as a failed delete.
     await env.DB.prepare(
       `INSERT INTO users(id,email,name,password_hash,created_at)
        WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<1200)
-       SELECT 'bulk-'||n,'bulk-'||n||'@foxban.test','Bulk '||n,'hash',? FROM seq`,
+       SELECT 'bulk-'||n,'bulk-'||n||'@example.test','Bulk '||n,'hash',? FROM seq`,
     )
       .bind(Date.now())
       .run();
+    await env.DB.prepare(
+      `INSERT INTO workspace_members(workspace_id,user_id,role,created_at,updated_at)
+       SELECT ?,id,'member',?,? FROM users WHERE id LIKE 'bulk-%'`,
+    )
+      .bind(workspace, Date.now(), Date.now())
+      .run();
     expect(
-      await countRows("SELECT COUNT(*) AS n FROM users WHERE email LIKE 'bulk-%@foxban.test'"),
+      await countRows("SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id=? AND user_id LIKE 'bulk-%'", workspace),
     ).toBe(1200);
 
     const operationId = crypto.randomUUID();
@@ -1280,6 +1286,111 @@ describe("access change journal", () => {
       outcome: "committed",
       notified: 1,
     });
+  });
+
+  it("prunes settled, notified operations after thirty days with their participant rows, and nothing else", async () => {
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const insert = async (id: string, phase: string, notified: number, updatedAt: number) => {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO access_change_operations(id,actor_id,kind,payload_json,payload_hash,phase,outcome,notify_user_ids_json,notified,created_at,updated_at)
+           VALUES(?,'actor','board-member-add','{}','hash',?,?,'[]',?,?,?)`,
+        ).bind(id, phase, phase === "preparing" ? null : "committed", notified, updatedAt, updatedAt),
+        env.DB.prepare(
+          `INSERT INTO access_change_boards(operation_id,board_id,expected_version,next_version,prepared,released) VALUES(?,?,0,1,1,1)`,
+        ).bind(id, `board-of-${id}`),
+      ]);
+    };
+    const tag = crypto.randomUUID();
+    const [old, unnotified, preparing, committed, aborted, recent] = ["old", "unnotified", "preparing", "committed", "aborted", "recent"].map((name) => `${tag}-${name}`);
+    await insert(old!, "completed", 1, now - 31 * DAY);
+    await insert(unnotified!, "completed", 0, now - 31 * DAY);
+    await insert(preparing!, "preparing", 0, now - 31 * DAY);
+    await insert(committed!, "committed", 1, now - 31 * DAY);
+    await insert(aborted!, "aborted", 1, now - 31 * DAY);
+    await insert(recent!, "completed", 1, now - 29 * DAY);
+
+    await pruneAccessChanges(env, now);
+    const present = async (id: string) => ({
+      operation: await countRows("SELECT COUNT(*) AS n FROM access_change_operations WHERE id=?", id),
+      participants: await countRows("SELECT COUNT(*) AS n FROM access_change_boards WHERE operation_id=?", id),
+    });
+    expect(await present(old!)).toEqual({ operation: 0, participants: 0 });
+    for (const kept of [unnotified!, preparing!, committed!, aborted!, recent!]) {
+      expect(await present(kept), kept).toEqual({ operation: 1, participants: 1 });
+    }
+
+    // Leave the journal as other tests expect it: no unfinished rows of this one.
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM access_change_boards WHERE operation_id LIKE ?").bind(`${tag}%`),
+      env.DB.prepare("DELETE FROM access_change_operations WHERE id LIKE ?").bind(`${tag}%`),
+    ]);
+  });
+
+  it("prunes from the cron pass, which is what keeps the journal from growing forever", async () => {
+    const id = crypto.randomUUID();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO access_change_operations(id,actor_id,kind,payload_json,payload_hash,phase,outcome,notify_user_ids_json,notified,created_at,updated_at)
+         VALUES(?,'actor','board-member-add','{}','hash','completed','committed','[]',1,0,?)`,
+      ).bind(id, Date.now() - 40 * 86_400_000),
+      env.DB.prepare(
+        `INSERT INTO access_change_boards(operation_id,board_id,expected_version,next_version,prepared,released) VALUES(?,?,0,1,1,1)`,
+      ).bind(id, `board-of-${id}`),
+    ]);
+    await recoverAccessChanges(env);
+    expect(await readOperation(id)).toBeNull();
+    expect(await countRows("SELECT COUNT(*) AS n FROM access_change_boards WHERE operation_id=?", id)).toBe(0);
+  });
+
+  it("recovers stuck operations even when pruning fails, and says so", async () => {
+    const id = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO access_change_operations(id,actor_id,kind,payload_json,payload_hash,phase,outcome,notify_user_ids_json,notified,created_at,updated_at)
+       VALUES(?,'actor','board-member-add','{}','hash','completed','committed','[]',0,?,?)`,
+    ).bind(id, Date.now(), Date.now()).run();
+    // Every statement works except the prune's deletes.
+    const failingPrune = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("DELETE FROM access_change_boards WHERE operation_id IN")) throw new Error("D1 unavailable");
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await recoverAccessChanges({ ...env, DB: failingPrune });
+      expect(warn).toHaveBeenCalledWith("[access-changes] prune failed:", "D1 unavailable");
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await readOperation(id)).toMatchObject({ phase: "completed", notified: 1 });
+    await env.DB.prepare("DELETE FROM access_change_operations WHERE id=?").bind(id).run();
+  });
+
+  it("answers a replay of a pruned attempt as a new attempt, not as an error in the journal", async () => {
+    const admin = await signupAdmin();
+    const workspace = await createWorkspace(admin, "Replay window");
+    const board = await createBoard(admin, workspace, "workspace");
+    const operationId = crypto.randomUUID();
+    expect((await del(`/boards/${board.id}?operationId=${operationId}`, admin)).status).toBe(200);
+    // Within the window the recorded success is replayed even though the board is gone.
+    expect((await del(`/boards/${board.id}?operationId=${operationId}`, admin)).status).toBe(200);
+
+    await env.DB.prepare("UPDATE access_change_operations SET updated_at=? WHERE id=?").bind(Date.now() - 31 * 86_400_000, operationId).run();
+    await pruneAccessChanges(env);
+    expect(await readOperation(operationId)).toBeNull();
+    expect((await get(`/access-changes/${operationId}`, admin)).status).toBe(404);
+    // Past it the same id finds no attempt: the board is simply not there.
+    const replay = await del(`/boards/${board.id}?operationId=${operationId}`, admin);
+    expect(replay.status).toBe(404);
+    expect(await replay.json()).toEqual({ error: "board not found" });
   });
 
   it("notifies each recipient only with the contexts that recipient may know", async () => {

@@ -1,2 +1,2 @@
-# Comma-separated admin addresses (or *@domain wildcards): they can sign up without an invite and mint invites.
+# Comma-separated full admin addresses (a *@domain entry is ignored): they can sign up without an invite and mint invites.
 ADMIN_EMAILS=you@example.com

@@ -6,9 +6,13 @@ import {
   workspaceMembershipCandidatesQuery,
   type WorkspaceMemberCandidate,
 } from "../lib/workspaces";
+import { useDebounced } from "../lib/use-debounced";
 import { Avatar } from "./Avatar";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+
+/** A full email address; the server finds an exact match only, so this only decides when to ask. */
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const ROW_CLASS =
   "h-9 w-full justify-start gap-2 rounded-sm px-2 font-normal text-popover-foreground hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus:outline-none";
@@ -60,33 +64,30 @@ export function WorkspaceAddMemberDialog({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [role, setRole] = useState<"member" | "admin">("member");
 
+  // No list: the server answers only for one exact address (ADR 0072), so ask once the
+  // typed text is a full email address.
+  // Debounced: the lookup is rate limited per user (ADR 0072).
+  const email = useDebounced(query.trim().toLowerCase(), 400);
+  const lookupEmail = EMAIL_PATTERN.test(email) ? email : null;
   const candidates = useQuery({
-    ...workspaceMembershipCandidatesQuery(workspaceId),
+    ...workspaceMembershipCandidatesQuery(workspaceId, lookupEmail ?? ""),
+    enabled: lookupEmail !== null,
     retry: false,
   });
   // Only a settled, successful read is selectable: rows left over from a previous
   // failure must never be submitted as if the server had just offered them.
-  const rows = useMemo<readonly WorkspaceMemberCandidate[]>(
-    () => (candidates.isFetching || !candidates.isSuccess ? [] : (candidates.data ?? [])),
-    [candidates.isFetching, candidates.isSuccess, candidates.data],
+  const matches = useMemo<readonly WorkspaceMemberCandidate[]>(
+    () => (lookupEmail === null || candidates.isFetching || !candidates.isSuccess ? [] : (candidates.data ?? [])),
+    [lookupEmail, candidates.isFetching, candidates.isSuccess, candidates.data],
   );
-  const matches = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (needle === "") return rows;
-    return rows.filter(
-      (candidate) =>
-        candidate.name.toLowerCase().includes(needle) ||
-        candidate.email.toLowerCase().includes(needle),
-    );
-  }, [rows, query]);
   const selected = matches.find((candidate) => candidate.id === selectedId) ?? null;
 
   useEffect(() => {
     searchRef.current?.focus();
   }, []);
 
-  // A selection that the directory no longer holds — refetched after an add, or
-  // narrowed by the search — cannot stay selected and be submitted later.
+  // A selection that the lookup no longer offers — refetched after an add, or
+  // replaced by another address — cannot stay selected and be submitted later.
   useEffect(() => {
     if (selectedId === null) return;
     if (candidates.isFetching || !matches.some((candidate) => candidate.id === selectedId))
@@ -210,7 +211,7 @@ export function WorkspaceAddMemberDialog({
             autoComplete="off"
             value={query}
             disabled={isPending}
-            placeholder="Filter by name or email…"
+            placeholder="A full email address…"
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={moveSelection}
           />
@@ -236,8 +237,8 @@ export function WorkspaceAddMemberDialog({
                   Retry
                 </Button>
               </div>
-            ) : rows.length === 0 ? (
-              <p>Every registered account is already a member of this workspace.</p>
+            ) : lookupEmail === null ? (
+              <p>Type the full email address of an existing account.</p>
             ) : matches.length === 0 ? (
               <p>No matching users.</p>
             ) : (

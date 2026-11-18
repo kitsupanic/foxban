@@ -135,6 +135,10 @@ function main() {
     process.exit(0);
   }
   if (!env.ADMIN_EMAILS) fail("ADMIN_EMAILS is required (set it in .env.deploy or the environment).");
+  // Wildcards are ignored (ADR 0071), so a list of only `*@...` entries would deploy with no admin.
+  if (!env.ADMIN_EMAILS.split(",").some((entry) => entry.trim() && !entry.trim().startsWith("*@"))) {
+    fail("ADMIN_EMAILS needs at least one exact address; `*@domain` entries are ignored.");
+  }
 
   const wrangler = (args, opts = {}) => {
     console.log(`> wrangler ${args.join(" ")}`);

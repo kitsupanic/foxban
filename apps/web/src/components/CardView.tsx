@@ -21,14 +21,7 @@ import { useDndMonitor } from "@dnd-kit/core";
 import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
 import type { Card, Label, TaskType } from "@foxban/shared";
 import type { Member } from "../lib/api";
-import {
-  cardAttachments,
-  activeCardComments,
-  cardChecklist,
-  cardLabelViews,
-  cardRelations,
-  type BoardState,
-} from "../lib/apply-mutation";
+import { cardFace, type BoardIndex } from "../lib/apply-mutation";
 import { PRIORITY_META } from "../lib/priority";
 import { DUE_STATE_META, dueState, formatDueDate, parseDueDate } from "../lib/due-date";
 import { LABEL_COLOR_META } from "../lib/labels";
@@ -79,24 +72,22 @@ export type CardFaceProps = {
 };
 
 export function getCardFaceProps(
-  state: BoardState,
+  index: BoardIndex,
   card: Card,
-  activeCardIds: ReadonlySet<string>,
   membersById: Record<string, Member | undefined>,
   boardKey?: string,
   pullRequest?: CardPullRequestBadge | null,
 ): CardFaceProps {
-  const items = cardChecklist(state, card.id);
-  const links = cardRelations(state, card.id, activeCardIds);
+  const face = cardFace(index, card.id);
   return {
     card,
-    checklistDone: items.filter((item) => item.done).length,
-    checklistTotal: items.length,
-    attachmentCount: cardAttachments(state, card.id).length,
-    commentCount: activeCardComments(state, card.id).length,
-    relationCount: nonSubtaskLinks(links).length,
-    blocked: isBlocked(links, card.id),
-    labels: cardLabelViews(state, card.id).map((view) => view.label),
+    checklistDone: face.checklistDone,
+    checklistTotal: face.checklistTotal,
+    attachmentCount: face.attachmentCount,
+    commentCount: face.commentCount,
+    relationCount: nonSubtaskLinks(face.relations).length,
+    blocked: isBlocked(face.relations, card.id),
+    labels: face.labels,
     assignee: card.assigneeId === null ? undefined : membersById[card.assigneeId],
     boardKey,
     hasVideo: hasYouTubeVideo(card.description),

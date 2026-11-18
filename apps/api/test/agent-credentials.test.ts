@@ -70,6 +70,22 @@ describe("agent credentials", () => {
     expect(denied.status).toBe(401);
   });
 
+  it("refuses an expired token, as it does a revoked one", async () => {
+    const cookie = await signup(`credential-expiry-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ name: "Short lived", boardIds: [boardId], scopes: ["boards:read"], expiresInDays: 1 }),
+    });
+    const issued = await issue.json<{ credential: { id: string }; token: string }>();
+    const call = () => SELF.fetch(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${issued.token}`, "content-type": "application/json" }, body: "{}" });
+    expect((await call()).status).not.toBe(401);
+
+    await env.DB.prepare("UPDATE agent_credentials SET created_at = ?1 - 1000, expires_at = ?1 WHERE id = ?2").bind(Date.now() - 1000, issued.credential.id).run();
+    expect((await call()).status).toBe(401);
+  });
+
   it("keeps bearer tokens exclusive to MCP and rejects inaccessible board batches", async () => {
     const anonymous = await SELF.fetch(`${ORIGIN}/me/agent-credentials`);
     expect(anonymous.status).toBe(401);

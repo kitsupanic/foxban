@@ -2,8 +2,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { BoardAccessModeSchema, type BoardAccessMode, type WorkspaceRole } from "@foxban/shared";
 
-import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, AccessChangeConflict, INVITER_IS_ADMIN, resolveAccessChangeAttempt, runAccessChange } from "./access-changes";
-import { boardOpenSql, createInviteToken, isAdminEmail, requireAdmin, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
+import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, AccessChangeConflict, INVITER_IS_ADMIN, resolveAccessChangeAttempt, runAccessChange, sendPresenceInvalidate } from "./access-changes";
+import { boardOpenSql, createInviteToken, isAdminEmail, rateLimitLookup, requireAdmin, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
 
 const WorkspaceNameSchema = z.string().trim().min(1).max(40);
 const OperationIdSchema = z.string().uuid();
@@ -148,7 +148,7 @@ export const workspacesRouter = new Hono<AppEnv>()
     // A hint, not part of the delete: it is already done, and a person who misses the
     // frame sees the workspace go the next time their lists refresh.
     try{
-      await c.env.PRESENCE_DO.get(c.env.PRESENCE_DO.idFromName("global")).fetch("https://presence.internal/internal/workspaces/invalidate",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({targets:(members?.results as {userId:string}[]).map(({userId})=>({userId,workspaceIds:[id],boardIds:[]}))}),signal:AbortSignal.timeout(2_000)});
+      await sendPresenceInvalidate(c.env,(members?.results as {userId:string}[]).map(({userId})=>({userId,workspaceIds:[id],boardIds:[]})));
     }catch{}
     return c.json({ok:true} as const);
   })
@@ -184,22 +184,21 @@ export const workspacesRouter = new Hono<AppEnv>()
       return c.json(result);
     }catch(e){if(e instanceof AccessChangeConflict)return c.json(ACCESS_CONFLICT,409);throw e;}
   })
-  .get("/:workspaceId/membership-candidates",async(c)=>{
-    const id=c.req.param("workspaceId"),user=c.get("user");
+  .get("/:workspaceId/membership-candidates",rateLimitLookup,async(c)=>{
+    const id=c.req.param("workspaceId"),user=c.get("user"),email=(c.req.query("email")??"").trim().toLowerCase();
     // One authorization-bearing read: the viewer's own membership row is the
-    // predicate for the whole directory, so a manager demoted or removed before
-    // this statement ran reads nothing instead of the list their old role allowed.
-    // Only public identity columns leave the server, and an account that already
-    // holds a membership is excluded by the same statement, so this directory can
-    // never offer someone the member list already shows.
-    const {results}=await c.env.DB.prepare(
+    // predicate, so a manager demoted or removed before this statement ran reads
+    // nothing instead of what their old role allowed. This is no directory (ADR 0072):
+    // it answers only for one exact address, and never for an account that already
+    // holds a membership, so the list cannot offer someone the member list already shows.
+    // Only public identity columns leave the server.
+    const {results}=email===""?{results:[]}:await c.env.DB.prepare(
       `SELECT u.id,u.email,u.name,u.github_login AS githubLogin,u.avatar_version AS avatarVersion
          FROM workspace_members viewer
-         JOIN users u ON u.id<>viewer.user_id
+         JOIN users u ON u.id<>viewer.user_id AND u.email=?
         WHERE viewer.workspace_id=? AND viewer.user_id=? AND viewer.role='admin'
-          AND NOT EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=viewer.workspace_id AND m.user_id=u.id)
-        ORDER BY u.name,u.email,u.id`).bind(id,user.id).all();
-    // An empty directory is a legitimate answer, so denial is only claimed once the
+          AND NOT EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=viewer.workspace_id AND m.user_id=u.id)`).bind(email,id,user.id).all();
+    // An empty answer is a legitimate one, so denial is only claimed once the
     // manager read disagrees — the distinction the invite list makes as well.
     if(results.length===0&&!await requireWorkspaceAdmin(c.env,user.id,id))return c.json({error:"forbidden"} as const,403);
     return c.json({candidates:results});
@@ -211,7 +210,7 @@ export const workspacesRouter = new Hono<AppEnv>()
       // must replay its recorded outcome even if the caller's own role has since
       // changed, and the id must never be reused for a different mutation.
       const resumed=await resolveAccessChangeAttempt(c.env,actor,parsed.data.operationId,"workspace-member-role",{workspaceId:id,userId:target,role:parsed.data.role});
-      const refused=(reason:unknown)=>reason===ACCESS_CHANGE_ABORT.lastAdmin?c.json(LAST_ADMIN,409):c.json({error:"member not found"} as const,404);
+      const refused=(reason:unknown)=>reason===ACCESS_CHANGE_ABORT.lastAdmin?c.json(LAST_ADMIN,409):reason===ACCESS_CHANGE_ABORT.forbidden?c.json({error:"forbidden"} as const,403):c.json({error:"member not found"} as const,404);
       if(resumed)return resumed.state!=="completed"?c.json(resumed,202):(resumed.outcome==="aborted"?refused(resumed.result):c.json(resumed));
       const workspace=await requireWorkspaceAdmin(c.env,actor.id,id);if(!workspace)return c.json({error:"forbidden"} as const,403);
       // The same rule the commit and the database enforce, applied first so the person is told what to do.

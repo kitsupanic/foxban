@@ -14,7 +14,7 @@ async function plainUser(browser: Browser, operator: Page, suffix: string) {
   return { page, email };
 }
 
-/** Signs up a second Admin (the e2e instance treats every `@admin.test` address as one) with a workspace holding one board. */
+/** Signs up a second Admin (every address `uniqueEmail` hands out on `@admin.test` is one) with a workspace holding one board. */
 async function adminWithBoard(browser: Browser, suffix: string) {
   const page = await (await browser.newContext()).newPage();
   const email = uniqueEmail(suffix);

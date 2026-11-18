@@ -2,6 +2,8 @@ import { SELF, env } from "cloudflare:test";
 import { firstWorkspaceId } from "./first-workspace";
 import { REALTIME_PROTOCOL_VERSION, type ServerMessage } from "@foxban/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { drainBackfill } from "../src/github-backfill";
+import { connectRepos, enqueueBackfill } from "../src/github-repos";
 import { API, ORIGIN, OWNER, adminSession, deliver, github, installApp, installation, repo, useFakeGitHub } from "./github-test-kit";
 
 /**
@@ -22,7 +24,8 @@ const DAY = 24 * 60 * 60 * 1000;
 const COMMITTED = new Date(Date.now() - DAY).toISOString();
 const daysAgo = (days: number) => new Date(Date.now() - days * DAY).toISOString();
 
-type FakePull = { number: number; title: string; state: "open" | "closed"; updated: string; closed?: string; merged?: boolean; draft?: boolean; head?: string; body?: string };
+/** `repo` limits a pull to one repo's lists; without it every repo lists it. */
+type FakePull = { number: number; title: string; state: "open" | "closed"; updated: string; closed?: string; merged?: boolean; draft?: boolean; head?: string; body?: string; repo?: string };
 type FakeBranch = { name: string; sha: string; message?: string };
 
 /** What the fake GitHub lists for the repo, plus a record of what the Worker asked. `limit` answers list calls with a 429. */
@@ -33,25 +36,30 @@ const fake = {
   branchLists: [] as string[],
   branchReads: [] as string[],
   limit: null as { retryAfter: number } | null,
+  /** `down` fails every PR list with a 500; `attemptsSeen` is the queue row's `attempts` at the moment each list was asked for. */
+  down: false,
+  attemptsSeen: [] as number[],
 };
 
 let kitFetch: typeof fetch;
 beforeEach(() => {
-  Object.assign(fake, { pulls: [], branches: [], pullRequests: [], branchLists: [], branchReads: [], limit: null });
+  Object.assign(fake, { pulls: [], branches: [], pullRequests: [], branchLists: [], branchReads: [], limit: null, down: false, attemptsSeen: [] });
   kitFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const match = url.origin === API && url.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/(pulls|branches)(?:\/(.+))?$/);
     if (!match) return kitFetch(input, init);
-    const [, , kind, name] = match;
+    const [, full, kind, name] = match;
     const page = Number(url.searchParams.get("page") ?? "1");
     const perPage = Number(url.searchParams.get("per_page") ?? "30");
     if (fake.limit && !name) return Response.json({ message: "You have exceeded a secondary rate limit" }, { status: 429, headers: { "retry-after": String(fake.limit.retryAfter) } });
     if (kind === "pulls") {
+      fake.attemptsSeen.push((await env.DB.prepare("SELECT attempts FROM github_backfill_queue WHERE repo_id = ?").bind(REPO_ID).first<{ attempts: number }>())?.attempts ?? -1);
+      if (fake.down) return Response.json({ message: "Server Error" }, { status: 500 });
       const state = url.searchParams.get("state");
       fake.pullRequests.push(`${state} page ${page} ${url.searchParams.get("sort")} ${url.searchParams.get("direction")}`);
       const listed = fake.pulls
-        .filter((pull) => pull.state === state)
+        .filter((pull) => pull.state === state && (!pull.repo || pull.repo === full))
         .sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated))
         .slice((page - 1) * perPage, page * perPage);
       return Response.json(
@@ -349,5 +357,70 @@ describe("GitHub's rate limits", () => {
     await deliver("installation_repositories", { action: "added", installation: installation(), repositories_added: [], repositories_removed: [] });
     await backfillDone();
     expect(await prNumbers(board)).toEqual([1]);
+  });
+});
+
+describe("a repo whose backfill keeps failing", () => {
+  const attemptsOf = async () => (await env.DB.prepare("SELECT attempts FROM github_backfill_queue WHERE repo_id = ?").bind(REPO_ID).first<{ attempts: number }>())?.attempts;
+  const nudge = () => deliver("installation_repositories", { action: "added", installation: installation(), repositories_added: [], repositories_removed: [] });
+
+  it("counts each claim as an attempt, before any work, and gives up after five", async () => {
+    fake.down = true;
+    await install();
+    await expect.poll(attemptsOf).toBe(1);
+    // The claim had already counted the attempt when GitHub was first asked.
+    expect(fake.attemptsSeen[0]).toBe(1);
+
+    for (const attempt of [2, 3, 4]) {
+      await env.DB.exec("UPDATE github_backfill_queue SET run_after = 0");
+      await nudge();
+      await expect.poll(attemptsOf).toBe(attempt);
+    }
+    await env.DB.exec("UPDATE github_backfill_queue SET run_after = 0");
+    await nudge();
+    await backfillDone();
+  });
+
+  it("does not count a rate limit against the repo", async () => {
+    fake.limit = { retryAfter: 120 };
+    await install();
+    await expect.poll(async () => (await env.DB.prepare("SELECT run_after AS at FROM github_backfill_queue").first<{ at: number }>())?.at ?? 0).toBeGreaterThan(Date.now() + 110_000);
+    expect(await attemptsOf()).toBe(0);
+  });
+});
+
+describe("a repo too big for one drain's subrequests", () => {
+  const queue = async () => (await env.DB.prepare("SELECT repo_id AS id, attempts, run_after AS at FROM github_backfill_queue ORDER BY repo_id").all<{ id: number; attempts: number; at: number }>()).results;
+
+  it("is held like a failure and dropped after five attempts, and the repos behind it still run", async () => {
+    // Seven full pages of open PRs, a ceiling of six subrequests: the repo never fits. The small repo behind it needs five.
+    fake.pulls = Array.from({ length: 650 }, (_, index): FakePull => ({ number: index + 1, title: "open", state: "open", updated: daysAgo(100 + index / 100), repo: REPO_NAME }));
+    const SMALL_ID = 102;
+    // Storage is shared between tests: start from an empty queue, not the previous test's held repo.
+    await env.DB.exec("DELETE FROM github_backfill_queue");
+    await connectRepos(env, 7, [
+      { id: REPO_ID, fullName: REPO_NAME, private: false },
+      { id: SMALL_ID, fullName: `${OWNER}/small`, private: false },
+    ]);
+    await enqueueBackfill(env, [REPO_ID, SMALL_ID]);
+
+    await drainBackfill(env, 6);
+    const [big, small] = await queue();
+    expect(big).toMatchObject({ id: REPO_ID, attempts: 1 });
+    // Held with the failure delay, not due now: it cannot be claimed first again.
+    expect(big.at).toBeGreaterThan(Date.now() + 4 * 60_000);
+    expect(small).toMatchObject({ id: SMALL_ID, attempts: 0, at: 0 });
+
+    await drainBackfill(env, 6);
+    expect(await queue()).toEqual([expect.objectContaining({ id: REPO_ID, attempts: 1 })]);
+
+    for (const attempts of [2, 3, 4]) {
+      await env.DB.exec("UPDATE github_backfill_queue SET run_after = 0");
+      await drainBackfill(env, 6);
+      expect(await queue()).toEqual([expect.objectContaining({ id: REPO_ID, attempts })]);
+    }
+    await env.DB.exec("UPDATE github_backfill_queue SET run_after = 0");
+    await drainBackfill(env, 6);
+    expect(await queue()).toEqual([]);
   });
 });

@@ -68,15 +68,21 @@ export function columnRootCards(
   state: BoardState,
   columnId: string,
   hierarchy: SubtaskHierarchy,
+  cardsById: ReadonlyMap<string, Card> = new Map(state.cards.map((card) => [card.id, card])),
 ): Card[] {
-  return columnCards(state, columnId).filter(
-    (card) => !hierarchy.parentByChild.has(card.id) || state.cards.find(c => c.id === hierarchy.parentByChild.get(card.id))?.columnId !== card.columnId,
-  );
+  return columnCards(state, columnId).filter((card) => {
+    const parentId = hierarchy.parentByChild.get(card.id);
+    return parentId === undefined || cardsById.get(parentId)?.columnId !== card.columnId;
+  });
 }
 
 /** Ancestors that actually contain this row in the board's presentation. */
-export function boardAncestors(state: BoardState, hierarchy: SubtaskHierarchy, cardId: string): string[] {
-  const cards = new Map(state.cards.map(card => [card.id, card]));
+export function boardAncestors(
+  state: BoardState,
+  hierarchy: SubtaskHierarchy,
+  cardId: string,
+  cards: ReadonlyMap<string, Card> = new Map(state.cards.map((card) => [card.id, card])),
+): string[] {
   const ancestors: string[] = [];
   let childId = cardId;
   let parentId = hierarchy.parentByChild.get(childId);
@@ -209,16 +215,22 @@ export type CardLabelView = { id: string; assignmentIds: string[]; label: Label 
  * two rows since there is no UNIQUE constraint — renders once.
  */
 export function cardLabelViews(state: BoardState, cardId: string): CardLabelView[] {
+  return labelViews(
+    state.cardLabels.filter((join) => join.cardId === cardId),
+    new Map(state.labels.map((label) => [label.id, label])),
+  );
+}
+
+function labelViews(joins: readonly CardLabel[], labelsById: ReadonlyMap<string, Label>): CardLabelView[] {
   const seen = new Map<string, CardLabelView>();
   const views: CardLabelView[] = [];
-  for (const join of state.cardLabels) {
-    if (join.cardId !== cardId) continue;
+  for (const join of joins) {
     const existing = seen.get(join.labelId);
     if (existing) {
       existing.assignmentIds.push(join.id);
       continue;
     }
-    const label = state.labels.find((candidate) => candidate.id === join.labelId);
+    const label = labelsById.get(join.labelId);
     if (!label) continue;
     const view = { id: join.id, assignmentIds: [join.id], label };
     seen.set(join.labelId, view);
@@ -227,6 +239,78 @@ export function cardLabelViews(state: BoardState, cardId: string): CardLabelView
   return views.sort((a, b) =>
     a.label.name.toLocaleLowerCase().localeCompare(b.label.name.toLocaleLowerCase()),
   );
+}
+
+/** What one card front shows, aggregated from the board's flat arrays. */
+export type CardFaceData = {
+  checklistDone: number;
+  checklistTotal: number;
+  attachmentCount: number;
+  commentCount: number;
+  /** Relations naming this card whose both ends are active cards, in board order. */
+  relations: CardRelation[];
+  /** Name-sorted, like `cardLabelViews`. */
+  labels: Label[];
+};
+
+export type BoardIndex = {
+  cardsById: ReadonlyMap<string, Card>;
+  faces: ReadonlyMap<string, CardFaceData>;
+};
+
+const EMPTY_FACE: CardFaceData = {
+  checklistDone: 0,
+  checklistTotal: 0,
+  attachmentCount: 0,
+  commentCount: 0,
+  relations: [],
+  labels: [],
+};
+
+export const cardFace = (index: BoardIndex, cardId: string): CardFaceData =>
+  index.faces.get(cardId) ?? EMPTY_FACE;
+
+/**
+ * One pass over the board for everything a card face and the column layout look
+ * up per card, so a render is O(board) instead of O(cards x board). Build it
+ * once per board state; per card it answers what `cardChecklist`,
+ * `cardAttachments`, `activeCardComments`, `cardRelations` and `cardLabelViews`
+ * answer.
+ */
+export function buildBoardIndex(state: BoardState): BoardIndex {
+  const cardsById = new Map(state.cards.map((card) => [card.id, card]));
+  const faces = new Map<string, CardFaceData>();
+  const face = (cardId: string): CardFaceData => {
+    let data = faces.get(cardId);
+    if (!data) {
+      data = { ...EMPTY_FACE, relations: [], labels: [] };
+      faces.set(cardId, data);
+    }
+    return data;
+  };
+  for (const item of state.checklistItems) {
+    const data = face(item.cardId);
+    data.checklistTotal += 1;
+    if (item.done) data.checklistDone += 1;
+  }
+  for (const attachment of state.attachments) face(attachment.cardId).attachmentCount += 1;
+  for (const comment of state.comments) if (!comment.deleted) face(comment.cardId).commentCount += 1;
+  for (const relation of state.relations) {
+    if (!cardsById.has(relation.sourceCardId) || !cardsById.has(relation.targetCardId)) continue;
+    face(relation.sourceCardId).relations.push(relation);
+    if (relation.targetCardId !== relation.sourceCardId) face(relation.targetCardId).relations.push(relation);
+  }
+  const joinsByCard = new Map<string, CardLabel[]>();
+  for (const join of state.cardLabels) {
+    const joins = joinsByCard.get(join.cardId);
+    if (joins) joins.push(join);
+    else joinsByCard.set(join.cardId, [join]);
+  }
+  const labelsById = new Map(state.labels.map((label) => [label.id, label]));
+  for (const [cardId, joins] of joinsByCard) {
+    face(cardId).labels = labelViews(joins, labelsById).map((view) => view.label);
+  }
+  return { cardsById, faces };
 }
 
 const isCompleted = (state: Pick<BoardState, "columns">, columnId: string): boolean =>

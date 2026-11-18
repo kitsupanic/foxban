@@ -486,11 +486,30 @@ const inLinkLinkRenderer: Components["a"] = ({ node: _node, children, ...props }
   </MarkdownInLinkContext.Provider>
 );
 
+function isSameOrigin(src: string): boolean {
+  try {
+    return new URL(src, location.origin).origin === location.origin;
+  } catch {
+    return false;
+  }
+}
+
 const StableMarkdownImage: Components["img"] = ({ node: _node, src, alt, ...props }) => {
   const inLink = useContext(MarkdownInLinkContext);
   const { previewImages, onOpenImage } = useContext(MarkdownPreviewContext);
   const preview =
     !inLink && typeof src === "string" ? previewImages?.get(src) : undefined;
+  if (typeof src === "string" && !isSameOrigin(src)) {
+    // The CSP (public/_headers) would block it anyway; keep it reachable as a link.
+    const label = alt || src;
+    return inLink ? (
+      <span>{label}</span>
+    ) : (
+      <a href={src} target="_blank" rel="noreferrer">
+        {label}
+      </a>
+    );
+  }
   if (!preview || !onOpenImage) {
     return <img src={src} alt={alt} {...props} />;
   }

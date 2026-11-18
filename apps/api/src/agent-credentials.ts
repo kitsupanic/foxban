@@ -61,13 +61,14 @@ type CredentialRow = {
   revokedAt: number | null;
 };
 
-async function readBoundedBody(request: Request, limit: number): Promise<Uint8Array | null> {
+/** The request body, or null when it is (or declares itself) larger than `limit` bytes; stops reading at the limit. */
+export async function readBoundedBody(request: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
   const declared = request.headers.get("content-length");
   if (declared !== null) {
     const size = Number(declared);
     if (Number.isFinite(size) && size > limit) return null;
   }
-  if (request.body === null) return new Uint8Array();
+  if (request.body === null) return new Uint8Array(0);
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -95,15 +96,21 @@ async function readBoundedBody(request: Request, limit: number): Promise<Uint8Ar
 }
 
 
-function parseMetadata(row: CredentialRow): CredentialMetadata | null {
+/** The board ids and scopes a credential row holds, or null when the stored JSON is not a valid grant. */
+function parseGrants(boardIdsJson: string, scopesJson: string): { boardIds: string[]; scopes: AgentScope[] } | null {
   try {
-    const boardIds = PersistedStringArraySchema.max(100).parse(JSON.parse(row.boardIdsJson));
-    const scopes = z.array(AgentScopeSchema).min(1).max(3).parse(JSON.parse(row.scopesJson));
+    const boardIds = PersistedStringArraySchema.max(100).parse(JSON.parse(boardIdsJson));
+    const scopes = z.array(AgentScopeSchema).min(1).max(3).parse(JSON.parse(scopesJson));
     if (new Set(boardIds).size !== boardIds.length || new Set(scopes).size !== scopes.length) return null;
-    return { id: row.id, name: row.name, boardIds, scopes, createdAt: row.createdAt, expiresAt: row.expiresAt, revokedAt: row.revokedAt };
+    return { boardIds, scopes };
   } catch {
     return null;
   }
+}
+
+function parseMetadata(row: CredentialRow): CredentialMetadata | null {
+  const grants = parseGrants(row.boardIdsJson, row.scopesJson);
+  return grants && { id: row.id, name: row.name, ...grants, createdAt: row.createdAt, expiresAt: row.expiresAt, revokedAt: row.revokedAt };
 }
 
 export async function authenticateAgentCredential(env: Env, authorization: string | null): Promise<AgentPrincipal | null> {
@@ -124,20 +131,15 @@ export async function authenticateAgentCredential(env: Env, authorization: strin
     credentialId: string; boardIdsJson: string; scopesJson: string; expiresAt: number; revokedAt: number | null;
   }>();
   if (!row || row.revokedAt !== null || row.expiresAt <= Date.now()) return null;
-  try {
-    const boardIds = PersistedStringArraySchema.max(100).parse(JSON.parse(row.boardIdsJson));
-    const scopes = z.array(AgentScopeSchema).min(1).max(3).parse(JSON.parse(row.scopesJson));
-    if (new Set(boardIds).size !== boardIds.length || new Set(scopes).size !== scopes.length) return null;
-    return {
-      user: toSessionUser({ id: row.id, email: row.email, name: row.name, githubLogin: row.githubLogin, avatarVersion: row.avatarVersion, timezone: row.timezone, hasPassword: row.hasPassword }),
-      credentialId: row.credentialId,
-      boardIds: Object.freeze([...boardIds]),
-      scopes: Object.freeze([...scopes]),
-      expiresAt: row.expiresAt,
-    };
-  } catch {
-    return null;
-  }
+  const grants = parseGrants(row.boardIdsJson, row.scopesJson);
+  if (grants === null) return null;
+  return {
+    user: toSessionUser({ id: row.id, email: row.email, name: row.name, githubLogin: row.githubLogin, avatarVersion: row.avatarVersion, timezone: row.timezone, hasPassword: row.hasPassword }),
+    credentialId: row.credentialId,
+    boardIds: Object.freeze([...grants.boardIds]),
+    scopes: Object.freeze([...grants.scopes]),
+    expiresAt: row.expiresAt,
+  };
 }
 
 export const agentCredentialsRouter = new Hono<AppEnv>()
