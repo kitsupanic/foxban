@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test";
 import {
-  activeCardComments,
   buildBoardIndex,
   cardAttachments,
   cardChecklist,
@@ -29,6 +28,8 @@ const state = {
     { id: "m2", cardId: "a", createdAt: 2, deleted: true },
     { id: "m3", cardId: "b", createdAt: 3, deleted: false },
   ],
+  // The faces count from the snapshot's counts, not the comment cache (ADR 0078): "b" has more than are loaded.
+  commentCounts: { a: 1, b: 4 },
   relations: [
     { id: "r1", sourceCardId: "a", targetCardId: "b", kind: "blocks" },
     { id: "r2", sourceCardId: "b", targetCardId: "gone", kind: "relates" },
@@ -55,7 +56,7 @@ test("the board index matches the per-card helpers for every card", () => {
     expect(face.checklistTotal).toBe(items.length);
     expect(face.checklistDone).toBe(items.filter((item) => item.done).length);
     expect(face.attachmentCount).toBe(cardAttachments(state, id).length);
-    expect(face.commentCount).toBe(activeCardComments(state, id).length);
+    expect(face.commentCount).toBe(state.commentCounts[id] ?? 0);
     expect(face.relations).toEqual(cardRelations(state, id, activeIds));
     expect(face.labels).toEqual(cardLabelViews(state, id).map((view) => view.label));
     expect(index.cardsById.get(id)?.id).toBe(id);

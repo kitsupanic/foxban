@@ -729,6 +729,13 @@ describe("boards and membership", () => {
     expect(version11Res.status).toBe(409);
     expect(await version11Res.json()).toEqual({ error: "realtime client update required" });
 
+    // Version 13 dropped `comments` from the snapshot, which a version 12 client still expects (ADR 0078).
+    const version12Res = await get(`/boards/${boardId}/ws?realtimeVersion=12`, owner, {
+      Upgrade: "websocket",
+    });
+    expect(version12Res.status).toBe(409);
+    expect(await version12Res.json()).toEqual({ error: "realtime client update required" });
+
     // Precedence: unauthenticated caller gets 401 even with wrong or missing version
     const unauthWrong = await get(`/boards/${boardId}/ws?realtimeVersion=999`, undefined, {
       Upgrade: "websocket",
@@ -816,10 +823,27 @@ describe("boards and membership", () => {
       ],
     });
 
-    // The snapshot carries no history (ADR 0073): a card's own read does, for members only.
+    socket.send(
+      JSON.stringify({
+        type: "comment.create",
+        mutationId: "actor-comment",
+        id: "comment-1",
+        cardId: "card-1",
+        authorId: userId,
+        parentCommentId: null,
+        body: "Noted",
+        createdAt: Date.now(),
+      }),
+    );
+    await expect.poll(() => frames.some((frame) => frame.type === "comment.create")).toBe(true);
+
+    // The snapshot carries no history (ADR 0073) and no comments (ADR 0078): a card's own reads do, for members only.
     const history = await get(`/boards/${boardId}/cards/card-1/activity`, cookie);
     expect(history.status).toBe(200);
     expect(await history.json()).toMatchObject({ activities: [{ cardId: "card-1", actorId: userId, detail: { type: "card.created" } }] });
+    const comments = await get(`/boards/${boardId}/cards/card-1/comments`, cookie);
+    expect(comments.status).toBe(200);
+    expect(await comments.json()).toMatchObject({ comments: [{ id: "comment-1", cardId: "card-1", authorId: userId, body: "Noted", deleted: false }] });
     const reconnected = await get(`/boards/${boardId}/ws?realtimeVersion=${REALTIME_PROTOCOL_VERSION}`, cookie, { Upgrade: "websocket" });
     const snapshot = await new Promise<Record<string, unknown>>((resolve) => {
       reconnected.webSocket!.addEventListener("message", (event: MessageEvent) => resolve(JSON.parse(event.data as string)), { once: true });
@@ -827,10 +851,14 @@ describe("boards and membership", () => {
     });
     expect(snapshot).toMatchObject({ type: "snapshot", cards: [{ id: "card-1" }] });
     expect(snapshot).not.toHaveProperty("activities");
+    expect(snapshot).not.toHaveProperty("comments");
+    expect(snapshot).toMatchObject({ commentCounts: { "card-1": 1 } });
     reconnected.webSocket!.close(1000, "test finished");
     const stranger = await signupWithInvite("activity-stranger@user.test", await mintInvite(cookie));
     expect((await get(`/boards/${boardId}/cards/card-1/activity`, stranger)).status).toBe(403);
     expect((await get(`/boards/${boardId}/cards/card-1/activity`)).status).toBe(401);
+    expect((await get(`/boards/${boardId}/cards/card-1/comments`, stranger)).status).toBe(403);
+    expect((await get(`/boards/${boardId}/cards/card-1/comments`)).status).toBe(401);
     socket.close(1000, "test finished");
   });
 

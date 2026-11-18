@@ -213,7 +213,7 @@ test("a comment renders its Markdown, edits in place, badges the card and surviv
   await expect(card.getByTestId("comment-badge")).toHaveText("1");
   await expect(card.getByTestId("comment-badge")).toHaveAttribute("aria-label", "1 comment");
 
-  // Reopening reads the comment back off the snapshot, not the local cache.
+  // Reloading reads the comment back from the server (the card's comments read, ADR 0078), not the local cache.
   await page.reload();
   await cardIn(columnByTitle(page, "Todo"), "comment card").click();
   await expect(

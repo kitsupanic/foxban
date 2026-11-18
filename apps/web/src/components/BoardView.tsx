@@ -138,6 +138,7 @@ export function BoardView({
     sendMutation,
     subscribeMutation,
     retireTrackedMutation,
+    cardCommentsQuery,
   } = useBoardSocket(boardId, {
     accessChangePending,
     accessCheckedAt,
@@ -371,6 +372,8 @@ export function BoardView({
     cardParam !== undefined && state
       ? cardForTaskKey(state.cards, meta.key, cardParam)
       : undefined;
+  // The open card's comments are read on open (ADR 0078); a reconnect snapshot invalidates and rereads them.
+  useQuery({ ...cardCommentsQuery(openCard?.id ?? ""), enabled: openCard !== undefined });
   const columnToDelete =
     canManageColumns && columnDeleteId !== null && state
       ? state.columns.find((candidate) => candidate.id === columnDeleteId)

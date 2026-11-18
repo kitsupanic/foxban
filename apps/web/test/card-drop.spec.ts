@@ -10,7 +10,7 @@ function fixture() {
     // Keys deliberately interleave while the board groups P,C1,C2 then R.
     cards: [card("P", "a0"), card("R", "a2"), card("C1", "a4"), card("C2", "a6"), card("return", "a8", "work"), card("G", "a9")],
     relations: [{ id: "r1", kind: "subtask", sourceCardId: "P", targetCardId: "C1" }, { id: "r2", kind: "subtask", sourceCardId: "P", targetCardId: "C2" }, { id: "r3", kind: "subtask", sourceCardId: "P", targetCardId: "return" }, { id: "r4", kind: "subtask", sourceCardId: "C2", targetCardId: "G" }],
-    archivedCards: [], checklistItems: [], attachments: [], comments: [], labels: [], cardLabels: [],
+    archivedCards: [], checklistItems: [], attachments: [], comments: [], commentCounts: {}, labels: [], cardLabels: [],
   };
   return { state, hierarchy: buildSubtaskHierarchy(state.cards, state.relations) };
 }

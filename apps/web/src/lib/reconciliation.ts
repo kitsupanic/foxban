@@ -1,4 +1,4 @@
-import type { ClientMessage, ServerMessage } from "@foxban/shared";
+import type { ClientMessage, Comment, ServerMessage } from "@foxban/shared";
 import {
   applyMutation,
   applyRebalancedPositions,
@@ -18,8 +18,14 @@ export type ServerMessageOutcome = {
   rolledBackMutationId?: string;
 };
 
+/**
+ * A snapshot carries comment counts, not comments (ADR 0078): the comments already
+ * read are `carried` over until the next read of their card replaces them, so an
+ * open card's thread does not blank out on a reconnect.
+ */
 export function extractBoardState(
   snapshot: BoardState | (ServerMessage & { type: "snapshot" }),
+  carried: Comment[] = [],
 ): BoardState {
   return {
     workflowRolesExplicit: snapshot.workflowRolesExplicit,
@@ -28,7 +34,8 @@ export function extractBoardState(
     archivedCards: snapshot.archivedCards,
     checklistItems: snapshot.checklistItems,
     attachments: snapshot.attachments,
-    comments: snapshot.comments,
+    comments: "comments" in snapshot ? snapshot.comments : carried,
+    commentCounts: snapshot.commentCounts,
     relations: snapshot.relations,
     labels: snapshot.labels,
     cardLabels: snapshot.cardLabels,
@@ -66,7 +73,7 @@ export class BoardReconciler {
     cacheState: BoardState;
     settledPending: Array<{ entry: PendingMutation; presentInSnapshot: boolean }>;
   } {
-    const state = extractBoardState(snapshot);
+    const state = extractBoardState(snapshot, this.baseState?.comments);
     const settledPending: Array<{ entry: PendingMutation; presentInSnapshot: boolean }> = [];
     for (const entry of this.pending.values()) {
       const present = isMutationPresentInBoardState(state, entry.msg);
@@ -80,6 +87,19 @@ export class BoardReconciler {
   resetSnapshot(snapshot: BoardState | (ServerMessage & { type: "snapshot" })): BoardState {
     return this.applySnapshot(snapshot).cacheState;
   }
+  /**
+   * Replaces one card's cached comments with a fresh read (ADR 0078) and returns the
+   * cache state; counts are untouched, they come from the snapshot and frames only.
+   */
+  installCardComments(cardId: string, comments: readonly Comment[]): BoardState | null {
+    if (!this.baseState) return null;
+    this.baseState = {
+      ...this.baseState,
+      comments: [...this.baseState.comments.filter((comment) => comment.cardId !== cardId), ...comments],
+    };
+    return this.getCacheState();
+  }
+
   /**
    * Optimistically enqueues a client mutation.
    * Derives and returns the updated cache state with the mutation applied.
@@ -111,7 +131,7 @@ export class BoardReconciler {
   applyServerMessage(msg: ServerMessage): ServerMessageOutcome {
     if (msg.type === "snapshot") {
       this.pending.clear();
-      this.baseState = extractBoardState(msg);
+      this.baseState = extractBoardState(msg, this.baseState?.comments);
       return {
         cacheState: this.baseState,
         ackedMutationIds: [],

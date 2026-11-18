@@ -381,7 +381,7 @@ export function CardActivity({
                             size="icon-sm"
                             aria-label="Delete comment"
                             disabled={editingCommentId === c.id}
-                            onClick={() => commands.deleteComment(c.id)}
+                            onClick={() => commands.deleteComment(c.id, c.cardId)}
                             className="size-7 pointer-coarse:size-11 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
                           >
                             <X aria-hidden className="size-3.5" />

@@ -53,6 +53,7 @@ import {
   deleteCards,
   endColumns,
   markRolesExplicit,
+  readCardComments,
   rolesExplicit,
   runMutation,
   setWorkflowRoles,
@@ -1024,6 +1025,7 @@ export class BoardDO extends DurableObject<Env> {
     boardDevelopment: () => Response.json({ cards: readBoardPullRequests(this.ctx.storage.sql) } satisfies BoardDevelopment),
     cardDevelopment: ({ params }) => this.readCardDevelopment(params.cardId),
     cardActivity: ({ params }) => Response.json({ activities: readCardActivities(this.ctx.storage.sql, params.cardId) }),
+    cardComments: ({ params }) => Response.json({ comments: readCardComments(this.ctx.storage.sql, params.cardId) }),
     pullRequestWrite: ({ boardId }, input) => this.acceptPullRequestWrite(boardId, input),
     branchWrite: ({ boardId }, input) => this.acceptBranchWrite(boardId, input),
     attachmentKey: ({ params }) => this.readAttachmentKey(params.attachmentId),
@@ -1851,30 +1853,7 @@ export class BoardDO extends DurableObject<Env> {
           )
           .toArray();
 
-        const comments = sql
-          .exec<{
-            id: string;
-            cardId: string;
-            authorId: string;
-            parentCommentId: string | null;
-            deleted: number;
-            body: string;
-            createdAt: number;
-            updatedAt: number;
-          }>(
-            `SELECT id, card_id AS cardId, author_id AS authorId,
-                    parent_comment_id AS parentCommentId, deleted, body,
-                    created_at AS createdAt, updated_at AS updatedAt
-               FROM comments
-              WHERE card_id = ?
-              ORDER BY created_at, id`,
-            cardId,
-           )
-          .toArray()
-          .map((c) => ({
-            ...c,
-            deleted: c.deleted === 1,
-          }));
+        const comments = readCardComments(sql, cardId);
 
         const activities = sql
           .exec<{
@@ -3848,27 +3827,15 @@ export class BoardDO extends DurableObject<Env> {
            FROM attachments`,
         )
         .toArray(),
-      comments: sql
-        .exec<{
-          id: string;
-          cardId: string;
-          authorId: string;
-          parentCommentId: string | null;
-          deleted: number;
-          body: string;
-          createdAt: number;
-          updatedAt: number;
-        }>(
-          `SELECT id, card_id AS cardId, author_id AS authorId,
-                  parent_comment_id AS parentCommentId, deleted, body,
-                  created_at AS createdAt, updated_at AS updatedAt
-           FROM comments`,
-        )
-        .toArray()
-        .map((c) => ({
-          ...c,
-          deleted: c.deleted === 1,
-        })),
+      // Counts, not bodies: a card's comments are read when it is opened (ADR 0078).
+      commentCounts: Object.fromEntries(
+        sql
+          .exec<{ cardId: string; count: number }>(
+            "SELECT card_id AS cardId, COUNT(*) AS count FROM comments WHERE deleted = 0 GROUP BY card_id",
+          )
+          .toArray()
+          .map(({ cardId, count }) => [cardId, count]),
+      ),
       relations: sql
         .exec<CardRelation>(
           `SELECT id, source_card_id AS sourceCardId, target_card_id AS targetCardId, kind
