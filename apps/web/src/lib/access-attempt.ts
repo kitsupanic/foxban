@@ -410,6 +410,8 @@ export const BOARD_ACCESS_DENIED_CLOSE = 4003;
 const FAILED_SYNCHRONIZATION_LIMIT = 3;
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 8_000;
+/** A socket that held a validated snapshot this long resets its backoff and failure budget. */
+export const STABLE_CONNECTION_MS = 10_000;
 
 export type BoardReconnectPlan = {
   mode: "denied" | "transition" | "transport" | "stopped";

@@ -42,7 +42,7 @@ async function signup(email: string, invite?: string): Promise<string> {
   return response.headers.get("set-cookie")!.split(";")[0]!;
 }
 
-/** `*@foxban.test` is an instance Admin (an Operator), which would mask a workspace role. */
+/** A signup on `@foxban.test` is an instance Admin (admin-signups.ts) (an Operator), which would mask a workspace role. */
 let operator: string;
 beforeAll(async () => {
   operator = await signup(`operator-${crypto.randomUUID()}@foxban.test`);

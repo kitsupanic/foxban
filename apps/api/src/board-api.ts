@@ -65,7 +65,6 @@ export const BRANCH_WRITE_PATH = "/internal/github/branch";
 export const BOARD_DEVELOPMENT_PATH = "/internal/development";
 export const STAGE_ATTACHMENT_PATH = "/internal/attachments/stage";
 export const RECONCILE_ATTACHMENTS_PATH = "/internal/attachments/reconcile";
-export const CHECK_ATTACHMENT_OWNERSHIP_PATH = "/internal/attachments/ownership";
 export const CARD_TRANSFER_OPTIONS_PATH = "/internal/card-transfer/options";
 export const CARD_TRANSFER_PREPARE_PATH = "/internal/card-transfer/prepare";
 export const CARD_TRANSFER_IMPORT_PATH = "/internal/card-transfer/import";
@@ -215,7 +214,6 @@ const AccessOperationSchema = z.looseObject({ operationId: z.string(), generatio
 /** Any JSON object: the reconcile body is read leniently, entry by entry. */
 const ReconcileBodySchema = z.custom<Record<string, unknown>>((value) => typeof value === "object" && value !== null);
 const StageAttachmentSchema = z.looseObject({ id: z.string().regex(ATTACHMENT_ID), objectKey: z.unknown().optional() });
-const AttachmentOwnershipSchema = z.looseObject({ ids: z.array(z.string().regex(ATTACHMENT_ID)).max(1000) });
 
 type Method = "GET" | "POST" | "DELETE";
 export type Gate = "fence" | "settlement" | "cleanup" | "open" | "protected";
@@ -296,10 +294,6 @@ export const boardRoutes = {
     input: BranchWriteSchema, invalid: invalidText("invalid branch write"),
   }),
   attachmentKey: route({ path: ATTACHMENT_KEY_PATH, methods: ["GET"], gate: "open", stamp: true }),
-  attachmentOwnership: bodyRoute({
-    path: CHECK_ATTACHMENT_OWNERSHIP_PATH, methods: ["POST"], gate: "open", stamp: true,
-    input: AttachmentOwnershipSchema, invalid: invalidText("invalid attachment ids"),
-  }),
   transferOptions: route({ path: CARD_TRANSFER_OPTIONS_PATH, methods: ["POST"], gate: "open", stamp: true }),
 
   mcpBoard: bodyRoute({

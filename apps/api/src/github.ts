@@ -1,6 +1,7 @@
 /**
  * GitHub App JWT signing and REST API helpers using WebCrypto (no Node APIs).
  */
+import type { DevelopmentPullRequest } from "@foxban/shared";
 
 export interface GitHubRepositoryRef {
   id: number;
@@ -20,7 +21,7 @@ export interface GitHubBranchRef {
 export interface GitHubPullRequestRef {
   number: number;
   url: string;
-  state: "open" | "closed" | "merged";
+  state: DevelopmentPullRequest["state"];
   merged: boolean;
   draft: boolean;
   htmlUrl: string;
@@ -543,7 +544,7 @@ function parsePullRequestPayload(
     number,
     url,
     htmlUrl: url,
-    state: normalizePullRequestState(state, merged ? mergedAt : null),
+    state: pullRequestState({ state, draft: draft === true, merged_at: merged ? mergedAt : null }),
     merged,
     draft: draft === true,
   };
@@ -576,16 +577,14 @@ export async function getPullRequestForBranch(
 }
 
 /**
- * GitHub reports a merged pull request as `closed`, so `merged_at` decides the
- * state before `state` does. A draft stays `open`: this feature renders three
- * states, not four. One mapping for creation, discovery and by-number reads.
+ * GitHub reports a merged pull request as `closed`, so `merged`/`merged_at` decide the
+ * state before `state` does; an open draft is `draft`. One mapping for webhooks,
+ * creation, discovery and by-number reads.
  */
-export function normalizePullRequestState(
-  state: string,
-  mergedAt: string | null,
-): "open" | "closed" | "merged" {
-  if (mergedAt) return "merged";
-  return state === "open" ? "open" : "closed";
+export function pullRequestState(pr: { state: "open" | "closed"; draft?: boolean; merged?: boolean; merged_at?: string | null }): DevelopmentPullRequest["state"] {
+  if (pr.merged === true || pr.merged_at) return "merged";
+  if (pr.state === "closed") return "closed";
+  return pr.draft === true ? "draft" : "open";
 }
 
 /** A parsed pull request reference: bare numbers have no owner/repository of their own. */

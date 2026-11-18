@@ -452,11 +452,13 @@ describe("boards and membership", () => {
     const membersJson = await membersListRes.json<{ members: Array<{ id: string }> }>();
     expect(membersJson.members.some((m) => m.id === memberId)).toBe(false);
 
-    // 8. Removed member reappears in candidates
+    // 8. Removed member is not in the workspace's candidate list (they never were in the workspace), and an exact email finds them again
     const candidatesAfter = await get(`/boards/${boardId}/membership-candidates`, owner);
     expect(candidatesAfter.status).toBe(200);
     const candsAfterJson = await candidatesAfter.json<{ candidates: Array<{ id: string }> }>();
-    expect(candsAfterJson.candidates.some((c) => c.id === memberId)).toBe(true);
+    expect(candsAfterJson.candidates.some((c) => c.id === memberId)).toBe(false);
+    const lookup = await get(`/boards/${boardId}/membership-candidates?email=member-to-remove%40user.test`, owner);
+    expect((await lookup.json<{ candidates: Array<{ id: string }> }>()).candidates.map((c) => c.id)).toEqual([memberId]);
   });
   it("normalizes board keys, rejects invalid keys, and rejects duplicate keys with 409", async () => {
     const owner = await signup("board-keys@foxban.test");
@@ -857,6 +859,12 @@ describe("boards and membership", () => {
     const stranger = await signupWithInvite("stranger-cand@user.test", invite4, "Stranger Cand");
 
     const boardId = await createBoard(owner, "Candidate Filtering Board");
+    // The list is the board's workspace: these three are in it, the stranger is not (ADR 0072).
+    const workspaceId = await firstWorkspaceId(owner);
+    await env.DB.prepare(
+      `INSERT INTO workspace_members(workspace_id,user_id,role,created_at,updated_at)
+       SELECT ?,id,'member',0,0 FROM users WHERE email IN ('alice@user.test','bob.z@user.test','bob.a@user.test')`,
+    ).bind(workspaceId).run();
 
     // 1. Unauthenticated request rejected with 401
     const unauthRes = await get(`/boards/${boardId}/membership-candidates`);
@@ -886,13 +894,11 @@ describe("boards and membership", () => {
     }
 
     // Find our specific test users in the candidates list and verify deterministic sorting (name ASC, email ASC)
-    const relevantEmails = ["alice@user.test", "bob.a@user.test", "bob.z@user.test", "stranger-cand@user.test"];
-    const relevantCandidates = initialBody.candidates.filter((c) => relevantEmails.includes(c.email));
-    expect(relevantCandidates.map((c) => ({ name: c.name, email: c.email }))).toEqual([
+    // Only the workspace's people are listed: no other account, whoever else is registered.
+    expect(initialBody.candidates.map((c) => ({ name: c.name, email: c.email }))).toEqual([
       { name: "Alice Candidate", email: "alice@user.test" },
       { name: "Bob SameName", email: "bob.a@user.test" },
       { name: "Bob SameName", email: "bob.z@user.test" },
-      { name: "Stranger Cand", email: "stranger-cand@user.test" },
     ]);
 
     // 4. Adding a user by userId removes them from candidates and grants board access
@@ -914,6 +920,39 @@ describe("boards and membership", () => {
     expect(afterAddRes.status).toBe(200);
     const afterAddBody = await afterAddRes.json<{ candidates: Array<{ id: string }> }>();
     expect(afterAddBody.candidates.some((c) => c.id === aliceId)).toBe(false);
+  });
+
+  it("finds a person outside the workspace only by their exact email, and never lists them", async () => {
+    const owner = await signup("owner-lookup@foxban.test", "Owner Lookup");
+    const outsider = await signupWithInvite("outsider-lookup@user.test", await mintInvite(owner), "Outsider Lookup");
+    const outsiderId = await getUserId(outsider);
+    const boardId = await createBoard(owner, "Lookup Board");
+    const candidates = async (query: string, who = owner) => {
+      const response = await get(`/boards/${boardId}/membership-candidates${query}`, who);
+      expect(response.status).toBe(200);
+      return (await response.json<{ candidates: Array<{ id: string; email: string }> }>()).candidates;
+    };
+
+    // Not in the list, though they are registered.
+    expect((await candidates("")).map((c) => c.email)).not.toContain("outsider-lookup@user.test");
+
+    // The exact address finds exactly that account, whatever its case or padding, with the public identity fields only.
+    for (const typed of ["outsider-lookup@user.test", "Outsider-Lookup@User.Test", " outsider-lookup@user.test "]) {
+      const found = await candidates(`?email=${encodeURIComponent(typed)}`);
+      expect(found).toEqual([{ id: outsiderId, email: "outsider-lookup@user.test", name: "Outsider Lookup", githubLogin: null, avatarVersion: null }]);
+    }
+
+    // A partial address, a bare domain, a wildcard and an unknown address find nothing.
+    for (const typed of ["outsider-lookup", "outsider-lookup@", "@user.test", "outsider-lookup@user", "%@user.test", "*@user.test", "nobody-at-all@user.test", ""]) {
+      expect(await candidates(`?email=${encodeURIComponent(typed)}`), typed).toEqual([]);
+    }
+
+    // Who holds a grant already is not offered again, and the lookup is as guarded as the list.
+    expect((await post(`/boards/${boardId}/members`, { userId: outsiderId }, owner)).status).toBe(200);
+    expect(await candidates("?email=outsider-lookup%40user.test")).toEqual([]);
+    expect((await get(`/boards/${boardId}/membership-candidates?email=owner-lookup%40foxban.test`)).status).toBe(401);
+    const stranger = await signupWithInvite("lookup-stranger@user.test", await mintInvite(owner), "Lookup Stranger");
+    expect((await get(`/boards/${boardId}/membership-candidates?email=owner-lookup%40foxban.test`, stranger)).status).toBe(403);
   });
 });
 
@@ -1347,6 +1386,8 @@ describe("profile", () => {
     expect((await post("/auth/login", { email: "admin-rejections@foxban.test", password: PASSWORD })).status).toBe(200);
     expect((await get("/invites", admin)).status).toBe(200);
 
+    // Only a listed address is an admin address, so this one is listed: the change would be a promotion.
+    env.ADMIN_EMAILS += ",promoted@foxban.test";
     const promote = await post(
       "/auth/email",
       { email: "promoted@foxban.test", currentPassword: PASSWORD },
@@ -1879,7 +1920,8 @@ describe("sign up with GitHub", () => {
   });
 
   it("never makes a GitHub account an Admin, even when its GitHub address is on the admin list, and still needs the invite", async () => {
-    // `*@foxban.test` is the suite's admin list (vitest.config.ts).
+    // These addresses are on the admin list, as exact entries.
+    env.ADMIN_EMAILS += ",boss@foxban.test,boss-again@foxban.test";
     approves("boss", { id: 710040, login: "boss-login" }, githubEmail("boss@foxban.test"));
     const callback = await logInWithGitHub("boss", undefined, await mintInvite(admin));
     const session = signedInCookie(callback)!;
@@ -1899,7 +1941,7 @@ describe("sign up with GitHub", () => {
 
   it("refuses, and creates nothing, when even the no-reply address would be an Admin's", async () => {
     const configured = env.ADMIN_EMAILS;
-    env.ADMIN_EMAILS = `${configured}, *@users.noreply.github.com`;
+    env.ADMIN_EMAILS = `${configured}, doomed@foxban.test, 710042+doomed@users.noreply.github.com`;
     try {
       const invite = await mintInvite(admin);
       // The address on GitHub is on the list, and so is the no-reply fallback it would be given instead.
@@ -2768,6 +2810,10 @@ describe("user avatar endpoints and lifecycle", () => {
     // Candidates projection reflects avatarVersion
     const otherOwner = await signup("candidate-board-owner@foxban.test");
     const candBoardId = await createBoard(otherOwner, "Cand Board");
+    // Candidates are the board's workspace members, so the avatar's owner joins that workspace.
+    await env.DB.prepare("INSERT INTO workspace_members(workspace_id,user_id,role,created_at,updated_at) VALUES(?,?,'member',0,0)")
+      .bind(await firstWorkspaceId(otherOwner), userId)
+      .run();
     const candRes = await get(`/boards/${candBoardId}/membership-candidates`, otherOwner);
     expect(candRes.status).toBe(200);
     const candData = await candRes.json<{ candidates: Array<{ id: string; avatarVersion: string | null }> }>();

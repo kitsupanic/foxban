@@ -43,6 +43,37 @@ describe("mutation pipeline", () => {
       expect(sql.exec<{ task_number: number }>("SELECT task_number FROM cards WHERE id = 'new'").one().task_number).toBe(5);
     }));
 
+  it("refuses a child row for a card that is gone and writes nothing", () =>
+    onBoard((sql, run) => {
+      // A finalized transfer deletes the card without a trace the gate reads, so this is the only fence between a late write and an orphan.
+      seedCard(sql, "live", 1);
+      const lateWrites = [
+        { type: "checklist.create", mutationId: "m1", id: "item", cardId: "gone", text: "Late", position: "a" },
+        { type: "comment.create", mutationId: "m2", id: "note", cardId: "gone", authorId: "u1", parentCommentId: null, body: "Late", createdAt: 1 },
+        { type: "label.assign", mutationId: "m3", id: "join", cardId: "gone", labelId: "label" },
+        { type: "relation.create", mutationId: "m4", id: "rel-target", sourceCardId: "live", targetCardId: "gone", kind: "blocks" },
+        { type: "relation.create", mutationId: "m5", id: "rel-source", sourceCardId: "gone", targetCardId: "live", kind: "relates" },
+      ];
+      for (const write of lateWrites) expect(() => run(write)).toThrow("card is unavailable");
+      expect(["checklist_items", "comments", "card_labels", "card_relations", "activities"].map((table) => count(sql, table))).toEqual([0, 0, 0, 0, 0]);
+    }));
+
+  it("logs no history for an edit or a delete that finds the comment already deleted", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "p", 1);
+      const comment = (id: string, parentCommentId: string | null) =>
+        ({ type: "comment.create", mutationId: `create-${id}`, id, cardId: "p", authorId: "u1", parentCommentId, body: id, createdAt: 1 });
+      run(comment("root", null));
+      run(comment("reply", "root"));
+      // A root with a reply is kept as a tombstone, so later messages for it still find a row.
+      expect(run({ type: "comment.delete", mutationId: "d1", id: "root" }).activities.map(({ detail }) => detail)).toEqual([{ type: "comment.deleted" }]);
+      expect(run({ type: "comment.update", mutationId: "e1", id: "root", body: "late edit", updatedAt: 2 }).activities).toEqual([]);
+      expect(run({ type: "comment.delete", mutationId: "d2", id: "root" }).activities).toEqual([]);
+      expect(sql.exec<{ body: string }>("SELECT body FROM comments WHERE id = 'root'").one().body).toBe("");
+      // A live comment's edit is still history.
+      expect(run({ type: "comment.update", mutationId: "e2", id: "reply", body: "edit", updatedAt: 2 }).activities.map(({ detail }) => detail)).toEqual([{ type: "comment.edited" }]);
+    }));
+
   it("records no activities when an idempotent replay writes nothing", () =>
     onBoard((sql, run) => {
       seedCard(sql, "p", 1);

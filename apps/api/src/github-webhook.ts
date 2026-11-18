@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readBoundedBody } from "./agent-credentials";
 import { loadInstanceGitHubApp } from "./github-app";
 import { GitHubApiError, getAppOwnerLogin } from "./github";
 import { drainBackfill } from "./github-backfill";
@@ -9,7 +10,7 @@ import { connectRepos, disconnectInstallation, disconnectRepos, enqueueBackfill,
 type InstanceApp = NonNullable<Awaited<ReturnType<typeof loadInstanceGitHubApp>>>;
 
 /** Checks GitHub's `X-Hub-Signature-256` (`sha256=` + hex HMAC-SHA256 of the raw body); the compare is constant-time. */
-async function verifySignature(secret: string, body: ArrayBuffer, header: string | null): Promise<boolean> {
+async function verifySignature(secret: string, body: Uint8Array<ArrayBuffer>, header: string | null): Promise<boolean> {
   const hex = /^sha256=([0-9a-f]{64})$/.exec(header ?? "")?.[1];
   if (!hex) return false;
   const mac = Uint8Array.from(hex.match(/../g)!, (byte) => Number.parseInt(byte, 16));
@@ -29,6 +30,9 @@ const InstallationEventSchema = z.object({
   repositories_added: z.array(RepoSchema).default([]),
   repositories_removed: z.array(RepoSchema).default([]),
 });
+
+/** GitHub's cap on a webhook payload. */
+const BODY_LIMIT = 25 * 1024 * 1024;
 
 type WebhookResult = "applied" | "ignored" | "accepted" | "dropped";
 
@@ -91,6 +95,24 @@ function dispatch(env: Env, app: InstanceApp, event: string | null, payload: unk
 }
 
 /**
+ * GitHub does not retry a failed delivery, so when a repo event fails mid-way its card
+ * would stay stale. Queue the repo for a backfill instead: the minute cron re-reads it
+ * (writes are idempotent). Only a connected repo is queued, and a failure here never
+ * hides the original error.
+ */
+async function repairLater(env: Env, event: string | null, payload: unknown): Promise<void> {
+  if (event !== "pull_request" && event !== "push" && event !== "create" && event !== "delete") return;
+  const parsed = z.object({ repository: z.object({ id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }) }).safeParse(payload);
+  if (!parsed.success) return;
+  const repoId = parsed.data.repository.id;
+  try {
+    if (await isConnectedRepo(env, repoId)) await enqueueBackfill(env, [repoId]);
+  } catch (error) {
+    console.warn("[github-webhook] could not queue a repair backfill:", error instanceof Error ? error.message : error);
+  }
+}
+
+/**
  * The public webhook route (ADR 0064). Nothing is parsed until the signature
  * over the raw body matches the decrypted webhook secret; an event that needs
  * no action still answers 2xx, because GitHub does not retry failed deliveries.
@@ -98,7 +120,8 @@ function dispatch(env: Env, app: InstanceApp, event: string | null, payload: unk
 export async function handleGitHubWebhook(env: Env, request: Request, ctx: Pick<ExecutionContext, "waitUntil">): Promise<Response> {
   const app = await loadInstanceGitHubApp(env);
   if (!app) return Response.json({ error: "no GitHub App" }, { status: 404 });
-  const body = await request.arrayBuffer();
+  const body = await readBoundedBody(request, BODY_LIMIT);
+  if (body === null) return Response.json({ error: "payload too large" }, { status: 413 });
   if (!(await verifySignature(app.webhookSecret, body, request.headers.get("x-hub-signature-256")))) {
     return Response.json({ error: "bad signature" }, { status: 401 });
   }
@@ -108,14 +131,15 @@ export async function handleGitHubWebhook(env: Env, request: Request, ctx: Pick<
   } catch {
     return Response.json({ error: "body is not JSON" }, { status: 400 });
   }
+  const event = request.headers.get("x-github-event");
   try {
-    const event = request.headers.get("x-github-event");
     const result = await dispatch(env, app, event, payload);
     // Connecting repos queued their backfill; it runs after the answer (GitHub allows 10 s), and the cron finishes what does not fit.
     if (event === "installation" || event === "installation_repositories") ctx.waitUntil(drainBackfill(env));
     return Response.json({ result });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: "unexpected payload" }, { status: 400 });
+    await repairLater(env, event, payload);
     if (error instanceof GitHubApiError) return Response.json({ error: "could not reach GitHub" }, { status: 502 });
     throw error;
   }

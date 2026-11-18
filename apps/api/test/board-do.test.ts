@@ -1710,6 +1710,7 @@ describe("BoardDO", () => {
     const board = "board-archived-readonly";
     const a = await connect(board);
     const b = await connect(board);
+    await seedIdentity(board, "user-9");
     await snapshotOf(a);
     await snapshotOf(b);
 
@@ -2249,6 +2250,8 @@ describe("BoardDO activity", () => {
     const board = "board-activity-card";
     const actorId = "actor-card";
     const a = await connect(board, actorId);
+    await seedIdentity(board, "user-a");
+    await seedIdentity(board, "user-b");
     await snapshotOf(a);
 
     a.send({
@@ -2696,28 +2699,22 @@ describe("BoardDO activity edge cases", () => {
       ]);
     }
 
-    expect(
-      (
-        await sendWithActivity(a, {
-          type: "relation.create",
-          mutationId: "activity-relation-missing-add",
-          id: "relation-missing",
-          sourceCardId: "card-1",
-          targetCardId: "deleted-card",
-          kind: "blocks",
-        })
-      ).map(({ cardId, detail }) => ({ cardId, detail })),
-    ).toEqual([
-      {
-        cardId: "card-1",
-        detail: {
-          type: "relation.added",
-          relationKind: "blocks",
-          side: "source",
-          otherCardTitle: "(deleted card)",
-        },
-      },
-    ]);
+    // A relation to a card that is gone is refused, so it cannot be created; a board written
+    // before that rule can still hold one, which the removal below reads as a placeholder.
+    a.send({
+      type: "relation.create",
+      mutationId: "activity-relation-missing-add",
+      id: "relation-missing",
+      sourceCardId: "card-1",
+      targetCardId: "deleted-card",
+      kind: "blocks",
+    });
+    expect((await awaitError(a, "activity-relation-missing-add")).message).toBe("card is unavailable");
+    await runInDurableObject(env.BOARD_DO.get(env.BOARD_DO.idFromName(board)), (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO card_relations(id, source_card_id, target_card_id, kind) VALUES ('relation-missing', 'card-1', 'deleted-card', 'blocks')",
+      );
+    });
     expect(
       (
         await sendWithActivity(a, {
@@ -2746,11 +2743,11 @@ describe("BoardDO activity edge cases", () => {
       targetCardId: "missing-target",
       kind: "relates",
     });
-    await awaitBroadcast(a, "activity-relation-both-missing");
+    await awaitError(a, "activity-relation-both-missing");
     const relationHistory = (await snapshotOf(await connect(board))).activities.filter(
       (activity) => activity.detail.type.startsWith("relation."),
     );
-    expect(relationHistory).toHaveLength(14);
+    expect(relationHistory).toHaveLength(13);
   });
 
   it("suppresses same-value, missing-row, and board-definition history", async () => {
@@ -2803,14 +2800,6 @@ describe("BoardDO activity edge cases", () => {
         mutationId: "missing-card-move",
         id: "missing-card",
         columnId: "missing-column",
-        position: "a0",
-      },
-      {
-        type: "checklist.create",
-        mutationId: "missing-checklist-card",
-        id: "orphan-item",
-        cardId: "missing-card",
-        text: "Orphan",
         position: "a0",
       },
       {
@@ -2873,13 +2862,6 @@ describe("BoardDO activity edge cases", () => {
         name: "Still no history",
       },
       {
-        type: "label.assign",
-        mutationId: "missing-label-card",
-        id: "orphan-join",
-        cardId: "missing-card",
-        labelId: "label-noop",
-      },
-      {
         type: "label.unassign",
         mutationId: "missing-label-unassign",
         id: "missing-join",
@@ -2888,14 +2870,6 @@ describe("BoardDO activity edge cases", () => {
         type: "label.delete",
         mutationId: "definition-label-delete",
         id: "label-noop",
-      },
-      {
-        type: "relation.create",
-        mutationId: "missing-relation-cards",
-        id: "orphan-relation",
-        sourceCardId: "missing-source",
-        targetCardId: "missing-target",
-        kind: "relates",
       },
       {
         type: "relation.delete",
@@ -2913,6 +2887,17 @@ describe("BoardDO activity edge cases", () => {
       await awaitBroadcast(a, message.mutationId);
     }
 
+    // A child row for a card that is gone is refused outright, never accepted as an orphan.
+    const orphans: ClientMessage[] = [
+      { type: "checklist.create", mutationId: "missing-checklist-card", id: "orphan-item", cardId: "missing-card", text: "Orphan", position: "a0" },
+      { type: "label.assign", mutationId: "missing-label-card", id: "orphan-join", cardId: "missing-card", labelId: "label-noop" },
+      { type: "relation.create", mutationId: "missing-relation-cards", id: "orphan-relation", sourceCardId: "missing-source", targetCardId: "missing-target", kind: "relates" },
+    ];
+    for (const message of orphans) {
+      a.send(message);
+      expect((await awaitError(a, message.mutationId)).message).toBe("card is unavailable");
+    }
+
     a.send({
       type: "card.create",
       mutationId: "duplicate-card-create",
@@ -2926,6 +2911,7 @@ describe("BoardDO activity edge cases", () => {
     const snapshot = await snapshotOf(await connect(board));
     expect(snapshot.activities.map(({ detail }) => detail)).toEqual([{ type: "card.created" }]);
     expect(snapshot.cards.find((card) => card.id === "card-1")?.title).toBe("Ship M7");
+    expect([snapshot.checklistItems, snapshot.cardLabels, snapshot.relations]).toEqual([[], [], []]);
   });
 
   it("preserves activity when card or column deletion archives a card", async () => {
@@ -3094,6 +3080,7 @@ describe("BoardDO card details", () => {
 
   it("carries the assignee in the snapshot and clears it on null", async () => {
     const a = await connect("board-assign");
+    await seedIdentity("board-assign", "user-7");
     await snapshotOf(a);
     await seedCard(a, "as");
 
@@ -3109,6 +3096,135 @@ describe("BoardDO card details", () => {
     await awaitBroadcast(a, "as-2");
     const cleared = await snapshotOf(await connect("board-assign"));
     expect(cleared.cards[0]).toMatchObject({ assigneeId: null });
+  });
+
+  it("refuses a socket assignment to someone who is not a board member, as MCP does", async () => {
+    const board = "board-assign-eligibility";
+    const a = await connect(board);
+    await seedIdentity(board, "assignee-member");
+    await snapshotOf(a);
+    await seedCard(a, "ae");
+
+    const notMember = "Assignee is not a board member.";
+    a.send({ type: "card.assign", mutationId: "ae-out", id: "card-1", assigneeId: "assignee-outsider" });
+    expect(await awaitError(a, "ae-out")).toEqual({ type: "error", mutationId: "ae-out", message: notMember });
+    a.send({
+      type: "card.create", mutationId: "ae-out-create", id: "card-2", columnId: "col-1", title: "Nope", position: "a1",
+      assigneeId: "assignee-outsider",
+    });
+    expect(await awaitError(a, "ae-out-create")).toEqual({ type: "error", mutationId: "ae-out-create", message: notMember });
+
+    // A member is accepted, and the message sent right after the assignment is not overtaken by it.
+    a.send({ type: "card.assign", mutationId: "ae-in", id: "card-1", assigneeId: "assignee-member" });
+    a.send({ type: "card.prioritize", mutationId: "ae-next", id: "card-1", priority: "high" });
+    await awaitBroadcast(a, "ae-in");
+    await awaitBroadcast(a, "ae-next");
+    // Unassigning needs no eligibility.
+    a.send({ type: "card.assign", mutationId: "ae-clear", id: "card-1", assigneeId: null });
+    await awaitBroadcast(a, "ae-clear");
+
+    // Eligibility is read when the message arrives, so a grant removed since is seen.
+    await env.DB.prepare("DELETE FROM board_members WHERE board_id=? AND user_id=?").bind(board, "assignee-member").run();
+    a.send({ type: "card.assign", mutationId: "ae-revoked", id: "card-1", assigneeId: "assignee-member" });
+    expect((await awaitError(a, "ae-revoked")).message).toBe(notMember);
+
+    const snapshot = await snapshotOf(await connect(board));
+    expect(snapshot.cards.map((card) => [card.id, card.assigneeId, card.priority])).toEqual([["card-1", null, "high"]]);
+  });
+
+  it("refuses a socket assignment on an archived card by the card's own state, before the assignee is read", async () => {
+    const board = "board-assign-archived-first";
+    const a = await connect(board);
+    await seedIdentity(board, "assignee-member");
+    await snapshotOf(a);
+    await seedCard(a, "aa");
+    a.send({ type: "column.delete", mutationId: "aa-archive", id: "col-1" });
+    await awaitBroadcast(a, "aa-archive");
+
+    // Were the assignee read first, an outsider would be refused as "not a board member".
+    a.send({ type: "card.assign", mutationId: "aa-out", id: "card-1", assigneeId: "assignee-outsider" });
+    expect(await awaitError(a, "aa-out")).toEqual({ type: "error", mutationId: "aa-out", message: "archived cards are read-only" });
+  });
+
+  it("refuses child rows for a card that is gone, and keeps no orphan", async () => {
+    const board = "board-orphan-children";
+    const a = await connect(board);
+    await snapshotOf(a);
+    await seedCard(a, "oc");
+    a.send({ type: "card.create", mutationId: "oc-card-2", id: "card-2", columnId: "col-1", title: "Stays", position: "a1" });
+    a.send({ type: "label.create", mutationId: "oc-label", id: "label-1", name: "Bug", color: "red" });
+    await awaitBroadcast(a, "oc-label");
+    // Archived and then purged, the row is gone: nothing the archived/locked gate can see.
+    a.send({ type: "card.delete", mutationId: "oc-del", id: "card-1" });
+    await awaitBroadcast(a, "oc-del");
+    a.send({ type: "card.purge", mutationId: "oc-purge", id: "card-1" });
+    await awaitBroadcast(a, "oc-purge");
+
+    const lateWrites: ClientMessage[] = [
+      { type: "checklist.create", mutationId: "oc-item", id: "item-1", cardId: "card-1", text: "Late", position: "a0" },
+      { type: "comment.create", mutationId: "oc-note", id: "note-1", cardId: "card-1", authorId: "u1", parentCommentId: null, body: "Late", createdAt: 1 },
+      { type: "label.assign", mutationId: "oc-join", id: "join-1", cardId: "card-1", labelId: "label-1" },
+      { type: "relation.create", mutationId: "oc-rel-source", id: "rel-1", sourceCardId: "card-1", targetCardId: "card-2", kind: "blocks" },
+      { type: "relation.create", mutationId: "oc-rel-target", id: "rel-2", sourceCardId: "card-2", targetCardId: "card-1", kind: "blocks" },
+    ];
+    for (const message of lateWrites) {
+      a.send(message);
+      expect((await awaitError(a, message.mutationId)).message).toBe("card is unavailable");
+    }
+    const snapshot = await snapshotOf(await connect(board));
+    expect([snapshot.checklistItems, snapshot.comments, snapshot.cardLabels, snapshot.relations]).toEqual([[], [], [], []]);
+  });
+
+  it("records the board id and backfills legacy attachment keys once", async () => {
+    const board = "board-stamp-once";
+    await snapshotOf(await connect(board));
+    const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
+    const read = <T extends string | number | null>(query: string, ...bindings: string[]) =>
+      runInDurableObject(stub, (_instance, state) => state.storage.sql.exec<{ value: T }>(query, ...bindings).toArray()[0]?.value);
+    const objectKey = () => read<string | null>("SELECT object_key AS value FROM attachments WHERE id = 'legacy-1'");
+    expect(await read("SELECT value FROM meta WHERE key = 'board_id'")).toBe(board);
+    expect(await read("SELECT value FROM meta WHERE key = 'attachment_keys_backfilled'")).toBe(1);
+
+    // The backfill is finished: a keyless row that turns up later is left as it is.
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO attachments(id, card_id, file_name, content_type, size) VALUES ('legacy-1', 'card-1', 'a.png', 'image/png', 1)");
+    });
+    await snapshotOf(await connect(board));
+    expect(await objectKey()).toBeNull();
+
+    // A board that only has its id on record (an alarm can write that alone) is still backfilled.
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("DELETE FROM meta WHERE key = 'attachment_keys_backfilled'");
+    });
+    await snapshotOf(await connect(board));
+    expect(await objectKey()).toBe(`${board}/legacy-1`);
+    expect(await read("SELECT value FROM meta WHERE key = 'attachment_keys_backfilled'")).toBe(1);
+  });
+
+  it("prunes MCP receipts older than thirty days when the alarm runs, without scheduling one for them", async () => {
+    const board = "board-receipt-prune";
+    await snapshotOf(await connect(board));
+    const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
+    const day = 24 * 60 * 60 * 1000;
+    const { kept, alarm } = await runInDurableObject(stub, async (instance, state) => {
+      const sql = state.storage.sql;
+      for (const [key, ageDays] of [["old", 31], ["recent", 29]] as const) {
+        sql.exec(
+          `INSERT INTO mcp_operation_receipts(credential_id, operation_key, actor_id, operation, input_hash, result_json, created_at)
+           VALUES ('cred', ?, 'u', 'create_task', 'h', '{}', ?)`,
+          key,
+          Date.now() - ageDays * day,
+        );
+      }
+      await state.storage.deleteAlarm();
+      await instance.alarm();
+      return {
+        kept: sql.exec<{ key: string }>("SELECT operation_key AS key FROM mcp_operation_receipts").toArray().map((row) => row.key),
+        alarm: await state.storage.getAlarm(),
+      };
+    });
+    expect(kept).toEqual(["recent"]);
+    expect(alarm).toBeNull();
   });
 
   it("defaults the priority to medium and carries a card.prioritize in the snapshot", async () => {
@@ -6130,6 +6246,7 @@ describe("BoardDO card details", () => {
 
   it("keeps its rows and its schema version across a restart", async () => {
     const a = await connect("board-restart");
+    await seedIdentity("board-restart", "user-7");
     await snapshotOf(a);
     await seedCard(a, "rs");
     a.send({
@@ -6555,6 +6672,7 @@ describe("BoardDO card details", () => {
     const board = "board-card-enriched-create";
     const a = await connect(board, "user-a");
     const b = await connect(board, "user-b");
+    await seedIdentity(board, "member-1");
     await snapshotOf(a);
     await snapshotOf(b);
 
@@ -9483,6 +9601,56 @@ describe("BoardDO fractional ordering", () => {
     const rows = await rootPositions(board);
     expect(rows.find((row) => row.id === "card-b")!.position < "a0").toBe(true);
     expect(rows.map((row) => row.id)).toEqual(["card-b", "card-a"]);
+  });
+
+  // Two writers that raced leave card-a and card-b on one key: the library cannot place between them.
+  async function tiedBoard(board: string) {
+    const a = await connect(board);
+    await snapshotOf(a);
+    a.send({ type: "column.create", mutationId: "eq-col", id: "col-1", title: "Todo", position: "a0" });
+    for (const [id, position] of [["card-a", "a0"], ["card-b", "a1"], ["card-c", "a2"], ["card-m", "a3"]] as const) {
+      a.send({ type: "card.create", mutationId: `eq-${id}`, id, columnId: "col-1", title: id, position });
+    }
+    await awaitBroadcast(a, "eq-card-m");
+    await runInDurableObject(env.BOARD_DO.get(env.BOARD_DO.idFromName(board)), (_instance, state) => {
+      state.storage.sql.exec("UPDATE cards SET position = 'a0' WHERE id = 'card-b'");
+    });
+  }
+
+  it("places a `before` move ahead of equal neighbour keys instead of refusing it for good", async () => {
+    const board = "board-mcp-order-equal-before";
+    await tiedBoard(board);
+
+    const moved = await mcpCommand(board, {
+      operation: "move_task",
+      task: { id: "card-m" },
+      columnId: "col-1",
+      placement: { before: { id: "card-b" } },
+    });
+    expect(moved.ok).toBe(true);
+
+    // It stays in front of the tied pair, so it is before card-b.
+    const rows = await rootPositions(board);
+    expect(rows.map((row) => row.id)).toEqual(["card-m", "card-a", "card-b", "card-c"]);
+    expect(rows.find((row) => row.id === "card-m")!.position < "a0").toBe(true);
+  });
+
+  it("places an `after` move past equal neighbour keys, below the next distinct key", async () => {
+    const board = "board-mcp-order-equal-after";
+    await tiedBoard(board);
+
+    const moved = await mcpCommand(board, {
+      operation: "move_task",
+      task: { id: "card-m" },
+      columnId: "col-1",
+      placement: { after: { id: "card-a" } },
+    });
+    expect(moved.ok).toBe(true);
+
+    const rows = await rootPositions(board);
+    expect(rows.map((row) => row.id)).toEqual(["card-a", "card-b", "card-m", "card-c"]);
+    const position = rows.find((row) => row.id === "card-m")!.position;
+    expect(position > "a0" && position < "a2").toBe(true);
   });
 
   it("appends after a Zz tail with a key that still admits a midpoint", async () => {

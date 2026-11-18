@@ -25,9 +25,11 @@ import {
   GITHUB_LOGIN_RE,
   hashPassword,
   NO_PASSWORD_HASH,
+  adminEmails,
   isAdminEmail,
   appOrigin,
   rateLimitAuth,
+  rateLimitLookup,
   requireAdmin,
   requireAuth,
   requireMember,
@@ -552,7 +554,7 @@ const app = new Hono<AppEnv>()
       } else {
         if (!invite) {
           // Only for the no-invite case, so it reveals nothing about any token.
-          const noAdmin = !c.env.ADMIN_EMAILS?.split(",").some((entry) => entry.trim());
+          const noAdmin = adminEmails(c.env).length === 0;
           return c.json(noAdmin ? ADMIN_NOT_CONFIGURED : INVITE_REQUIRED, 403);
         }
         // A failing INSERT (duplicate email) rolls the invite claim back with the batch.
@@ -1290,6 +1292,8 @@ const app = new Hono<AppEnv>()
       if(resumed)return resumed.state!=="completed"?c.json(resumed,202):(resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.forbidden?"forbidden":"stale board context"} as const,resumed.result===ACCESS_CHANGE_ABORT.forbidden?403:409):c.json(resumed));
       const board=await findAccessibleBoard(c.env,actor,boardId);
       if(!board||!board.capabilities.canManageBoard)return c.json({error:"forbidden"} as const,403);
+      // Placing a board where it already is would only collide with its own scope lock (a retryable 409).
+      if(board.workspaceId===input.destinationWorkspaceId)return c.json({error:"board is already in that workspace"} as const,400);
       const destination=await c.env.DB.prepare(`SELECT w.id,w.name FROM workspaces w JOIN workspace_members wm ON wm.workspace_id=w.id AND wm.user_id=? WHERE w.id=?`).bind(actor.id,input.destinationWorkspaceId).first<{id:string;name:string}>();
       if(!destination)return c.json({error:"forbidden"} as const,403);
       const explicit=await c.env.DB.prepare(`SELECT role FROM board_members WHERE board_id=? AND user_id=?`).bind(board.id,actor.id).first<{role:"member"|"manager"}>();
@@ -1320,7 +1324,7 @@ const app = new Hono<AppEnv>()
     if (pendingAccessChange) return accessPendingResponse();
     return c.json(metadata);
   })
-  // Any member may invite another: with two trusted users there are no roles.
+  // Anyone who can open the board may add another user to it; removing a board manager takes manage rights (below).
   .post(
     "/boards/:id/members",
     requireAuth,
@@ -1350,19 +1354,24 @@ const app = new Hono<AppEnv>()
     const operationId=typeof body.operationId==="string"&&z.string().uuid().safeParse(body.operationId).success?body.operationId:crypto.randomUUID();
     try{
       const resumed=await resolveAccessChangeAttempt(c.env,actor,operationId,"board-member-remove",{boardId:board.id,userId:targetUserId});
-      if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":resumed.result===ACCESS_CHANGE_ABORT.boardOwnerProtected?"board owner cannot be removed":"forbidden"} as const,resumed.result===ACCESS_CHANGE_ABORT.forbidden?403:404):c.json({ok:true} as const);}
+      if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,resumed.result===ACCESS_CHANGE_ABORT.forbidden?403:404):c.json({ok:true} as const);}
       if(!board.capabilities.canManageMembers)return c.json({error:"forbidden"} as const,403);
       if(targetUserId===board.ownerId)return c.json({error:"board owner cannot be removed"} as const,403);
       if(targetUserId===actor.id)return c.json({error:"cannot remove self from board"} as const,403);
+      // A board manager is removed only by someone who manages the board (the reservation and the commit assert it again).
+      if(!board.capabilities.canManageBoard&&await c.env.DB.prepare("SELECT 1 AS present FROM board_members WHERE board_id=? AND user_id=? AND role='manager'").bind(board.id,targetUserId).first())return c.json({error:"forbidden"} as const,403);
       const result=await runAccessChange(c.env,actor,{operationId,kind:"board-member-remove",payload:{boardId:board.id,userId:targetUserId},workspaceIds:[board.workspaceId],boards:[{boardId:board.id,workspaceId:board.workspaceId}]});
       if(result.state!=="completed")return c.json(result,202);
-      if(result.outcome==="aborted")return c.json({error:result.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":result.result===ACCESS_CHANGE_ABORT.boardOwnerProtected?"board owner cannot be removed":"forbidden"} as const,result.result===ACCESS_CHANGE_ABORT.forbidden?403:404);
+      if(result.outcome==="aborted")return c.json({error:result.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,result.result===ACCESS_CHANGE_ABORT.forbidden?403:404);
       return c.json({ok:true} as const);
     }catch(e){if(e instanceof AccessChangeConflict)return c.json(ACCESS_CONFLICT,409);throw e;}
   })
-  .get("/boards/:id/membership-candidates", requireAuth, requireMember, async (c) => {
+  // Who may be added (ADR 0072): the members of the board's workspace who hold no board grant. A person
+  // outside the workspace is offered only for their exact address (`?email=`), so this is no user directory.
+  .get("/boards/:id/membership-candidates", requireAuth, requireMember, rateLimitLookup, zValidator("query", z.object({ email: z.string().max(254).transform((value) => value.trim().toLowerCase()).optional() })), async (c) => {
     const board = c.get("board");
     const user = c.get("user");
+    const { email } = c.req.valid("query");
     const { results } = await c.env.DB.prepare(
       `SELECT b.pending_access_operation_id AS pendingAccessOperationId,
               users.id AS id, users.email AS email, users.name AS name,
@@ -1372,11 +1381,11 @@ const app = new Hono<AppEnv>()
           SELECT board_members.user_id
             FROM board_members
            WHERE board_members.board_id = b.id
-        )
+        ) AND ${email === undefined ? "users.id IN (SELECT workspace_members.user_id FROM workspace_members WHERE workspace_members.workspace_id = b.workspace_id)" : "users.email = ?"}
         WHERE b.id=? AND ${boardOpenSql("b", "?", "?=1")}
         ORDER BY users.name, users.email`,
     )
-      .bind(board.id, isAdminEmail(c.env, user.email) ? 1 : 0, user.id, user.id, user.id)
+      .bind(...(email === undefined ? [] : [email]), board.id, isAdminEmail(c.env, user.email) ? 1 : 0, user.id, user.id, user.id)
       .all<{
         pendingAccessOperationId: string | null;
         id: string | null;

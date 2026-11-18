@@ -244,6 +244,21 @@ describe("a branch's latest commit", () => {
     expect((await deliver("push", pushEvent(name))).status).toBe(502);
     expect((await branchesOn(board))[0]?.message).toBe("First");
   });
+
+  it("queues the repo for a backfill when the event fails, so the minute cron repairs the card", async () => {
+    const board = await newBoard();
+    await connect();
+    // Let the backfill that connecting started settle (finished, or held for a retry), then start from an empty queue.
+    await expect.poll(async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM github_backfill_queue WHERE run_after <= ?").bind(Date.now() + 3 * 60_000).first<{ n: number }>())!.n).toBe(0);
+    await env.DB.exec("DELETE FROM github_backfill_queue");
+    const name = `${board.key}-1-work`;
+    setBranch(name, "1".repeat(40), "First", 0);
+
+    branches.down = true;
+    expect((await deliver("push", pushEvent(name))).status).toBe(502);
+    const queued = await env.DB.prepare("SELECT repo_id AS repoId, run_after AS runAfter FROM github_backfill_queue").all<{ repoId: number; runAfter: number }>();
+    expect(queued.results).toEqual([{ repoId: REPO_ID, runAfter: 0 }]);
+  });
 });
 
 describe("a deleted branch", () => {

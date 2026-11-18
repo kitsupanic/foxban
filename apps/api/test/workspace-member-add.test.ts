@@ -39,7 +39,7 @@ async function signup(email: string, invite?: string): Promise<string> {
   return cookieOf(response);
 }
 
-/** The test config's `ADMIN_EMAILS` covers `*@foxban.test`, so these are operators. */
+/** A signup on `@foxban.test` is listed as an admin (admin-signups.ts), so these are operators. */
 const signupAdmin = () => signup(`admin-${crypto.randomUUID()}@foxban.test`);
 
 /** Ordinary accounts need an account invitation, minted by a configured administrator. */
@@ -145,51 +145,71 @@ async function createBoard(
 }
 
 describe("workspace membership candidates", () => {
-  it("offers the accounts a workspace does not have, to its managers only", async () => {
+  it("finds an account only by its exact email, for the workspace's managers only", async () => {
     const owner = await signupAdmin();
-    const candidate = await signupMember(owner);
+    const candidateEmail = `member-${crypto.randomUUID()}@example.test`;
+    const candidate = await signupMember(owner, candidateEmail);
     const candidateUser = await me(candidate);
-    const alreadyMember = await signupMember(owner);
-    const alreadyMemberUser = await me(alreadyMember);
+    const alreadyMemberEmail = `member-${crypto.randomUUID()}@example.test`;
+    const alreadyMember = await signupMember(owner, alreadyMemberEmail);
     // An operator with no membership here: its global reach must not include a
-    // directory that names every account in it.
+    // lookup of any account in the instance.
     const outsider = await signupAdmin();
     const workspace = await createWorkspace(owner, "Candidates");
     await inviteToWorkspace(owner, workspace, alreadyMember);
+    const lookup = (email: string, session?: string, id = workspace) => get(`/workspaces/${id}/membership-candidates?email=${encodeURIComponent(email)}`, session);
+    const found = async (email: string) => (await (await lookup(email, owner)).json<{ candidates: CandidateRow[] }>()).candidates;
 
-    expect((await get(`/workspaces/${workspace}/membership-candidates`)).status).toBe(401);
-    const members = await get(`/workspaces/${workspace}/membership-candidates`, owner);
-    expect(members.status).toBe(200);
-    const body = await members.json<{ candidates: CandidateRow[] }>();
-    expect(body.candidates).toContainEqual({
-      id: candidateUser.id,
-      email: expect.stringContaining("member-"),
-      name: expect.any(String),
-      githubLogin: null,
-      avatarVersion: null,
-    });
-    // Public identity only, and never someone the member list already shows — the
-    // viewer included.
-    expect(Object.keys(body.candidates[0]!).sort()).toEqual([
-      "avatarVersion",
-      "email",
-      "githubLogin",
-      "id",
-      "name",
-    ]);
-    const ids = body.candidates.map((row) => row.id);
-    expect(ids).not.toContain(alreadyMemberUser.id);
-    expect(ids).not.toContain((await me(owner)).id);
-    // The order is deterministic — name, then email, then id — so a client never
-    // sees the directory reshuffle between reads.
-    const orderKeys = body.candidates.map((row) => [row.name, row.email, row.id].join("\u0000"));
-    expect(orderKeys).toEqual([...orderKeys].sort());
+    expect((await lookup(candidateEmail)).status).toBe(401);
+    // The exact address finds exactly that account, whatever its case or padding, with the public identity fields only.
+    for (const typed of [candidateEmail, candidateEmail.toUpperCase(), ` ${candidateEmail} `]) {
+      expect(await found(typed)).toEqual([{ id: candidateUser.id, email: candidateEmail, name: expect.any(String), githubLogin: null, avatarVersion: null }]);
+    }
+    // No list: without an address, and for a partial address, a bare domain, a wildcard or an unknown one, nothing.
+    const listed = await get(`/workspaces/${workspace}/membership-candidates`, owner);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ candidates: [] });
+    for (const typed of ["member-", "@example.test", "%@example.test", "*@example.test", "nobody-at-all@example.test", ""]) {
+      expect(await found(typed), typed).toEqual([]);
+    }
+    // Never someone the member list already shows, the viewer included.
+    expect(await found(alreadyMemberEmail)).toEqual([]);
+    expect(await found((await (await get("/me", owner)).json<{ email: string }>()).email)).toEqual([]);
 
     // A member of the workspace is not a manager, and neither is an operator.
+    expect((await lookup(candidateEmail, alreadyMember)).status).toBe(403);
+    expect((await lookup(candidateEmail, outsider)).status).toBe(403);
     expect((await get(`/workspaces/${workspace}/membership-candidates`, alreadyMember)).status).toBe(403);
-    expect((await get(`/workspaces/${workspace}/membership-candidates`, outsider)).status).toBe(403);
-    // No such workspace is a denial too, never an empty directory.
-    expect((await get(`/workspaces/${crypto.randomUUID()}/membership-candidates`, owner)).status).toBe(403);
+    // No such workspace is a denial too, never an empty answer.
+    expect((await lookup(candidateEmail, owner, crypto.randomUUID())).status).toBe(403);
+  });
+
+  it("limits lookups per signed-in user, and only for requests that came through the edge", async () => {
+    const owner = await signupAdmin();
+    const other = await signupAdmin();
+    const workspace = await createWorkspace(owner, "Throttled");
+    const otherWorkspace = await createWorkspace(other, "Throttled too");
+    const board = await createBoard(owner, workspace, "workspace");
+    const lookup = (path: string, session: string, ip?: string) =>
+      SELF.fetch(`${ORIGIN}${path}`, { headers: { cookie: session, ...(ip ? { "CF-Connecting-IP": ip } : {}) } });
+    const workspaceLookup = `/workspaces/${workspace}/membership-candidates?email=nobody%40example.test`;
+    const boardLookup = `/boards/${board.id}/membership-candidates?email=nobody%40example.test`;
+
+    // Local and test requests carry no client address: never throttled.
+    for (let attempt = 0; attempt < 12; attempt++) expect((await lookup(workspaceLookup, owner)).status).toBe(200);
+
+    // Through the edge, ten lookups a minute per user, shared by both routes and whatever address they come from.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect((await lookup(workspaceLookup, owner, "198.51.100.31")).status).toBe(200);
+      expect((await lookup(boardLookup, owner, "198.51.100.32")).status).toBe(200);
+    }
+    const throttled = await lookup(workspaceLookup, owner, "198.51.100.33");
+    expect(throttled.status).toBe(429);
+    expect(await throttled.json()).toEqual({ error: "too many requests" });
+    expect((await lookup(boardLookup, owner, "198.51.100.34")).status).toBe(429);
+    // Other people and plain reads are not held up by it.
+    expect((await lookup(`/workspaces/${otherWorkspace}/membership-candidates?email=nobody%40example.test`, other, "198.51.100.31")).status).toBe(200);
+    expect((await lookup(`/workspaces/${workspace}/membership-candidates`, owner, "198.51.100.31")).status).toBe(200);
   });
 });
 
@@ -238,7 +258,7 @@ describe("direct workspace member add", () => {
       pendingOperationId: null,
     });
 
-    // The member now reads the workspace, is offered by no directory any more, and
+    // The member now reads the workspace, is offered by no lookup any more, and
     // reaches the board the workspace grants, and the Private one as an admin.
     const memberView = await get(`/workspaces/${workspace}`, candidate);
     expect(memberView.status).toBe(200);
@@ -248,8 +268,9 @@ describe("direct workspace member add", () => {
     const listed = await get(`/workspaces/${workspace}/members`, owner);
     const listedMembers = (await listed.json<{ members: WorkspaceMemberRow[] }>()).members;
     expect(listedMembers.map((row) => row.userId)).toContain(target.id);
-    const directory = await get(`/workspaces/${workspace}/membership-candidates`, owner);
-    expect((await directory.json<{ candidates: CandidateRow[] }>()).candidates.map((row) => row.id)).not.toContain(target.id);
+    const targetEmail = (await (await get("/me", candidate)).json<{ email: string }>()).email;
+    const lookup = await get(`/workspaces/${workspace}/membership-candidates?email=${encodeURIComponent(targetEmail)}`, owner);
+    expect(await lookup.json()).toEqual({ candidates: [] });
   });
 
   it("defaults the role to member", async () => {

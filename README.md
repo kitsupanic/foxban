@@ -96,9 +96,11 @@ Your `.env.deploy` file stays on your computer. Git does not send it anywhere.
 
 You are now an admin. An admin can make invite links. Send an invite link to each person who should join. Nobody can sign up without one, except admins.
 
+Do this right after you deploy. foxban does not check that an email is really yours. Until you sign up, whoever types an address from `ADMIN_EMAILS` on the sign-up page gets that admin account.
+
 Does foxban say that it has no admin yet? Then `ADMIN_EMAILS` is not set. Set it in Cloudflare (**Workers → foxban → Settings → Variables and Secrets**), and then sign up again. Pick the type **Secret**. If you pick **Text**, the next deploy wipes it out.
 
-`ADMIN_EMAILS` can hold more than one email. Put commas between them. `*@your-company.com` makes everyone with that email an admin.
+`ADMIN_EMAILS` can hold more than one email. Put commas between them. Write each full address, like `you@example.com,boss@example.com`. A pattern such as `*@example.com` does nothing: foxban skips it. Each admin should sign up soon after the deploy, for the reason above.
 
 ## Settings
 
@@ -106,7 +108,7 @@ You set these in `.env.deploy`. Only `ADMIN_EMAILS` is needed.
 
 | Name | What it does | If you leave it out |
 |---|---|---|
-| `ADMIN_EMAILS` | Emails of the people who are admins. | You must set this one. Deploy stops without it. |
+| `ADMIN_EMAILS` | Full emails of the people who are admins, with commas between them. No `*@` patterns. | You must set this one. Deploy stops without it. |
 | `WORKER_NAME` | The name of your foxban in Cloudflare. | `foxban` |
 | `D1_DATABASE_NAME` | The name of the database. | The same as `WORKER_NAME` |
 | `R2_BUCKET_NAME` | The name of the file storage for pictures. | `WORKER_NAME` and then `-attachments` |

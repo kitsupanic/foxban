@@ -30,7 +30,7 @@ export type WorkspaceMember = {
 };
 
 /**
- * One row of `GET /workspaces/:id/membership-candidates`: public identity only,
+ * One row of `GET /workspaces/:id/membership-candidates?email=`: public identity only,
  * and never someone the workspace already has a membership for.
  */
 export type WorkspaceMemberCandidate = {
@@ -85,9 +85,11 @@ export const workspaceInvitesQuery = (id: string) => queryOptions({
   queryFn: async () => (await json<{ invites: WorkspaceInvite[] }>(`/workspaces/${encodeURIComponent(id)}/invites`)).invites,
 });
 
-export const workspaceMembershipCandidatesQuery = (id: string) => queryOptions({
-  queryKey: ["workspace-membership-candidates", id] as const,
-  queryFn: async () => (await json<{ candidates: WorkspaceMemberCandidate[] }>(`/workspaces/${encodeURIComponent(id)}/membership-candidates`)).candidates,
+/** The account with exactly this address, if any and not yet a member (ADR 0072); the server lists nobody. */
+export const workspaceMembershipCandidatesQuery = (id: string, email: string) => queryOptions({
+  queryKey: ["workspace-membership-candidates", id, email] as const,
+  queryFn: async () =>
+    (await json<{ candidates: WorkspaceMemberCandidate[] }>(`/workspaces/${encodeURIComponent(id)}/membership-candidates?email=${encodeURIComponent(email)}`)).candidates,
 });
 
 export async function workspaceRequest<T>(url: string, method: string, body?: unknown): Promise<T> {

@@ -11,6 +11,7 @@ import { boardQueryKey, clearBoardAccessCaches } from "./board-cache";
 import { invalidateDevelopmentQueries } from "./card-development";
 import {
   planBoardReconnect,
+  STABLE_CONNECTION_MS,
   type AccessProbe,
 } from "./access-attempt";
 import type { BoardState } from "./apply-mutation";
@@ -34,7 +35,6 @@ export {
 
 /** An optimistic mutation is rolled back if neither its echo nor an error arrives in time. */
 const PENDING_TIMEOUT_MS = 5_000;
-const STABLE_CONNECTION_MS = 10_000;
 
 /** Returns false when the mutation was dropped (no open socket, or no snapshot yet). */
 export type SendMutation = (msg: ClientMessage) => boolean;
@@ -204,6 +204,8 @@ export function useBoardSocket(
     let unmounted = false;
     let attempt = 0;
     let consecutiveFailures = 0;
+    // True once the failure budget ran out (not on a denial): only a manual or network-return retry restarts.
+    let stopped = false;
     // Set by the server's 4010 and cleared by a snapshot or a fresh metadata read.
     let inTransition = false;
     let transitionStartedAt = 0;
@@ -284,6 +286,8 @@ export function useBoardSocket(
           } else {
             notifyMutation(mutationId, "verified-retry");
           }
+          // Instant mutations have no subscriber to retry them; nothing else would ever delete the entry.
+          if (!mutationSubscribersRef.current.has(mutationId)) pendingSentMutationsRef.current.delete(mutationId);
         }
         return;
       }
@@ -389,6 +393,7 @@ export function useBoardSocket(
         inTransition = false;
         if (plan.mode === "stopped" || plan.delayMs === null) {
           console.warn("board socket: stopped reconnecting after unsynchronized failures");
+          stopped = true;
           setHandshakeFailed(true);
           eventsRef.current?.halted?.();
           return;
@@ -402,8 +407,20 @@ export function useBoardSocket(
     // teardown cancels cleanly without establishing a spurious unmounted connection.
     retryTimer = window.setTimeout(connect, 0);
 
+    // A short network drop can exhaust the failure budget; coming back online or visible retries.
+    const retryIfStopped = () => {
+      if (stopped && !unmounted) retry();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") retryIfStopped();
+    };
+    window.addEventListener("online", retryIfStopped);
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       unmounted = true;
+      window.removeEventListener("online", retryIfStopped);
+      document.removeEventListener("visibilitychange", onVisible);
       clearTimeout(retryTimer);
       clearTimeout(stableTimer);
       discardPending();
@@ -417,7 +434,7 @@ export function useBoardSocket(
         ws.close();
       }
     };
-  }, [attemptEpoch, boardId, queryClient, rollback]);
+  }, [attemptEpoch, boardId, queryClient, rollback, retry]);
 
   const sendMutation = useCallback<SendMutation>(
     (msg) => {

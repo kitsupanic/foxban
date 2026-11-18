@@ -6,6 +6,7 @@ import {
   agentCredentialsRouter,
   authenticateAgentCredential,
   listAuthorizedBoards,
+  readBoundedBody,
   type AgentPrincipal,
 } from "./agent-credentials";
 import {
@@ -86,33 +87,9 @@ function hostAllowed(request: Request, env: Env): boolean {
 }
 
 async function boundedRequest(request: Request): Promise<Request | null> {
-  const declared = request.headers.get("content-length");
-  if (declared !== null && Number(declared) > MCP_BODY_LIMIT) return null;
-  if (request.body === null) return new Request(request);
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    for (;;) {
-      const result = await reader.read();
-      if (result.done) break;
-      length += result.value.byteLength;
-      if (length > MCP_BODY_LIMIT) {
-        await reader.cancel();
-        return null;
-      }
-      chunks.push(result.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new Request(request.url, { method: request.method, headers: request.headers, body: bytes });
+  const bytes = await readBoundedBody(request, MCP_BODY_LIMIT);
+  if (bytes === null) return null;
+  return request.body === null ? new Request(request) : new Request(request.url, { method: request.method, headers: request.headers, body: bytes });
 }
 
 async function currentPrincipal(env: Env, authorization: string, scope: AgentScope): Promise<AgentPrincipal> {
@@ -141,8 +118,7 @@ async function callBoardDo(
   route: McpRoute,
   body: unknown,
 ): Promise<McpToolResult> {
-  const canManageColumns = board.ownerId === principal.user.id || isAdminEmail(env, principal.user.email);
-  return boardClient(env, board.id).mcp(route, { userId: principal.user.id, canManageColumns }, body);
+  return boardClient(env, board.id).mcp(route, { userId: principal.user.id, canManageColumns: board.capabilities.canManageColumns }, body);
 }
 
 function toolResponse(result: McpToolResult) {

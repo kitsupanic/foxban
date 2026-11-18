@@ -7,12 +7,8 @@ import {
 } from "@foxban/shared";
 import type { User } from "./auth";
 import { requestAppUpdateCheck } from "./app-update";
+import { planBoardReconnect, STABLE_CONNECTION_MS } from "./access-attempt";
 import { invalidateWorkspaceContext } from "./workspaces";
-
-const RECONNECT_MIN_MS = 500;
-const RECONNECT_MAX_MS = 8_000;
-const STABLE_CONNECTION_MS = 10_000;
-const MAX_FAILED_SYNCHRONIZATIONS = 3;
 
 export const presenceQueryKey = ["presence"] as const;
 
@@ -59,6 +55,8 @@ export function usePresenceSocket(user: User | null | undefined): void {
     let unmounted = false;
     let attempt = 0;
     let consecutiveFailures = 0;
+    // True once the failure budget ran out: no timer and no socket until the network is back.
+    let stopped = false;
     let retryTimer: number | undefined;
     let stableTimer: number | undefined;
 
@@ -127,17 +125,25 @@ export function usePresenceSocket(user: User | null | undefined): void {
       ws.onclose = () => {
         clearTimeout(stableTimer);
         if (unmounted) return;
-        consecutiveFailures += 1;
-        if (consecutiveFailures >= MAX_FAILED_SYNCHRONIZATIONS) {
+        // The same backoff and failure budget as the board socket (transport branch).
+        const plan = planBoardReconnect({
+          code: 1006,
+          attempt,
+          failures: consecutiveFailures,
+          inTransition: false,
+          probe: "unknown",
+        });
+        attempt = plan.attempt;
+        consecutiveFailures = plan.failures;
+        if (plan.delayMs === null) {
           console.warn("presence socket: stopped reconnecting after unsynchronized failures");
+          stopped = true;
           return;
         }
-        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** attempt);
         retryTimer = window.setTimeout(() => {
           requestAppUpdateCheck();
           connect();
-        }, delay);
-        attempt += 1;
+        }, plan.delayMs);
       };
 
       ws.onerror = () => {
@@ -150,8 +156,22 @@ export function usePresenceSocket(user: User | null | undefined): void {
         void queryClient.invalidateQueries({ queryKey: ["boards"] });
       }
     };
+    // A short network drop can exhaust the failure budget; coming back online
+    // or visible starts a fresh loop.
+    const restartIfStopped = () => {
+      if (!stopped || unmounted) return;
+      stopped = false;
+      attempt = 0;
+      consecutiveFailures = 0;
+      connect();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") restartIfStopped();
+    };
     window.addEventListener("focus", refreshWorkspaceData);
     document.addEventListener("visibilitychange", refreshWorkspaceData);
+    window.addEventListener("online", restartIfStopped);
+    document.addEventListener("visibilitychange", onVisible);
     retryTimer = window.setTimeout(connect, 0);
 
     return () => {
@@ -160,6 +180,8 @@ export function usePresenceSocket(user: User | null | undefined): void {
       clearTimeout(stableTimer);
       window.removeEventListener("focus", refreshWorkspaceData);
       document.removeEventListener("visibilitychange", refreshWorkspaceData);
+      window.removeEventListener("online", restartIfStopped);
+      document.removeEventListener("visibilitychange", onVisible);
       const ws = socketRef.current;
       socketRef.current = null;
       if (ws) {

@@ -53,7 +53,7 @@ async function memberRow(page: Page, email: string) {
   return page.getByRole("listitem").filter({ hasText: email });
 }
 
-/** Searches the real directory, selects the account and submits the add. */
+/** Looks the account up by its exact address, selects it and submits the add. */
 async function addMember(
   page: Page,
   workspaceName: string,
@@ -76,9 +76,7 @@ async function addMember(
 
 test("a manager adds an existing account directly and applies the chosen role", async ({ browser }) => {
   const owner = await newUser(browser, "direct-add-owner", "Direct Owner");
-  // The local database keeps every account earlier runs registered, and the
-  // directory legitimately offers all of them: the fixture's display name has to be
-  // unique so a search by name can only ever mean this run's account.
+  // The fixture's display name is unique, so a row by name can only mean this run's account.
   const adaName = `Ada Direct ${Date.now()}`;
   const ada = await newPlainUser(browser, owner.page, "direct-add-ada", adaName);
   await owner.page.goto("/");
@@ -127,13 +125,15 @@ test("a manager adds an existing account directly and applies the chosen role", 
     "admin",
   );
 
-  // The directory has dropped her — the search matches on name as well as address —
-  // because adding again is not how a role is changed.
+  // The lookup no longer offers her, because adding again is not how a role is
+  // changed, and a name finds nobody: only a full address is looked up (ADR 0072).
   await owner.page.getByRole("button", { name: "Add member" }).click();
   const dialog = owner.page.getByRole("dialog", { name: `Add member to ${workspaceName}` });
   await dialog.getByLabel("Search existing users").fill(adaName);
+  await expect(dialog.getByText("Type the full email address of an existing account.")).toBeVisible();
+  await dialog.getByLabel("Search existing users").fill(ada.email);
   await expect(dialog.getByText("No matching users.")).toBeVisible();
-  // The listbox is not rendered at all: the directory offers nothing, so the role
+  // The listbox is not rendered at all: the lookup offers nothing, so the role
   // select cannot be mistaken for a candidate.
   await expect(dialog.getByRole("listbox")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Cancel" }).click();

@@ -56,6 +56,17 @@ describe("the webhook endpoint's signature check", () => {
     expect(unsigned.status).toBe(401);
   });
 
+  it("refuses a body over GitHub's 25 MB cap before reading it, however it is announced", async () => {
+    const big = "a".repeat(25 * 1024 * 1024 + 1);
+    const headers = { "x-github-event": "ping", "x-hub-signature-256": await signature(big) };
+    // Declared: the Content-Length alone is enough.
+    expect((await request("POST", "/webhooks/github", { body: big, headers: { ...headers, "content-length": String(big.length) } })).status).toBe(413);
+    // Streamed with no length: the read stops at the cap.
+    const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(big)); controller.close(); } });
+    const streamed = await SELF.fetch(`${ORIGIN}/webhooks/github`, { method: "POST", headers, body: stream, duplex: "half" } as RequestInit);
+    expect(streamed.status).toBe(413);
+  });
+
   it("answers a signed ping", async () => {
     expect((await deliver("ping", { zen: "Keep it logically awesome." })).status).toBe(200);
   });

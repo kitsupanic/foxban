@@ -46,6 +46,8 @@ import {
   roleColumn,
 } from "./subtask-family";
 import {
+  ARCHIVED_CARD_SELECT,
+  allocateTaskNumber,
   createsLifecycleWork,
   deleteCards,
   endColumns,
@@ -138,6 +140,9 @@ export class ImportConflictError extends Error {
 const ATTACHMENT_CLEANUP_RETRY_MS = 60_000;
 const TRANSFER_LOCK_TTL_MS = 5 * 60 * 1000;
 const TRANSFER_RETRY_DELAY_MS = 60_000;
+const ATTACHMENT_KEYS_BACKFILLED_KEY = "attachment_keys_backfilled";
+/** An MCP operation receipt answers a retry of its operation key for this long; the alarm prunes older ones. */
+const MCP_RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 /** Outbound transfer locks an access fence settles in one prepare pass. */
 const FENCE_TRANSFER_SETTLE_LIMIT = 50;
 type TransferLock = { cardId: string; transferId: string; destinationBoardId: string };
@@ -916,6 +921,21 @@ export class BoardDO extends DurableObject<Env> {
   }
 
   /**
+   * The socket path's own eligibility read, the one an MCP creation gets at admission.
+   * Bounded the same way, and held in one input-gate window so the sender's next
+   * message cannot overtake the assignment it follows. Every refusal is a
+   * `MutationRefusal`, which `webSocketMessage` already answers.
+   */
+  private async requireAssigneeEligible(boardId: string | null, assigneeId: string): Promise<void> {
+    if (boardId === null) throw new MutationRefusal("forbidden", "Reconnect to assign tasks.", 1012);
+    const eligible = await this.ctx.blockConcurrencyWhile(() =>
+      withDeadline(this.currentAssigneeEligible(boardId, assigneeId), ADMISSION_DEADLINE_MS),
+    );
+    if (eligible === null) throw new MutationRefusal("internal_error", "Assignee could not be confirmed. Try again.");
+    if (!eligible) throw new MutationRefusal("assignee_not_member", "Assignee is not a board member.");
+  }
+
+  /**
    * The admission every protected asynchronous path shares. The boundary is read
    * before the D1 verdicts and again after them, and the whole window runs inside
    * one `blockConcurrencyWhile`, so a prepare, commit or release cannot be delivered
@@ -1004,7 +1024,6 @@ export class BoardDO extends DurableObject<Env> {
     pullRequestWrite: ({ boardId }, input) => this.acceptPullRequestWrite(boardId, input),
     branchWrite: ({ boardId }, input) => this.acceptBranchWrite(boardId, input),
     attachmentKey: ({ params }) => this.readAttachmentKey(params.attachmentId),
-    attachmentOwnership: (_, input) => this.checkAttachmentOwnership(input),
     transferOptions: () => this.readTransferOptions(),
     mcpBoard: (_, input) => this.mcpResponse(() => this.readMcpBoard(input)),
     mcpTasks: (_, input) => this.mcpResponse(() => this.readMcpTasks(input)),
@@ -1107,12 +1126,18 @@ export class BoardDO extends DurableObject<Env> {
    * Records which board this object is, before the route's own checks. The Worker names
    * the board in a header on every request, so this is how an object learns its id, how a
    * row from before attachments had internal keys gets one, and how a board whose locks
-   * expired while nothing named it wakes to settle them. Idempotent.
+   * expired while nothing named it wakes to settle them. Idempotent, and a no-op
+   * once the id and the key backfill below are both on record.
    */
   private async stampIdentity(boardId: string): Promise<void> {
-    const priorBoardId = this.ctx.storage.sql
-      .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'board_id'")
-      .toArray()[0]?.value;
+    const stored = new Map(
+      this.ctx.storage.sql
+        .exec<{ key: string; value: string | number }>("SELECT key, value FROM meta WHERE key IN ('board_id', ?)", ATTACHMENT_KEYS_BACKFILLED_KEY)
+        .toArray()
+        .map((row) => [row.key, row.value]),
+    );
+    const priorBoardId = stored.get("board_id");
+    if (priorBoardId === boardId && stored.get(ATTACHMENT_KEYS_BACKFILLED_KEY) === 1) return;
 
     this.ctx.storage.sql.exec(
       `INSERT INTO meta(key, value) VALUES ('board_id', ?)
@@ -1122,9 +1147,15 @@ export class BoardDO extends DurableObject<Env> {
     // v9 rows created before this deployment have no internal R2 key. The
     // membership-checked Worker supplies the board id on every socket fetch,
     // so the first reconnect backfills them before any delete can arrive.
+    // Once is enough: every later attachment row is written with its key. The
+    // marker is separate from `board_id`, which an alarm can record on its own.
     this.ctx.storage.sql.exec(
       "UPDATE attachments SET object_key = ? || '/' || id WHERE object_key IS NULL",
       boardId,
+    );
+    this.ctx.storage.sql.exec(
+      "INSERT INTO meta(key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = 1",
+      ATTACHMENT_KEYS_BACKFILLED_KEY,
     );
 
     if (!priorBoardId) {
@@ -1599,22 +1630,6 @@ export class BoardDO extends DurableObject<Env> {
     return Response.json({ queued: orphanItems.length + redeleteItems.length });
   }
 
-  private checkAttachmentOwnership({ ids }: RouteInput<"attachmentOwnership">): Response {
-    const attachmentIds = [...new Set(ids)];
-    if (attachmentIds.length === 0) return Response.json({ ownedIds: [] });
-
-    const placeholders = attachmentIds.map(() => "?").join(", ");
-    const ownedIds = this.ctx.storage.sql
-      .exec<{ id: string }>(
-        `SELECT id FROM attachments WHERE id IN (${placeholders})`,
-        ...attachmentIds,
-      )
-      .toArray()
-      .map(({ id }) => id);
-
-    return Response.json({ ownedIds });
-  }
-
   private readTransferOptions(): Response {
     const columns = this.ctx.storage.sql
       .exec<Pick<Column, "id" | "title" | "position">>("SELECT id, title, position FROM columns ORDER BY position, id")
@@ -2080,22 +2095,7 @@ export class BoardDO extends DurableObject<Env> {
         const lastPosition = destinationCards.at(-1)?.position ?? null;
         const position = generateKeyBetween(lastPosition, null);
 
-        let nextNumberRow = sql
-          .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'next_task_number'")
-          .toArray()[0];
-        if (!nextNumberRow) {
-          const maxRow = sql
-            .exec<{ maxNum: number | null }>("SELECT MAX(task_number) AS maxNum FROM cards")
-            .toArray()[0];
-          const initialNext = (maxRow?.maxNum ?? 0) + 1;
-          sql.exec("INSERT INTO meta(key, value) VALUES ('next_task_number', ?)", initialNext);
-          nextNumberRow = { value: initialNext };
-        }
-        const taskNumber = nextNumberRow.value;
-        sql.exec(
-          "UPDATE meta SET value = ? WHERE key = 'next_task_number'",
-          taskNumber + 1,
-        );
+        const taskNumber = allocateTaskNumber(sql);
 
         sql.exec(
           `INSERT INTO cards(id, column_id, title, description, position,
@@ -2247,14 +2247,7 @@ export class BoardDO extends DurableObject<Env> {
       // arrived in between and dropped it while the card was not here yet.
       this.ctx.waitUntil(this.settleDevelopmentRoutes({ pullRequests: bundle.developmentPullRequests, branches: bundle.developmentBranches }));
 
-      const snapshotMessage = this.snapshot();
-      for (const socket of this.ctx.getWebSockets()) {
-        try {
-          this.send(socket, snapshotMessage);
-        } catch {
-          // Ignore closed sockets during fan-out
-        }
-      }
+      this.broadcast(this.snapshot());
 
       return Response.json({ receipt: importOutcome.receipt, existingReceipt: importOutcome.existingReceipt });
     } catch (err) {
@@ -2349,14 +2342,7 @@ export class BoardDO extends DurableObject<Env> {
         );
       }
 
-      const snapshotMessage = this.snapshot();
-      for (const socket of this.ctx.getWebSockets()) {
-        try {
-          this.send(socket, snapshotMessage);
-        } catch {
-          // Ignore closed sockets
-        }
-      }
+      this.broadcast(this.snapshot());
 
       this.ctx.waitUntil(this.drainAttachmentCleanup());
       return Response.json({ ok: true });
@@ -2540,46 +2526,23 @@ export class BoardDO extends DurableObject<Env> {
       this.broadcast({ type: "archive.purged", cardIds });
     }
 
+    // Receipts never keep an alarm alive: they are pruned when one runs for other work.
+    // shortcut: a full scan, since the table is keyed by credential and operation key; index created_at if a board ever holds enough receipts to notice.
+    this.ctx.storage.sql.exec("DELETE FROM mcp_operation_receipts WHERE created_at < ?", now - MCP_RECEIPT_RETENTION_MS);
+
     const drained = await this.drainAttachmentCleanup();
-    if (!drained) {
-      const nextArchive = this.ctx.storage.sql
-        .exec<{ expireAt: number | null }>(
-          "SELECT MIN(archived_at + ?) AS expireAt FROM cards WHERE archived_at IS NOT NULL",
-          CARD_ARCHIVE_RETENTION_MS,
-        )
-        .toArray()[0]?.expireAt;
-      const idObj: unknown = this.ctx.id;
-      const ctxName = idObj && typeof idObj === "object" && "name" in idObj && typeof idObj.name === "string" ? idObj.name : undefined;
-      const hasBoardId = this.ctx.storage.sql
-        .exec<{ count: number }>("SELECT COUNT(*) AS count FROM meta WHERE key = 'board_id'")
-        .toArray()[0]?.count ?? 0;
-      const canRecover = hasBoardId > 0 || (ctxName !== undefined && ATTACHMENT_BOARD_ID.test(ctxName));
-
-      const nextLock = this.ctx.storage.sql
-        .exec<{ expireAt: number | null }>(
-          canRecover
-            ? "SELECT MIN(expires_at) AS expireAt FROM card_transfer_locks"
-            : "SELECT MIN(expires_at) AS expireAt FROM card_transfer_locks WHERE expires_at > ?",
-          ...(canRecover ? [] : [now]),
-        )
-        .toArray()[0]?.expireAt;
-      const candidates: number[] = [];
-      if (nextArchive !== null && nextArchive !== undefined) candidates.push(nextArchive);
-      if (nextLock !== null && nextLock !== undefined) candidates.push(nextLock);
-      if (candidates.length > 0) {
-        await this.scheduleAlarmAt(Math.max(Date.now(), Math.min(...candidates)));
-      }
-      return;
-    }
-
-    const nextAttachment = this.ctx.storage.sql
-      .exec<{ deleteAfter: number | null }>(
-        `SELECT MIN(delete_after) AS deleteAfter
-           FROM attachment_cleanup
-          WHERE deleted_at IS NULL
-             OR (deleted_at IS NOT NULL AND delete_after > 0)`,
-      )
-      .toArray()[0]?.deleteAfter;
+    // A failed R2 delete already scheduled its own retry, and counting the rows still due behind it would spin
+    // the alarm, so a lease only sets the next wake-up after a clean drain.
+    const nextAttachment = drained
+      ? this.ctx.storage.sql
+          .exec<{ deleteAfter: number | null }>(
+            `SELECT MIN(delete_after) AS deleteAfter
+               FROM attachment_cleanup
+              WHERE deleted_at IS NULL
+                 OR (deleted_at IS NOT NULL AND delete_after > 0)`,
+          )
+          .toArray()[0]?.deleteAfter
+      : null;
     const nextArchive = this.ctx.storage.sql
       .exec<{ expireAt: number | null }>(
         "SELECT MIN(archived_at + ?) AS expireAt FROM cards WHERE archived_at IS NOT NULL",
@@ -2602,16 +2565,7 @@ export class BoardDO extends DurableObject<Env> {
       )
       .toArray()[0]?.expireAt;
 
-    const candidates: number[] = [];
-    if (nextAttachment !== null && nextAttachment !== undefined) {
-      candidates.push(nextAttachment);
-    }
-    if (nextArchive !== null && nextArchive !== undefined) {
-      candidates.push(nextArchive);
-    }
-    if (nextLock !== null && nextLock !== undefined) {
-      candidates.push(nextLock);
-    }
+    const candidates = [nextAttachment, nextArchive, nextLock].filter((at): at is number => at !== null && at !== undefined);
     if (candidates.length > 0) {
       await this.scheduleAlarmAt(Math.max(Date.now(), Math.min(...candidates)));
     }
@@ -2737,14 +2691,7 @@ export class BoardDO extends DurableObject<Env> {
       finalize: async () => {
         const done = settleLock("finalized");
         if (done) {
-          if (broadcast) {
-            const snapshotMessage = this.snapshot();
-            for (const socket of this.ctx.getWebSockets()) {
-              try {
-                this.send(socket, snapshotMessage);
-              } catch {}
-            }
-          }
+          if (broadcast) this.broadcast(this.snapshot());
           this.ctx.waitUntil(this.drainAttachmentCleanup());
         }
         return answer(done);
@@ -3400,6 +3347,13 @@ export class BoardDO extends DurableObject<Env> {
         after = anchorIndex + 1 < siblings.length ? siblings[anchorIndex + 1]!.position : null;
       }
     }
+    // Equal neighbour keys (concurrent writers tie, ADR 0010) make the library throw for good, so step off the tie to the next distinct sibling key,
+    // on the side the placement asks for: `before` stays ahead of the tied pair, `after` goes past it.
+    if (before !== null && before === after) {
+      const tied = before;
+      if (placement !== undefined && "before" in placement) before = siblings.filter((row) => row.position < tied).at(-1)?.position ?? null;
+      else after = siblings.find((row) => row.position > tied)?.position ?? null;
+    }
     try {
       const position = generateKeyBetween(before, after);
       if (position.length > 64) throw new Error("position too long");
@@ -3490,6 +3444,15 @@ export class BoardDO extends DurableObject<Env> {
         return { id, boardId, taskNumber, key, url };
       };
 
+      const taskResult = (cardId: string) => {
+        const record = this.taskRecord(cardId, request.board);
+        if (!record) throw new MutationRefusal("internal_error", "Committed result is unavailable.");
+        return commit(TaskMutationOutputSchema.parse({
+          ok: true,
+          data: { operationKey: request.command.operationKey, task: record },
+        }));
+      };
+
       let targetId: string | null = null;
       if ("task" in request.command) {
         targetId = this.resolveMcpTaskId(request.command.task, request.board);
@@ -3537,6 +3500,10 @@ export class BoardDO extends DurableObject<Env> {
         case "complete_subtask": {
           checkCardWritable(sql, targetId!);
           const destination = completionFor(sql, targetId!, request.command.done);
+          // Already there: a move would reorder it to the column tail and log a move for nothing, so the receipt takes the current task and nothing is sent.
+          if (sql.exec("SELECT 1 FROM cards WHERE id = ? AND column_id = ?", targetId, destination).toArray()[0]) {
+            return taskResult(targetId!);
+          }
           message = ClientMessageSchema.parse({ type: "card.move", mutationId, id: targetId, columnId: destination, position: this.positionForMcpMove(targetId, destination, undefined, request.board) });
           break;
         }
@@ -3634,17 +3601,8 @@ export class BoardDO extends DurableObject<Env> {
         case "create_task":
         case "update_task":
         case "move_task":
-        case "complete_subtask": {
-          const record = this.taskRecord(
-            request.command.operation === "create_task" ? message.id : targetId!,
-            request.board,
-          );
-          if (!record) throw new MutationRefusal("internal_error", "Committed result is unavailable.");
-          return commit(TaskMutationOutputSchema.parse({
-            ok: true,
-            data: { operationKey: request.command.operationKey, task: record },
-          }));
-        }
+        case "complete_subtask":
+          return taskResult(request.command.operation === "create_task" ? message.id : targetId!);
         case "add_comment": {
           const comment = sql.exec<{
             id: string; cardId: string; authorId: string; parentCommentId: null;
@@ -3736,7 +3694,7 @@ export class BoardDO extends DurableObject<Env> {
     }
   }
 
-  override webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") {
       this.sendDirective(ws, { type: "error", mutationId: null, message: "expected a text frame" });
       return;
@@ -3787,7 +3745,11 @@ export class BoardDO extends DurableObject<Env> {
       canManageColumns: "canManageColumns" in attachment ? attachment.canManageColumns : undefined,
     };
     try {
+      // The synchronous refusals first, so a message that is refused anyway never costs a D1 read.
       checkMutation(this.ctx.storage.sql, parsed.data, context);
+      // Awaited only for an assignment, the one message that needs a D1 read; every other message still runs to its write without yielding.
+      const assigneeId = parsed.data.type === "card.assign" || parsed.data.type === "card.create" ? parsed.data.assigneeId : null;
+      if (assigneeId != null) await this.requireAssigneeEligible(boardId, assigneeId);
     } catch (error) {
       if (!(error instanceof MutationRefusal)) throw error;
       this.sendDirective(ws, { type: "error", mutationId: parsed.data.mutationId, message: error.message });
@@ -3872,16 +3834,7 @@ export class BoardDO extends DurableObject<Env> {
         .toArray()
         .map((row) => ({ ...row, subtaskDone: isCompleted(sql, row.columnId) })),
       archivedCards: sql
-        .exec<ArchivedCardRow>(
-          `SELECT id, column_id AS columnId, title, description, position,
-                  task_number AS taskNumber, subtask_done AS subtaskDone,
-                  assignee_id AS assigneeId, priority, task_type AS taskType, due_date AS dueDate,
-                  created_at AS createdAt, updated_at AS updatedAt,
-                  archived_at AS archivedAt,
-                  archived_column_title AS archivedColumnTitle
-           FROM cards
-           WHERE archived_at IS NOT NULL`,
-        )
+        .exec<ArchivedCardRow>(`${ARCHIVED_CARD_SELECT} WHERE archived_at IS NOT NULL`)
         .toArray()
         .map((row) => ({ ...row, subtaskDone: row.subtaskDone === 1 })),
       // `done` is an INTEGER column; the wire type is a boolean.
@@ -3999,11 +3952,12 @@ export class BoardDO extends DurableObject<Env> {
     ws.send(JSON.stringify(message));
   }
 
-  /** Best-effort fan-out: a socket that dies mid-loop must not abort the rest. */
+  /** Best-effort fan-out: a socket that dies mid-loop must not abort the rest. The message is serialized once, not per socket: a snapshot is megabytes. */
   private broadcast(message: ServerMessage): void {
+    const raw = JSON.stringify(message);
     for (const socket of this.ctx.getWebSockets()) {
       try {
-        this.send(socket, message);
+        this.sendFrame(socket, raw);
       } catch {
         // Ignore closed sockets; they re-snapshot on reconnect.
       }

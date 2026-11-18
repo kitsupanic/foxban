@@ -951,6 +951,20 @@ describe("MCP subtask completion", () => {
       expect(repeated.isError).not.toBe(true);
       expect(repeated.structuredContent).toMatchObject({ ok: true, data: { task: { subtaskDone: false } } });
       expect((await boardCounts(board.id)).receipts).toBe(repeatedCounts.receipts + 1);
+
+      // A subtask that is already in the target column and not at its tail is not reordered
+      // to the tail, and the call leaves no history: it only owns its receipt.
+      const positionOf = (id: string) => boardState(board.id, (sql) =>
+        sql.exec<{ position: string }>("SELECT position FROM cards WHERE id = ?", id).one().position);
+      const siblingPosition = await positionOf(siblingId);
+      const settledCounts = await boardCounts(board.id);
+      const noop = await client.callTool({
+        name: "complete_subtask",
+        arguments: { board: { id: board.id }, operationKey: crypto.randomUUID(), task: { id: siblingId }, done: false },
+      });
+      expect(noop.structuredContent).toMatchObject({ ok: true, data: { task: { id: siblingId, subtaskDone: false, position: siblingPosition } } });
+      expect(await positionOf(siblingId)).toBe(siblingPosition);
+      expect(await boardCounts(board.id)).toEqual({ ...settledCounts, receipts: settledCounts.receipts + 1 });
     } finally {
       await client.close();
     }

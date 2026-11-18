@@ -9,7 +9,7 @@ One deployed copy of foxban on one Cloudflare account, with its own users and bo
 _Avoid_: Deployment, server, site
 
 **Admin**:
-A person whose email is listed in the instance's admin list. Admins can sign up without an invite and create invites for others.
+A person whose full email is listed in the instance's admin list (no domain patterns). Admins can sign up without an invite and create invites for others.
 _Avoid_: Owner, superuser
 
 ## Workspaces

@@ -43,6 +43,7 @@ import {
   columnCards,
   columnRootCards,
   boardAncestors,
+  buildBoardIndex,
   sortedColumns,
   visibleCardIds,
   type BoardState,
@@ -424,6 +425,9 @@ export function BoardView({
     () => new Set(state ? state.cards.map((card) => card.id) : []),
     [state?.cards],
   );
+  // Card lookup and per-card face aggregates, rebuilt once per board state so no
+  // card or column render scans the board's flat arrays.
+  const boardIndex = useMemo(() => (state ? buildBoardIndex(state) : undefined), [state]);
   // The board's subtask forest, rebuilt only when its inputs change: every family
   // rendered, every done/total count, the drag sibling lists and the close-focus
   // fallback read this one answer instead of walking ancestors per card.
@@ -752,10 +756,10 @@ export function BoardView({
     if (visible === null) return new Set<string>();
     const ids = new Set<string>();
     if (state) for (const cardId of visible) {
-      for (const ancestor of boardAncestors(state, hierarchy, cardId)) ids.add(ancestor);
+      for (const ancestor of boardAncestors(state, hierarchy, cardId, boardIndex?.cardsById)) ids.add(ancestor);
     }
     return ids;
-  }, [visible, hierarchy, state]);
+  }, [visible, hierarchy, state, boardIndex]);
 
   /**
    * The families a filtered board must reveal. Saved expansion is never
@@ -770,11 +774,11 @@ export function BoardView({
   /** A root is shown when it matches or when a match lives anywhere beneath it. */
   const renderedRootsIn = useCallback(
     (columnId: string): Card[] => {
-      const roots = columnRootCards(state as BoardState, columnId, hierarchy);
+      const roots = columnRootCards(state as BoardState, columnId, hierarchy, boardIndex?.cardsById);
       if (visible === null) return roots;
       return roots.filter((card) => visible.has(card.id) || filterContextIds.has(card.id));
     },
-    [state, hierarchy, visible, filterContextIds],
+    [state, boardIndex, hierarchy, visible, filterContextIds],
   );
 
   // Card fronts read every card's pull requests in one request; a hint from the
@@ -791,19 +795,18 @@ export function BoardView({
 
   // A lift moves one status row. Keep its summary, never clone a tall family.
   const previewFaceProps =
-    !interactionBlocked && state && previewCard
+    !interactionBlocked && state && boardIndex && previewCard
       ? {
           ...getCardFaceProps(
-            state,
+            boardIndex,
             previewCard,
-            activeCardIds,
             membersById,
             meta.key,
             pullRequestBadges.get(previewCard.id) ?? null,
           ),
           subtaskContent: (
             <CardSubtaskFamily
-              renderChild={(child) => <li key={child.id}><CardFace {...getCardFaceProps(state, child, activeCardIds, membersById, meta.key, pullRequestBadges.get(child.id) ?? null)} /></li>}
+              renderChild={(child) => <li key={child.id}><CardFace {...getCardFaceProps(boardIndex, child, membersById, meta.key, pullRequestBadges.get(child.id) ?? null)} /></li>}
               state={state}
               hierarchy={hierarchy}
               cardId={previewCard.id}
@@ -1721,7 +1724,7 @@ export function BoardView({
                             ).length
                       }
                       isFilterActive={isFilterActive}
-                      activeCardIds={activeCardIds}
+                      index={boardIndex!}
                       state={state}
                       hierarchy={hierarchy}
                       collapsedSubtasks={renderedCollapsed}

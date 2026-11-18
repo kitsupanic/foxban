@@ -2,7 +2,7 @@ import { DEVELOPMENT_TEXT_MAX, type CardDevelopment, type DevelopmentPullRequest
 import { z } from "zod";
 import { boardClient } from "./board-client";
 import type { PullRequestWrite } from "./development-info";
-import { GitHubApiError, createInstallationToken, getPullRequestPayload } from "./github";
+import { GitHubApiError, createInstallationToken, getPullRequestPayload, pullRequestState } from "./github";
 import { loadInstanceGitHubApp } from "./github-app";
 import { routedBoardIds } from "./github-pr-routes";
 import { findConnectedRepo } from "./github-repos";
@@ -30,12 +30,6 @@ const PullRequestEventSchema = z.object({
   }),
 });
 
-function stateOf(pr: Pick<z.infer<typeof PullRequestEventSchema>["pull_request"], "state" | "draft" | "merged" | "merged_at">): DevelopmentPullRequest["state"] {
-  if (pr.merged === true || pr.merged_at) return "merged";
-  if (pr.state === "closed") return "closed";
-  return pr.draft === true ? "draft" : "open";
-}
-
 /** A pull request in the shape development info stores, from the fields both GitHub's event and its REST read carry. */
 function toDevelopmentPullRequest(
   repo: { id: number; fullName: string },
@@ -46,7 +40,7 @@ function toDevelopmentPullRequest(
     repository: repo.fullName,
     number: pr.number,
     title: pr.title.slice(0, DEVELOPMENT_TEXT_MAX),
-    state: stateOf(pr),
+    state: pullRequestState(pr),
     url: pr.html_url,
     updatedAt: pr.updated_at,
   };
@@ -61,13 +55,18 @@ export async function boardsByKey(env: Env, boardKeys: string[]): Promise<Array<
   return results;
 }
 
-/** The boards whose key one of the task keys names, with the task numbers named for each. */
-export async function boardsNamedByKeys(env: Env, keys: ReturnType<typeof extractTaskKeys>): Promise<Map<string, number[]>> {
+/** Of these boards (from `boardsByKey`), the ones a task key names, with the task numbers named for each. */
+export function namedBoards(boards: Array<{ id: string; boardKey: string }>, keys: ReturnType<typeof extractTaskKeys>): Map<string, number[]> {
   const named = new Map<string, number[]>();
-  for (const { id, boardKey } of await boardsByKey(env, keys.map((key) => key.boardKey))) {
+  for (const { id, boardKey } of boards) {
     named.set(id, keys.filter((key) => key.boardKey === boardKey).map((key) => key.taskNumber));
   }
   return named;
+}
+
+/** The boards whose key one of the task keys names, with the task numbers named for each. */
+export async function boardsNamedByKeys(env: Env, keys: ReturnType<typeof extractTaskKeys>): Promise<Map<string, number[]>> {
+  return namedBoards(await boardsByKey(env, keys.map((key) => key.boardKey)), keys);
 }
 
 /**
@@ -75,9 +74,10 @@ export async function boardsNamedByKeys(env: Env, keys: ReturnType<typeof extrac
  * the boards that hold it. A board is told when the PR's branch, title or body names
  * one of its task keys (matched by board key, so unknown keys fall away), or when it
  * already links the PR through the routing table. Each board links and updates only
- * its own cards. Returns whether any card changed.
+ * its own cards. Returns whether any card changed. A caller that budgets subrequests
+ * passes `budget`, which gets what this cost: two D1 reads and one call per board.
  */
-export async function handlePullRequestEvent(env: Env, payload: unknown): Promise<boolean> {
+export async function handlePullRequestEvent(env: Env, payload: unknown, budget?: { ops: number }): Promise<boolean> {
   const { repository, pull_request: pr } = PullRequestEventSchema.parse(payload);
   const pullRequest = toDevelopmentPullRequest({ id: repository.id, fullName: repository.full_name }, pr);
 
@@ -85,6 +85,7 @@ export async function handlePullRequestEvent(env: Env, payload: unknown): Promis
   for (const boardId of await routedBoardIds(env, repository.id, pr.number)) {
     if (!boards.has(boardId)) boards.set(boardId, []);
   }
+  if (budget) budget.ops += 2 + boards.size;
 
   const results = await Promise.all(
     [...boards].map(([boardId, taskNumbers]) => boardClient(env, boardId).writePullRequest({ pullRequest, taskNumbers } satisfies PullRequestWrite)),
