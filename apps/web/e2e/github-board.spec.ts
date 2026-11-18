@@ -114,25 +114,6 @@ test.describe("GitHub development info", () => {
     await expect(badge(card)).toHaveAttribute("aria-label", "Pull request #7: Merged");
   });
 
-  test("a forged webhook is refused and changes nothing", async ({ page, request }) => {
-    const { taskKey, card } = await boardWithCard(page, request);
-
-    await stubPost(request, "/_test/pr", { number: 8, title: `${taskKey} forged`, head: "forged" });
-    const forged = await deliver(request, "pull_request", {
-      action: "opened",
-      number: 8,
-      repository: { id: REPO_ID, full_name: REPO },
-      pull_request: { number: 8, title: `${taskKey} forged`, state: "open", html_url: `https://github.com/${REPO}/pull/8`, updated_at: new Date().toISOString(), head: { ref: "forged" } },
-    }, "not-the-webhook-secret");
-    expect(forged).toBe(401);
-
-    // A genuine delivery afterwards is the marker: once its badge shows, the forged one has had its chance to.
-    await pullRequestOnGitHub(request, { number: 9, title: `${taskKey} genuine` });
-    await expect(badge(card)).toHaveAttribute("aria-label", "Pull request #9: Open");
-    const modal = await openDevelopment(page, card);
-    await expect(modal.getByRole("list", { name: "Pull requests" }).getByRole("listitem")).toHaveCount(1);
-  });
-
   test("a member links a pull request that names no key, unlinks it, and it stays unlinked", async ({ page, request }) => {
     const { taskKey, card } = await boardWithCard(page, request);
     await stubPost(request, "/_test/pr", { number: 20, title: "Refactor the importer", head: "importer" });

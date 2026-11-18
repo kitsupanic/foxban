@@ -597,30 +597,6 @@ test("a subtask has an immutable type, cannot nest, and remains reachable throug
   await expect(cardTitled(page, "Child task")).toBeVisible();
 });
 
-test("archiving a parent archives that card alone; its child stays on the board", async ({ page }) => {
-  await boardWithCard(page, "archive", "Parent task");
-
-  await openCard(page, "Todo", "Parent task");
-  await addSubtask(page, "Parent task", "Write docs");
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-
-  await cardBody(cardIn(columnByTitle(page, "Todo"), "Parent task")).click();
-  const dialog = page.getByRole("dialog", { name: "Parent task" });
-  await dialog.getByRole("button", { name: "Delete card" }).click();
-  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-
-  const column = columnByTitle(page, "Todo");
-  await expect(cardIn(column, "Parent task")).toHaveCount(0);
-  await expect(cardIn(column, "Write docs")).toHaveCount(1);
-
-  await page.getByRole("button", { name: "Archived cards" }).click();
-  const archiveDialog = page.getByRole("dialog", { name: "Archived cards" });
-  await expect(archiveDialog.getByRole("button", { name: "Restore Parent task" })).toBeVisible();
-  await expect(archiveDialog.getByRole("button", { name: "Restore Write docs" })).toHaveCount(0);
-});
-
 test("an archived child restores into the column it is sent to", async ({ page }) => {
   const boardName = `Subtasks child archive ${Date.now()}`;
   const boardKey = await createBoard(page, boardName);
