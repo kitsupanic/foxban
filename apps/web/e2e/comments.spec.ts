@@ -41,6 +41,14 @@ async function newUser(
  * resolving to its nearest `[data-comment-id]` row root to avoid nesting ambiguity
  * and styling class coupling.
  */
+/**
+ * A posted comment has settled once the composer collapses back to "Add a comment". Until then
+ * it stays a readonly "Comment" textbox, which an edit or reply editor's "Comment" would collide with.
+ */
+async function commentSettled(dialog: Locator): Promise<void> {
+  await expect(dialog.getByRole("textbox", { name: "Add a comment", exact: true })).toBeVisible();
+}
+
 function commentRow(scope: Locator | Page, bodyText: string | RegExp): Locator {
   return scope.locator(".prose", { hasText: bodyText }).locator("xpath=ancestor::*[@data-comment-id][1]");
 }
@@ -62,6 +70,7 @@ test("audit 3: a server-rejected comment edit keeps the exact draft for correcti
   await dialog.getByRole("textbox", { name: "Add a comment", exact: true }).click();
   await dialog.getByRole("textbox", { name: "Comment", exact: true }).fill("Original comment");
   await dialog.getByRole("button", { name: "Comment", exact: true }).click();
+  await commentSettled(dialog);
   await commentRow(dialog, "Original comment").getByRole("button", { name: "Edit comment" }).click();
   const editor = dialog.getByRole("textbox", { name: "Comment", exact: true });
   const draft = `  ${"x".repeat(10_001)}\n `;
@@ -126,6 +135,7 @@ for (const stored of [false, true]) {
     await dialog.getByRole("textbox", { name: "Add a comment", exact: true }).click();
     await dialog.getByRole("textbox", { name: "Comment", exact: true }).fill("Original comment");
     await dialog.getByRole("button", { name: "Comment", exact: true }).click();
+    await commentSettled(dialog);
     await commentRow(dialog, "Original comment").getByRole("button", { name: "Edit comment" }).click();
     const editor = dialog.getByRole("textbox", { name: "Comment", exact: true });
     const draft = "  edited **comment**\n ";
@@ -614,6 +624,7 @@ test("comments and replies stay readable regardless of system color scheme", asy
     .getByRole("textbox", { name: "Comment", exact: true })
     .fill("Contrast root paragraph\n\n**Contrast bold**\n\n1. First root item\n2. Second root item");
   await dialog.getByRole("button", { name: "Comment", exact: true }).click();
+  await commentSettled(dialog);
 
   const rootRow = commentRow(dialog, "Contrast root paragraph");
   await expect(rootRow).toHaveCount(1);

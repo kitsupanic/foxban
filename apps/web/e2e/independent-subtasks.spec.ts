@@ -16,6 +16,8 @@ for (const mobile of [false, true]) {
     await modal.getByRole("button", { name: "Add subtask", exact: true }).click();
     await modal.getByLabel("Subtask title").fill("Child task"); await modal.getByLabel("Subtask title").press("Enter");
     await expect(modal.getByRole("button", { name: "Open subtask Child task" })).toBeVisible();
+    // A subtask still being written keeps the card dirty, so closing would park behind the discard strip.
+    await expect(modal.getByRole("button", { name: "Adding…" })).toHaveCount(0);
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Workflow settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Workflow settings", exact: true });

@@ -117,6 +117,8 @@ test("compact card sections expand into saved work and secondary details stay ke
   await subtasks.getByLabel("Subtask title", { exact: true }).press("Enter");
   await expect(subtasks.getByRole("button", { name: "Open subtask Verify the release candidate", exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Save title & description", exact: true })).toBeDisabled();
+  // A subtask still being written keeps the card dirty, so closing would park behind the discard strip.
+  await expect(subtasks.getByRole("button", { name: "Adding…" })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await page.reload();

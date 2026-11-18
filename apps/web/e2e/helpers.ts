@@ -392,6 +392,8 @@ export async function touchDragCardTo(
   // Hold to satisfy TouchSensor delay (default 250ms)
   if (holdMs > 0) {
     await page.waitForTimeout(holdMs);
+    // The hold is only 50ms over the delay, so under load wait for the drag to actually start.
+    await expect(page.getByTestId("card-drag-preview")).toBeVisible();
   }
 
   // Move slightly first to overcome tolerance if needed

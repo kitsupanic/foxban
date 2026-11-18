@@ -146,6 +146,8 @@ test("MCP changes converge with browser edits", async ({ page, browser }) => {
     await subtaskComposer.getByLabel("Subtask title").fill("MCP subtask");
     await subtaskComposer.getByLabel("Subtask title").press("Enter");
     await expect(cardDialog.getByRole("button", { name: "Open subtask MCP subtask" })).toBeVisible();
+    // A subtask still being written keeps the card dirty, so closing would park behind the discard strip.
+    await expect(cardDialog.getByRole("button", { name: "Adding…" })).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(cardDialog).toHaveCount(0);
 
@@ -234,8 +236,9 @@ test("MCP changes converge with browser edits", async ({ page, browser }) => {
         task: { id: taskId }, cardLabelId: stringField(statusJoin, "id"),
       },
     });
-    await expect(cardPills()).toHaveText("Unrelated");
-    await expect(peerPills()).toHaveText("Unrelated");
+    // Array form: the list is waited down to exactly this, not a strict single-element match.
+    await expect(cardPills()).toHaveText(["Unrelated"]);
+    await expect(peerPills()).toHaveText(["Unrelated"]);
 
     const freshContext = await browser.newContext({ storageState, viewport: { width: 375, height: 812 } });
     const fresh = await freshContext.newPage();
