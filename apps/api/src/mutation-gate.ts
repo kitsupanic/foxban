@@ -23,6 +23,8 @@ export type MutationContext = {
   actorId: string;
   boardId: string | null;
   canManageColumns: unknown;
+  /** An instance Admin, who may delete any comment (not edit one). */
+  isAdmin?: boolean;
 };
 
 export function isCardArchived(sql: SqlStorage, cardId: string): boolean {
@@ -177,6 +179,21 @@ export function checkMutation(sql: SqlStorage, message: ClientMessage, context: 
         );
       }
       break;
+    // Authorship is the socket's identity, never the frame's: nobody posts as, or rewrites, someone else.
+    case "comment.create":
+      if (message.authorId !== context.actorId) throw new MutationRefusal("forbidden", "Comments are posted as yourself.");
+      break;
+    case "comment.update":
+    case "comment.delete": {
+      const author = sql
+        .exec<{ authorId: string }>("SELECT author_id AS authorId FROM comments WHERE id = ?", message.id)
+        .toArray()[0]?.authorId;
+      const adminDelete = message.type === "comment.delete" && context.isAdmin === true;
+      if (author !== undefined && author !== context.actorId && !adminDelete) {
+        throw new MutationRefusal("forbidden", "Only the author can change this comment.");
+      }
+      break;
+    }
   }
   refuseIfBlocked(sql, touchedCards(sql, message));
   if (

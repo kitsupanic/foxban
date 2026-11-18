@@ -28,6 +28,22 @@ function seedCard(sql: SqlStorage, id: string, taskNumber: number): void {
 const count = (sql: SqlStorage, table: string) => sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n;
 
 describe("mutation pipeline", () => {
+  it("keeps comment authorship to the socket's own user", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "c1", 1);
+      const bob = { actorId: "bob", boardId: null, canManageColumns: false };
+      // Posting as someone else is refused.
+      expect(() => run({ type: "comment.create", mutationId: "m1", id: "fake", cardId: "c1", authorId: "alice", parentCommentId: null, body: "Ship it", createdAt: 1 }, bob)).toThrow(MutationRefusal);
+      run({ type: "comment.create", mutationId: "m2", id: "note", cardId: "c1", authorId: "alice", parentCommentId: null, body: "Hold", createdAt: 1 }, { ...bob, actorId: "alice" });
+      // Another member may neither edit nor delete it; an instance Admin may delete it but not edit it.
+      expect(() => run({ type: "comment.update", mutationId: "m3", id: "note", body: "Ship it", updatedAt: 2 }, bob)).toThrow(MutationRefusal);
+      expect(() => run({ type: "comment.delete", mutationId: "m4", id: "note" }, bob)).toThrow(MutationRefusal);
+      expect(() => run({ type: "comment.update", mutationId: "m5", id: "note", body: "Ship it", updatedAt: 2 }, { ...bob, isAdmin: true })).toThrow(MutationRefusal);
+      expect(sql.exec<{ body: string }>("SELECT body FROM comments WHERE id = 'note'").one().body).toBe("Hold");
+      run({ type: "comment.delete", mutationId: "m6", id: "note" }, { ...bob, isAdmin: true });
+      expect(count(sql, "comments")).toBe(0);
+    }));
+
   it("writes nothing when the gate refuses", () =>
     onBoard((sql, run) => {
       const refused = { type: "column.create", mutationId: "m", id: "extra", title: "Extra", position: "a2" };

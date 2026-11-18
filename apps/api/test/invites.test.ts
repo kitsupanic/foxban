@@ -174,6 +174,17 @@ describe("invite-gated signup", () => {
     ).toBeNull();
   });
 
+  it("refuses an unspent token older than a week and drops it from the list", async () => {
+    const admin = await adminSession("expires@foxban.test");
+    const token = await mintInvite(admin);
+    await env.DB.prepare("UPDATE invites SET created_at = ? WHERE token = ?").bind(Date.now() - 8 * 24 * 60 * 60 * 1000, token).run();
+
+    const late = await signup("late@user.test", token);
+    expect(late.status).toBe(403);
+    expect(await late.json()).toEqual({ error: "a valid invite is required to sign up" });
+    expect(await listOwn(admin, token)).toEqual([]);
+  });
+
   it("records who spent a token, and when", async () => {
     const admin = await adminSession("records@foxban.test");
     const token = await mintInvite(admin);

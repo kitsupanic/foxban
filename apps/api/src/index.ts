@@ -27,6 +27,8 @@ import {
   NO_PASSWORD_HASH,
   adminEmails,
   isAdminEmail,
+  INVITE_TTL_MS,
+  underAuthLimit,
   appOrigin,
   rateLimitAuth,
   rateLimitLookup,
@@ -75,7 +77,7 @@ import {
   userAvatarObjectKey,
   parseAvatarObjectKey,
 } from "./attachment-lifecycle";
-import { INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
+import { INTERNAL_IS_ADMIN_HEADER, INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
 import { boardClient } from "./board-client";
 import { boardDestination, boardSource, run as runCardTransfer } from "./card-transfer";
 import type { WriteBackCard } from "./board-api";
@@ -227,6 +229,8 @@ const ADMIN_NOT_CONFIGURED = { error: "no admin is configured", code: "ADMIN_NOT
  */
 export async function reconcileAttachmentObjects(env: Env): Promise<void> {
   const failures = new Set<string>();
+  // Read once per run, not per page: each candidate is rechecked against D1 before its delete anyway.
+  let activeAvatars: { map: Map<string, string>; leases: Set<string> } | null = null;
   let cursor: string | undefined;
   do {
     const listed = await env.ATTACHMENTS.list(cursor === undefined ? undefined : { cursor });
@@ -254,21 +258,21 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
     }
 
     if (avatarKeysToCheck.length > 0) {
-      const now = Date.now();
-      const { results: activeUsers } = await env.DB.prepare(
-        "SELECT id, avatar_version AS avatarVersion FROM users WHERE avatar_version IS NOT NULL",
-      ).all<{ id: string; avatarVersion: string }>();
-      const activeAvatarMap = new Map<string, string>();
-      for (const row of activeUsers) {
-        activeAvatarMap.set(row.id, row.avatarVersion);
+      if (activeAvatars === null) {
+        const { results: activeUsers } = await env.DB.prepare(
+          "SELECT id, avatar_version AS avatarVersion FROM users WHERE avatar_version IS NOT NULL",
+        ).all<{ id: string; avatarVersion: string }>();
+        const { results: activeLeases } = await env.DB.prepare(
+          "SELECT user_id AS userId, version FROM avatar_leases WHERE expires_at > ?",
+        )
+          .bind(Date.now())
+          .all<{ userId: string; version: string }>();
+        activeAvatars = {
+          map: new Map(activeUsers.map((row) => [row.id, row.avatarVersion])),
+          leases: new Set(activeLeases.map((l) => `${l.userId}:${l.version}`)),
+        };
       }
-
-      const { results: activeLeases } = await env.DB.prepare(
-        "SELECT user_id AS userId, version FROM avatar_leases WHERE expires_at > ?",
-      )
-        .bind(now)
-        .all<{ userId: string; version: string }>();
-      const activeLeaseSet = new Set(activeLeases.map((l) => `${l.userId}:${l.version}`));
+      const { map: activeAvatarMap, leases: activeLeaseSet } = activeAvatars;
 
       for (const { key, userId, version } of avatarKeysToCheck) {
         if (activeAvatarMap.get(userId) === version || activeLeaseSet.has(`${userId}:${version}`)) {
@@ -299,8 +303,6 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
         await env.ATTACHMENTS.delete(key);
       }
 
-      // Sweep expired avatar leases
-      await env.DB.prepare("DELETE FROM avatar_leases WHERE expires_at <= ?").bind(now).run();
     }
 
     for (const [boardId, items] of attachmentItemsByBoard) {
@@ -308,6 +310,8 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
     }
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor !== undefined);
+  // Sweep expired avatar leases
+  await env.DB.prepare("DELETE FROM avatar_leases WHERE expires_at <= ?").bind(Date.now()).run();
   // Later pages still run when a board refused; the run fails once, at the end.
   if (failures.size > 0) {
     throw new Error(`attachment reconciliation failed for boards: ${[...failures].join(", ")}`);
@@ -570,6 +574,8 @@ const app = new Hono<AppEnv>()
   })
   .post("/auth/login", rateLimitAuth, zValidator("json", LoginSchema), async (c) => {
     const { email, password } = c.req.valid("json");
+    // The per-IP limit alone lets many addresses guess one account's password together.
+    if (!(await underAuthLimit(c, `login:${email}`))) return c.json({ error: "too many requests" } as const, 429);
     const row = await c.env.DB.prepare(
       `SELECT id, email, name, github_login AS githubLogin, avatar_version AS avatarVersion, timezone, password_hash AS passwordHash
          FROM users WHERE email = ?`,
@@ -1005,8 +1011,9 @@ const app = new Hono<AppEnv>()
     const { results } = await c.env.DB.prepare(
       `SELECT token, created_at AS createdAt, used_by AS usedBy, used_at AS usedAt
          FROM invites
+        WHERE used_at IS NOT NULL OR created_at > ?
         ORDER BY created_at DESC, rowid DESC`,
-    ).all<{ token: string; createdAt: number; usedBy: string | null; usedAt: number | null }>();
+    ).bind(Date.now() - INVITE_TTL_MS).all<{ token: string; createdAt: number; usedBy: string | null; usedAt: number | null }>();
     return c.json({ invites: results });
   })
   .post("/invites", requireAuth, requireAdmin, async (c) => {
@@ -1585,6 +1592,8 @@ const app = new Hono<AppEnv>()
     const stub = c.env.PRESENCE_DO.get(c.env.PRESENCE_DO.idFromName("global"));
     const headers = new Headers(c.req.raw.headers);
     headers.set(INTERNAL_USER_ID_HEADER, user.id);
+    // Always set: the client's own headers are copied, so a forged one must be overwritten.
+    headers.set(INTERNAL_IS_ADMIN_HEADER, isAdminEmail(c.env, user.email) ? "true" : "false");
     if (effectiveTz) {
       headers.set(INTERNAL_TIMEZONE_HEADER, effectiveTz);
     } else {
