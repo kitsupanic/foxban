@@ -81,3 +81,5 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0071 — `ADMIN_EMAILS` takes exact addresses only](0071-admin-emails-exact-only.md) (amends 0012)
 - [0072 — The board member picker is scoped to the workspace](0072-member-picker-workspace-scope.md)
 - [0073 — Card activity loads per card, not in the snapshot](0073-per-card-activity-loading.md) (amends 0029)
+- [0074 — The board enforces comment authorship](0074-server-enforced-comment-authorship.md) (amends 0015)
+- [0075 — Presence is scoped to the boards a viewer can open](0075-presence-scoped-to-shared-boards.md) (amends 0039)

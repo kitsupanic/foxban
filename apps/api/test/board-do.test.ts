@@ -1083,7 +1083,7 @@ describe("BoardDO", () => {
       mutationId: "d-cmt",
       id: "cmt-a1",
       cardId: "card-a1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "important note",
       createdAt: 1_700_000_000_000,
@@ -1801,7 +1801,7 @@ describe("BoardDO", () => {
       mutationId: "ro-cmt",
       id: "note-ro",
       cardId: "card-archived",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "Comment",
       createdAt: 1_700_000_000_000,
@@ -1853,7 +1853,7 @@ describe("BoardDO", () => {
       // 2. Direct cardId creates
       { type: "checklist.create", mutationId: "ro-chk-c", id: "item-new", cardId: "card-archived", text: "nope", position: "a1" },
       { type: "attachment.create", mutationId: "ro-att-c", id: "att-new", cardId: "card-archived", fileName: "nope.png", contentType: "image/png", size: 4 },
-      { type: "comment.create", mutationId: "ro-cmt-c", id: "note-new", cardId: "card-archived", authorId: "u1", parentCommentId: null, body: "nope", createdAt: 1 },
+      { type: "comment.create", mutationId: "ro-cmt-c", id: "note-new", cardId: "card-archived", authorId: "test-user", parentCommentId: null, body: "nope", createdAt: 1 },
       { type: "label.assign", mutationId: "ro-la-c", id: "join-new", cardId: "card-archived", labelId: "label-1" },
 
       // 3. Stored parent update/delete/unassign ids
@@ -2504,7 +2504,7 @@ describe("BoardDO activity", () => {
       mutationId: "activity-comment-create",
       id: "comment-1",
       cardId: "card-1",
-      authorId: "legacy-author",
+      authorId: "actor-children",
       parentCommentId: null,
       body: "Original",
       createdAt: 1_700_000_000_000,
@@ -3176,7 +3176,7 @@ describe("BoardDO card details", () => {
 
     const lateWrites: ClientMessage[] = [
       { type: "checklist.create", mutationId: "oc-item", id: "item-1", cardId: "card-1", text: "Late", position: "a0" },
-      { type: "comment.create", mutationId: "oc-note", id: "note-1", cardId: "card-1", authorId: "u1", parentCommentId: null, body: "Late", createdAt: 1 },
+      { type: "comment.create", mutationId: "oc-note", id: "note-1", cardId: "card-1", authorId: "test-user", parentCommentId: null, body: "Late", createdAt: 1 },
       { type: "label.assign", mutationId: "oc-join", id: "join-1", cardId: "card-1", labelId: "label-1" },
       { type: "relation.create", mutationId: "oc-rel-source", id: "rel-1", sourceCardId: "card-1", targetCardId: "card-2", kind: "blocks" },
       { type: "relation.create", mutationId: "oc-rel-target", id: "rel-2", sourceCardId: "card-2", targetCardId: "card-1", kind: "blocks" },
@@ -5591,7 +5591,7 @@ describe("BoardDO card details", () => {
       mutationId: "cm-1",
       id: "note-1",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "**looks good**",
       createdAt: 1_700_000_000_000,
@@ -5602,7 +5602,7 @@ describe("BoardDO card details", () => {
       mutationId: "cm-1",
       id: "note-1",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "**looks good**",
       createdAt: 1_700_000_000_000,
@@ -5614,7 +5614,7 @@ describe("BoardDO card details", () => {
       {
         id: "note-1",
         cardId: "card-1",
-        authorId: "user-1",
+        authorId: "test-user",
         parentCommentId: null,
         deleted: false,
         body: "**looks good**",
@@ -5634,7 +5634,7 @@ describe("BoardDO card details", () => {
       mutationId: "cu-1",
       id: "note-1",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "first pass",
       createdAt: 1_700_000_000_000,
@@ -5653,7 +5653,7 @@ describe("BoardDO card details", () => {
       {
         id: "note-1",
         cardId: "card-1",
-        authorId: "user-1",
+        authorId: "test-user",
         parentCommentId: null,
         deleted: false,
         body: "revised",
@@ -5673,7 +5673,7 @@ describe("BoardDO card details", () => {
       mutationId: "cd-1",
       id: "note-1",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "gone soon",
       createdAt: 1_700_000_000_000,
@@ -5703,7 +5703,7 @@ describe("BoardDO card details", () => {
       mutationId: "cx-1",
       id: "note-1",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "doomed",
       createdAt: 1_700_000_000_000,
@@ -5713,7 +5713,7 @@ describe("BoardDO card details", () => {
       mutationId: "cx-2",
       id: "note-2",
       cardId: "card-2",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "kept",
       createdAt: 1_700_000_000_001,
@@ -5745,7 +5745,7 @@ describe("BoardDO card details", () => {
       mutationId: "cz-1",
       id: "note-1",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "preserved",
       createdAt: 1_700_000_000_000,
@@ -5755,7 +5755,7 @@ describe("BoardDO card details", () => {
       mutationId: "cz-2",
       id: "note-2",
       cardId: "card-2",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "kept",
       createdAt: 1_700_000_000_001,
@@ -5779,7 +5779,7 @@ describe("BoardDO card details", () => {
       mutationId: "cr-root",
       id: "root-1",
       cardId: "card-1",
-      authorId: "alice",
+      authorId: "test-user",
       parentCommentId: null,
       body: "Root comment",
       createdAt: 1_700_000_000_000,
@@ -5792,7 +5792,7 @@ describe("BoardDO card details", () => {
       mutationId: "cr-reply-1",
       id: "reply-1",
       cardId: "card-1",
-      authorId: "bob",
+      authorId: "test-user",
       parentCommentId: "root-1",
       body: "First reply",
       createdAt: 1_700_000_001_000,
@@ -5805,7 +5805,7 @@ describe("BoardDO card details", () => {
       mutationId: "cr-reply-to-reply",
       id: "reply-invalid",
       cardId: "card-1",
-      authorId: "alice",
+      authorId: "test-user",
       parentCommentId: "reply-1",
       body: "Nested reply attempt",
       createdAt: 1_700_000_002_000,
@@ -5823,7 +5823,7 @@ describe("BoardDO card details", () => {
       mutationId: "cr-reply-missing",
       id: "reply-missing",
       cardId: "card-1",
-      authorId: "alice",
+      authorId: "test-user",
       parentCommentId: "does-not-exist",
       body: "Missing parent attempt",
       createdAt: 1_700_000_003_000,
@@ -5851,7 +5851,7 @@ describe("BoardDO card details", () => {
       mutationId: "cr-cross-card",
       id: "reply-cross",
       cardId: "card-2",
-      authorId: "alice",
+      authorId: "test-user",
       parentCommentId: "root-1",
       body: "Cross card reply attempt",
       createdAt: 1_700_000_004_000,
@@ -5873,7 +5873,7 @@ describe("BoardDO card details", () => {
     expect(tombstone).toEqual({
       id: "root-1",
       cardId: "card-1",
-      authorId: "alice",
+      authorId: "test-user",
       parentCommentId: null,
       deleted: true,
       body: "",
@@ -5901,7 +5901,7 @@ describe("BoardDO card details", () => {
       mutationId: "cr-reply-2",
       id: "reply-2",
       cardId: "card-1",
-      authorId: "alice",
+      authorId: "test-user",
       parentCommentId: "root-1",
       body: "Second reply to tombstoned root",
       createdAt: 1_700_000_011_000,
@@ -6322,7 +6322,7 @@ describe("BoardDO card details", () => {
       mutationId: "rs-1b",
       id: "note-1",
       cardId: "card-1",
-      authorId: "user-7",
+      authorId: "test-user",
       parentCommentId: null,
       body: "still here",
       createdAt: 1_700_000_000_000,
@@ -6379,7 +6379,7 @@ describe("BoardDO card details", () => {
       {
         id: "note-1",
         cardId: "card-1",
-        authorId: "user-7",
+        authorId: "test-user",
         parentCommentId: null,
         deleted: false,
         body: "still here",
@@ -7007,14 +7007,17 @@ describe("BoardDO internal card transfer endpoints", () => {
       mutationId: "prep-cmt-root",
       id: "cmt-root-1",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "test-user",
       parentCommentId: null,
       body: "Thread root",
       createdAt: 1700000002000,
     });
     await awaitBroadcast(client, "prep-cmt-root");
 
-    client.send({
+    // Replies by a second member, so the bundle must keep each comment's own author.
+    const replier = await connect(board, "user-2");
+    await snapshotOf(replier);
+    replier.send({
       type: "comment.create",
       mutationId: "prep-cmt-rep1",
       id: "cmt-rep-1",
@@ -7024,19 +7027,19 @@ describe("BoardDO internal card transfer endpoints", () => {
       body: "Reply one",
       createdAt: 1700000003000,
     });
-    await awaitBroadcast(client, "prep-cmt-rep1");
+    await awaitBroadcast(replier, "prep-cmt-rep1");
 
-    client.send({
+    replier.send({
       type: "comment.create",
       mutationId: "prep-cmt-rep2",
       id: "cmt-rep-2",
       cardId: "card-1",
-      authorId: "user-1",
+      authorId: "user-2",
       parentCommentId: "cmt-root-1",
       body: "Reply two",
       createdAt: 1700000004000,
     });
-    await awaitBroadcast(client, "prep-cmt-rep2");
+    await awaitBroadcast(replier, "prep-cmt-rep2");
 
     // Tombstone the root while replies remain
     client.send({
@@ -7121,7 +7124,7 @@ describe("BoardDO internal card transfer endpoints", () => {
       {
         id: "cmt-root-1",
         cardId: "card-1",
-        authorId: "user-1",
+        authorId: "test-user",
         parentCommentId: null,
         deleted: true,
         body: "",
@@ -7141,7 +7144,7 @@ describe("BoardDO internal card transfer endpoints", () => {
       {
         id: "cmt-rep-2",
         cardId: "card-1",
-        authorId: "user-1",
+        authorId: "user-2",
         parentCommentId: "cmt-root-1",
         deleted: false,
         body: "Reply two",

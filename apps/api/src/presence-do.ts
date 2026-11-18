@@ -167,7 +167,8 @@ export class PresenceDO extends DurableObject<Env> {
   private getConnectedUserIds(excludeSocket?: WebSocket): Set<string> {
     const connected = new Set<string>();
     for (const ws of this.ctx.getWebSockets()) {
-      if (excludeSocket && ws === excludeSocket) continue;
+      // A socket whose close handler is still awaiting D1 is listed too: it no longer counts as online.
+      if ((excludeSocket && ws === excludeSocket) || ws.readyState !== WebSocket.OPEN) continue;
       const att = this.getAttachment(ws);
       if (att) {
         connected.add(att.userId);

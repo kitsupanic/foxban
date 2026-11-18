@@ -64,6 +64,13 @@
       "name": "AUTH_RATE_LIMITER",
       "namespace_id": "1001",
       "simple": { "limit": 10, "period": 60 }
+    },
+    // Password attempts per account (keyed by email), across all IPs. Higher than the
+    // per-IP limit, so one IP alone (capped at 10) cannot lock an account out.
+    {
+      "name": "ACCOUNT_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 50, "period": 60 }
     }
   ]
 }

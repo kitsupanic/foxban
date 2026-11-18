@@ -31,7 +31,7 @@ Client → server — `ClientMessageSchema` in `packages/shared/src/protocol.ts`
 - Columns: `column.create`, `column.rename`, `column.move`, `column.delete` (the DO archives its active cards).
 - Cards: `card.create` (optional `taskType`, `priority`, `assigneeId`), `card.update` (title, description), `card.move`, `card.retype`, `card.assign`, `card.prioritize`, `card.schedule` (due date), `card.finish` (ADR 0059), `card.delete` (archives), `card.restore`, `card.purge` (archived ids only; permanent).
 - Subtasks and relations: `subtask.create`, `relation.create`, `relation.delete`.
-- Comments: `comment.create`, `comment.update`, `comment.delete`.
+- Comments: `comment.create`, `comment.update`, `comment.delete`. The gate refuses a `comment.create` whose `authorId` is not the socket's user, and an update or delete of someone else's comment; an instance Admin may still delete one (ADR 0074).
 - Checklists: `checklist.create`, `checklist.update`, `checklist.delete`.
 - Labels: `label.create`, `label.update`, `label.delete`, `label.assign`, `label.unassign`.
 - Attachments: `attachment.create`, `attachment.delete`.

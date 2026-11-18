@@ -30,6 +30,8 @@ One global hibernating Durable Object routed via `PRESENCE_DO.idFromName("global
 
 Presence is app-wide: a user is considered online as long as at least one tab has an open presence socket. When all sockets for a user close, `last_seen_at` is stamped in SQLite and an offline update is broadcast. Presence state is strictly partitioned from BoardDO card/column data.
 
+Who sees whom (ADR 0075): a viewer gets their own presence and that of each owner and member of every board they can open; an instance Admin (`x-foxban-is-admin`, set by the Worker) sees everyone. The DO reads that from D1 once for a connecting snapshot and once per online/offline change.
+
 ## Shared (`packages/shared`)
 
 Zod schemas + TypeScript types for Board, Column, Card, and the WS message protocol. Single source of truth for types. Also home to Markdown attachment utilities in `attachment-description.ts`:

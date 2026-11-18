@@ -618,11 +618,22 @@ export const rateLimitAuth = createMiddleware<AppEnv>(async (c, next) => {
 });
 
 /**
- * One more attempt against `key` (a client IP, or `login:<email>`), true while it is under the limit.
+ * Caps password attempts on one account across every IP (`ACCOUNT_RATE_LIMITER`, higher than the
+ * per-IP limit so a single IP cannot lock the owner out). Login, email change and password change share it.
+ */
+export function underAccountLimit(c: Context<AppEnv>, email: string): Promise<boolean> {
+  return underAuthLimit(c, `account:${email.trim().toLowerCase()}`, c.env.ACCOUNT_RATE_LIMITER);
+}
+
+/**
+ * One more attempt against `key` on `limiter` (default `AUTH_RATE_LIMITER`), true while it is under the limit.
  * Local and test requests (no edge client address) are never limited.
  */
-export async function underAuthLimit(c: Context<AppEnv>, key: string | undefined): Promise<boolean> {
-  const limiter = c.env.AUTH_RATE_LIMITER;
+export async function underAuthLimit(
+  c: Context<AppEnv>,
+  key: string | undefined,
+  limiter: RateLimit | undefined = c.env.AUTH_RATE_LIMITER,
+): Promise<boolean> {
   const ip = c.req.header("CF-Connecting-IP");
   if (!limiter || !key || !ip || LOOPBACK_IPS[ip]) return true;
   return (await limiter.limit({ key })).success;
