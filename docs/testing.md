@@ -199,7 +199,9 @@ Each shard (`apps/web/e2e/run-shards.mjs`) owns a complete, isolated run:
   probes are strictly contingent on the owned child process remaining alive: if a
   spawned service exits before readiness is reached, the probe aborts immediately
   rather than accepting a foreign listener or waiting out the timeout budget.
-  `workers: 1` inside every shard; no test retries or timeout inflation.
+  Two workers inside every shard (`E2E_WORKERS` overrides; three flaked under load), so
+  tests in one shard share its stack: anything instance-wide, such as account invites,
+  must be found by its own id, never by count or position. No test retries or timeout inflation.
 - **Mergeable reports.** Each coordinator shard is configured via environment
   (`E2E_BLOB_DIR` and `E2E_BLOB_FILE`) to emit a Playwright blob report with a
   unique filename. The coordinator validates that exactly two expected shard blobs

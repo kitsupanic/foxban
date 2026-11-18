@@ -218,20 +218,34 @@ export async function openAccountInvites(page: Page): Promise<Locator> {
   return main;
 }
 
-/** Generates a fresh account invite and leaves the browser on its page. */
-export async function generateAccountInvite(
-  page: Page,
-): Promise<{ link: string; token: string; otherPending: number }> {
+/** Waits for this page's next POST /invites and returns the token it minted. */
+export async function mintedInviteToken(page: Page): Promise<string> {
+  const response = await page.waitForResponse(
+    (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/invites"),
+  );
+  const { token } = (await response.json()) as { token: string };
+  return token;
+}
+
+/** The pending invite row's link input for one token. */
+export function inviteLinkFor(page: Page, token: string): Locator {
+  return page.getByRole("textbox", { name: `Invite link for ${token.slice(0, 8)}`, exact: true });
+}
+
+/**
+ * Generates a fresh account invite and leaves the browser on its page.
+ * Invites are one instance-wide pool that parallel workers also write to, so the
+ * new invite is found by the token its own POST returned, never by count or position.
+ */
+export async function generateAccountInvite(page: Page): Promise<{ link: string; token: string }> {
   const main = await openAccountInvites(page);
-  const links = main.getByRole("textbox", { name: /^Invite link for / });
-  const otherPending = await links.count();
+  const minted = mintedInviteToken(page);
   await main.getByRole("button", { name: "Generate invite link" }).click();
+  const token = await minted;
   await expect(main.getByRole("status").filter({ hasText: "Invite link generated." })).toHaveText("Invite link generated.");
-  await expect(links).toHaveCount(otherPending + 1);
-  const link = await links.first().inputValue();
-  const token = new URL(link).searchParams.get("invite");
-  if (!token) throw new Error(`invite link carried no token: ${link}`);
-  return { link, token, otherPending };
+  const link = await inviteLinkFor(page, token).inputValue();
+  if (new URL(link).searchParams.get("invite") !== token) throw new Error(`invite link does not carry ${token}: ${link}`);
+  return { link, token };
 }
 
 /** Board columns in board order; each column is one `[data-column-id]` section. */
