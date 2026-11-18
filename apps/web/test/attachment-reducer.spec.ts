@@ -68,16 +68,6 @@ function initialState(description = originalDescription): BoardState {
         updatedAt: 1000,
       },
     ],
-    activities: [
-      {
-        id: "activity-1",
-        cardId: owner.id,
-        actorId: "user-1",
-        sequence: 1,
-        createdAt: 1000,
-        detail: { type: "card.created" },
-      },
-    ],
     checklistItems: [],
     relations: [],
     labels: [],
@@ -100,7 +90,6 @@ test.describe("attachment deletion reducer and rollback state transitions", () =
     expect(deleted.cards[1]).toEqual(state.cards[1]);
     expect(deleted.archivedCards).toEqual(state.archivedCards);
     expect(deleted.comments).toEqual(state.comments);
-    expect(deleted.activities).toEqual(state.activities);
   });
 
   test("a missing attachment is a no-op even when its URL is in descriptions", () => {
@@ -148,7 +137,6 @@ test.describe("attachment deletion reducer and rollback state transitions", () =
     expect(restored.attachments).toEqual(state.attachments);
     expect(restored.cards[1]).toEqual(state.cards[1]);
     expect(restored.comments).toEqual(state.comments);
-    expect(restored.activities).toEqual(state.activities);
     expect(session.rollback(deleteMutation.mutationId)).toMatchObject({ removed: false, cacheState: restored });
   });
 

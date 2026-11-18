@@ -28,7 +28,6 @@ export function extractBoardState(
     checklistItems: snapshot.checklistItems,
     attachments: snapshot.attachments,
     comments: snapshot.comments,
-    activities: snapshot.activities,
     relations: snapshot.relations,
     labels: snapshot.labels,
     cardLabels: snapshot.cardLabels,
@@ -131,20 +130,6 @@ export class BoardReconciler {
       };
     }
 
-    if (msg.type === "activity.recorded") {
-      if (this.baseState) {
-        const knownIds = new Set(this.baseState.activities.map((activity) => activity.id));
-        const added = msg.activities.filter((activity) => !knownIds.has(activity.id));
-        if (added.length > 0) {
-          this.baseState = { ...this.baseState, activities: [...this.baseState.activities, ...added] };
-        }
-      }
-      return {
-        cacheState: this.getCacheState(),
-        ackedMutationIds: [],
-      };
-    }
-
     if (msg.type === "cards.archived") {
       if (this.baseState) {
         this.baseState = reconcileArchivedCards(this.baseState, msg.cards);
@@ -175,9 +160,10 @@ export class BoardReconciler {
       };
     }
 
-    if (msg.type === "github.invalidated") {
-      // A status hint, not a mutation: it changes no board entity, and the
-      // socket runtime answers it with authoritative reads of its own.
+    if (msg.type === "github.invalidated" || msg.type === "activity.recorded") {
+      // Not a mutation: it changes no board entity. The socket runtime answers a
+      // github hint with authoritative reads and merges recorded activity into the
+      // card's own cache (ADR 0073).
       return {
         cacheState: this.getCacheState(),
         ackedMutationIds: [],

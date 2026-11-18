@@ -1,5 +1,4 @@
 import type {
-  Activity,
   ArchivedCard,
   Attachment,
   Card,
@@ -23,7 +22,6 @@ export type BoardState = {
   checklistItems: ChecklistItem[];
   attachments: Attachment[];
   comments: Comment[];
-  activities: Activity[];
   relations: CardRelation[];
   labels: Label[];
   cardLabels: CardLabel[];
@@ -182,13 +180,6 @@ export function cardComments(state: BoardState, cardId: string): Comment[] {
 /** Active (non-tombstoned) comments for badge and count displays. */
 export function activeCardComments(state: BoardState, cardId: string): Comment[] {
   return cardComments(state, cardId).filter((comment) => !comment.deleted);
-}
-
-/** Activity reads in immutable server sequence order. */
-export function cardActivities(state: BoardState, cardId: string): Activity[] {
-  return state.activities
-    .filter((activity) => activity.cardId === cardId)
-    .sort((a, b) => a.sequence - b.sequence);
 }
 
 /** Both sides: a card owns the relations that name it as source OR as target. */
@@ -815,7 +806,7 @@ export function reconcileTaskNumber(
  * Synchronizes the server-only `archive.purged` frame by permanently purging
  * matching ids from both archived and active cards (an active match can only be
  * a stale optimistic restore), plus checklist items, attachments, comments,
- * activities, relations naming either endpoint, and card-label joins. Columns
+ * relations naming either endpoint, and card-label joins. Columns
  * and label definitions are preserved.
  */
 export function purgeArchivedCards(
@@ -833,7 +824,6 @@ export function purgeArchivedCards(
     checklistItems: state.checklistItems.filter((item) => !purged.has(item.cardId)),
     attachments: state.attachments.filter((attachment) => !purged.has(attachment.cardId)),
     comments: state.comments.filter((comment) => !purged.has(comment.cardId)),
-    activities: state.activities.filter((activity) => !purged.has(activity.cardId)),
     relations: state.relations.filter(
       (relation) => !purged.has(relation.sourceCardId) && !purged.has(relation.targetCardId),
     ),

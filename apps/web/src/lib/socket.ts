@@ -8,6 +8,7 @@ import {
 } from "@foxban/shared";
 import { requestAppUpdateCheck } from "./app-update";
 import { boardQueryKey, clearBoardAccessCaches } from "./board-cache";
+import { invalidateCardActivity, recordActivities } from "./activity";
 import { invalidateDevelopmentQueries } from "./card-development";
 import {
   planBoardReconnect,
@@ -254,12 +255,14 @@ export function useBoardSocket(
         // next authoritative read install the truth.
         invalidateDevelopmentQueries(queryClient, boardId);
       }
+      if (msg.type === "activity.recorded") recordActivities(queryClient, boardId, msg.activities);
       if (msg.type === "snapshot") {
         setAccessState("ready");
         inTransition = false;
         // A reconnect snapshot is the missed-event backstop: whatever changed
         // while this socket was down arrives here as a fresh read, not a replay.
         invalidateDevelopmentQueries(queryClient, boardId);
+        invalidateCardActivity(queryClient, boardId);
         void queryClient.invalidateQueries({ queryKey: ["board-meta-by-key"] });
         clearTimeout(stableTimer);
         stableTimer = window.setTimeout(() => {

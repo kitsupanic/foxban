@@ -784,6 +784,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       if (message.kind === "subtask") {
         checkSubtaskLink(sql, message.sourceCardId, message.targetCardId);
       }
+      if (message.sourceCardId === message.targetCardId) throw new Error("a card cannot be linked to itself");
       requireLiveCard(sql, message.sourceCardId);
       requireLiveCard(sql, message.targetCardId);
       sql.exec(
@@ -839,6 +840,8 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       return NO_LIFECYCLE_CHANGES;
     case "label.assign":
       requireLiveCard(sql, message.cardId);
+      // A label deleted while this frame was in flight must not leave an orphan join row.
+      if (!sql.exec("SELECT 1 FROM labels WHERE id = ?", message.labelId).toArray()[0]) throw new Error("label is unavailable");
       sql.exec(
         "INSERT INTO card_labels(id, card_id, label_id) VALUES (?, ?, ?)",
         message.id,

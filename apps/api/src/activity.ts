@@ -470,8 +470,8 @@ export function insertActivities(
   return activities;
 }
 
-/** Read every immutable activity row. Details were validated when written, so a read only parses the JSON: this runs on every snapshot. */
-export function readActivities(sql: SqlStorage): Activity[] {
+/** Read one card's immutable activity rows in sequence order. Details were validated when written, so a read only parses the JSON. */
+export function readCardActivities(sql: SqlStorage, cardId: string): Activity[] {
   return sql
     .exec<{
       id: string;
@@ -484,7 +484,9 @@ export function readActivities(sql: SqlStorage): Activity[] {
       `SELECT id, card_id AS cardId, actor_id AS actorId, sequence,
               created_at AS createdAt, detail_json AS detailJson
          FROM activities
-        ORDER BY card_id, sequence`,
+        WHERE card_id = ?
+        ORDER BY sequence`,
+      cardId,
     )
     .toArray()
     .map(({ detailJson, ...row }) => ({

@@ -1,7 +1,7 @@
 # 0029 — Server-attributed card activity
 
 ## Status
-Accepted — 2026-09-04; supersedes ADR 0015's identity-blind premise
+Accepted — 2026-09-04; supersedes ADR 0015's identity-blind premise; the snapshot clause is amended by 0073
 
 ## Context
 Card history must retain the authenticated actor and one server timestamp across WebSocket hibernation and reconnects without changing the optimistic client-mutation contract.

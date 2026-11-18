@@ -1,4 +1,4 @@
-import { BoardDevelopmentSchema, CardDevelopmentSchema, type BoardDevelopment, type CardDevelopment, type Column, type DevelopmentPullRequest } from "@foxban/shared";
+import { ActivitySchema, BoardDevelopmentSchema, CardDevelopmentSchema, type Activity, type BoardDevelopment, type CardDevelopment, type Column, type DevelopmentPullRequest } from "@foxban/shared";
 import { z } from "zod";
 import {
   WriteBackCardSchema,
@@ -124,6 +124,13 @@ export function boardClient(env: Env, boardId: string) {
       return CardDevelopmentReadSchema.parse(await response.json());
     },
 
+    /** A card's immutable activity in sequence order (empty for an unknown card). Throws when the board cannot answer. */
+    async cardActivity(cardId: string): Promise<Activity[]> {
+      const response = await call("cardActivity", { params: { cardId } });
+      if (!response.ok) throw new Error(`board ${boardId} could not read card activity: ${response.status}`);
+      return z.object({ activities: z.array(ActivitySchema) }).parse(await response.json()).activities;
+    },
+
     async boardDevelopment(): Promise<BoardDevelopment> {
       const response = await call("boardDevelopment");
       if (!response.ok) throw new Error(`board ${boardId} could not read development info: ${response.status}`);
@@ -161,10 +168,11 @@ export function boardClient(env: Env, boardId: string) {
       };
     },
 
-    /** The R2 key of an attachment the board knows (or has staged), or null. Throws when the board cannot be reached. */
+    /** The R2 key of an attachment the board knows (or has staged), or null when it has no such row. Throws when the board cannot answer. */
     async attachmentKey(attachmentId: string): Promise<string | null> {
       const response = await call("attachmentKey", { params: { attachmentId } });
-      if (!response.ok) return null;
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`board ${boardId} could not read an attachment key: ${response.status}`);
       const data = (await response.json()) as { objectKey?: string };
       return data.objectKey || null;
     },
@@ -175,8 +183,8 @@ export function boardClient(env: Env, boardId: string) {
     },
 
     /** Queues the objects R2 holds for this board that its rows no longer own; true when the board accepted them. */
-    async reconcileAttachments(body: { keys: string[]; ids: string[]; objects: Array<{ key: string; attachmentId: string }> }): Promise<boolean> {
-      return (await call("attachmentsReconcile", { body })).ok;
+    async reconcileAttachments(objects: Array<{ key: string; attachmentId: string }>): Promise<boolean> {
+      return (await call("attachmentsReconcile", { body: { objects } })).ok;
     },
 
     /** The columns a card could be transferred into. Throws when the board refuses. */

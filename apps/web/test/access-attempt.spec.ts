@@ -307,6 +307,7 @@ test("denial cleanup removes every board-private key and leaves other context al
   for (const key of [...boardPrivateCacheKeys(identity), ["board-members", "board-2"], ["workspace-members", "workspace-1"], ["boards", "workspace-1"]])
     client.setQueryData(key, "private");
   client.setQueryData(["card-development", "board-1", "card-1"], "development");
+  client.setQueryData(["card-activity", "board-1", "card-1"], "history");
 
   clearBoardAccessCaches(client, identity);
 
@@ -319,6 +320,8 @@ test("denial cleanup removes every board-private key and leaves other context al
     ["board-transfer-options", "board-1"],
     ["card-development", "board-1"],
     ["card-development", "board-1", "card-1"],
+    ["card-activity", "board-1"],
+    ["card-activity", "board-1", "card-1"],
     ["board-development", "board-1"],
     ["connected-repos", "board-1"],
   ]) {

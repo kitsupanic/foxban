@@ -72,7 +72,6 @@ function snapshot(): ServerMessage {
     checklistItems: [],
     attachments: [{ id: attachmentId, cardId, fileName: "shot.png", contentType: "image/png", size: 10 }],
     comments: [],
-    activities: [],
     relations: [],
     labels: [],
     cardLabels: [],

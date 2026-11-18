@@ -30,7 +30,7 @@ export interface SourceParticipant {
 export interface DestinationParticipant {
   receipt(): Promise<Reply<ErrorBody & { receipt?: CardTransferReceipt }>>;
   /** Fence the operation: answers the committed receipt, or records an abort tombstone. */
-  abort(): Promise<Reply<{ committed?: boolean; aborted?: boolean; receipt?: CardTransferReceipt }>>;
+  abort(): Promise<Reply<ErrorBody & { committed?: boolean; aborted?: boolean; receipt?: CardTransferReceipt }>>;
   stageAttachment(attachment: { id: string; contentType: string; size: number; objectKey: string }): Promise<Reply>;
   /** Copy one blob into the destination's transfer-scoped key; false when it could not. */
   copyAttachment(sourceKey: string, destinationKey: string): Promise<boolean>;
@@ -68,6 +68,8 @@ async function fence(destination: DestinationParticipant, ids: Omit<TransferIds,
   } catch {
     return { kind: "retry", why: "unreachable" };
   }
+  // The receipt names another operation: import refuses it for good and receipts are never deleted, so this one can never commit.
+  if (reply.status === 409 && reply.body.code === TRANSFER_TERMINAL_CODE) return { kind: "aborted" };
   if (!ok(reply)) return { kind: "retry", why: "refused" };
   if (!sameOperation(reply.body.receipt, ids)) return { kind: "retry", why: "mismatch" };
   if (reply.body.committed) return { kind: "committed", receipt: reply.body.receipt };

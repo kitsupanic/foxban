@@ -8,7 +8,7 @@ const card = (id: string, position: string, columnId: string): Card => ({ id, ti
 const sub = (parent: string, child: string) => ({ id: `${parent}>${child}`, kind: "subtask" as const, sourceCardId: parent, targetCardId: child });
 const board = (cards: Card[], relations: ReturnType<typeof sub>[]): BoardState => ({
   columns: [{ id: "todo", title: "Todo", position: "a0", starting: true }, { id: "work", title: "Work", position: "a1" }, { id: "done", title: "Done", position: "a2", completed: true }],
-  cards, relations, archivedCards: [], checklistItems: [], attachments: [], comments: [], activities: [], labels: [], cardLabels: [],
+  cards, relations, archivedCards: [], checklistItems: [], attachments: [], comments: [], labels: [], cardLabels: [],
 });
 
 /** The rendered column: roots by key, each followed depth-first by its same-column descendants. */

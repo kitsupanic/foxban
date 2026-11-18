@@ -1,3 +1,4 @@
+import { generateKeyBetween } from "fractional-indexing";
 import { z } from "zod";
 
 import {
@@ -20,6 +21,15 @@ import {
  * could push arbitrarily large payloads into every other socket and into storage.
  */
 export const Identifier = z.string().min(1).max(64);
+/** A client-sent fractional-indexing key. The library throws on malformed keys, so a bad one stored once would break every later insert next to it. */
+export const Position = Identifier.refine((key) => {
+  try {
+    generateKeyBetween(key, null);
+    return true;
+  } catch {
+    return false;
+  }
+}, "invalid position key");
 export const Title = z.string().max(200);
 export const DESCRIPTION_MAX_BYTES = 100_000;
 /**
@@ -33,9 +43,9 @@ export const DESCRIPTION_MAX_BYTES = 100_000;
  * Version 9 adds guarded atomic family completion. Version 10 removes the
  * inherited subtask mode: `workflow.configure` only sets roles and
  * `subtask.complete` is gone, and the snapshot says whether the workflow roles
- * are explicit.
+ * are explicit. Version 11 drops `activities` from the snapshot (ADR 0073).
  */
-export const REALTIME_PROTOCOL_VERSION = "10";
+export const REALTIME_PROTOCOL_VERSION = "11";
 export const TRANSFER_TERMINAL_CODE = "transfer_terminal" as const;
 export type TransferTerminalCode = typeof TRANSFER_TERMINAL_CODE;
 
@@ -326,11 +336,11 @@ export const CardLabelSchema = z.object({ id: Identifier, cardId: Identifier, la
 const clientMessages = [
   z.strictObject({
     type: z.literal("card.finish"), mutationId: Identifier,
-    id: Identifier, columnId: Identifier, position: Identifier,
+    id: Identifier, columnId: Identifier, position: Position,
     scope: z.enum(["parent", "family"]),
-    expectedParentColumnId: Identifier, expectedParentPosition: Identifier,
-    expectedFamily: z.array(z.strictObject({ id: Identifier, parentId: Identifier, columnId: Identifier, position: Identifier })).max(10000),
-    children: z.array(z.strictObject({ id: Identifier, position: Identifier })).max(10000),
+    expectedParentColumnId: Identifier, expectedParentPosition: Position,
+    expectedFamily: z.array(z.strictObject({ id: Identifier, parentId: Identifier, columnId: Identifier, position: Position })).max(10000),
+    children: z.array(z.strictObject({ id: Identifier, position: Position })).max(10000),
   }),
   z.strictObject({
     type: z.literal("workflow.configure"), mutationId: Identifier,
@@ -343,7 +353,7 @@ const clientMessages = [
     mutationId: Identifier,
     id: Identifier,
     title: Title,
-    position: Identifier,
+    position: Position,
   }),
   z.strictObject({
     type: z.literal("column.rename"),
@@ -355,7 +365,7 @@ const clientMessages = [
     type: z.literal("column.move"),
     mutationId: Identifier,
     id: Identifier,
-    position: Identifier,
+    position: Position,
   }),
   z.strictObject({
     type: z.literal("column.delete"),
@@ -375,7 +385,7 @@ const clientMessages = [
     id: Identifier,
     columnId: Identifier,
     title: Title,
-    position: Identifier,
+    position: Position,
     taskType: z.enum(["epic", "spike", "task", "bug"]).optional(),
     priority: PrioritySchema.optional(),
     assigneeId: Identifier.nullable().optional(),
@@ -392,7 +402,7 @@ const clientMessages = [
     mutationId: Identifier,
     id: Identifier,
     columnId: Identifier,
-    position: Identifier,
+    position: Position,
   }),
   z.strictObject({
     type: z.literal("card.delete"),
@@ -409,7 +419,7 @@ const clientMessages = [
     mutationId: Identifier,
     id: Identifier,
     columnId: Identifier,
-    position: Identifier,
+    position: Position,
   }),
   // Assignment is its own mutation rather than a `card.update` field: the
   // partial update COALESCEs absent fields, so a null there could not mean
@@ -456,7 +466,7 @@ const clientMessages = [
     parentCardId: Identifier,
     relationId: Identifier,
     title: NewSubtaskTitle,
-    position: Identifier,
+    position: Position,
     checklistItemId: Identifier.optional(),
   }),
   z.strictObject({
@@ -465,7 +475,7 @@ const clientMessages = [
     id: Identifier,
     cardId: Identifier,
     text: Title,
-    position: Identifier,
+    position: Position,
   }),
   z.strictObject({
     type: z.literal("checklist.update"),
@@ -575,7 +585,7 @@ const clientMessages = [
 
 export const ClientMessageSchema = z.discriminatedUnion("type", clientMessages);
 
-/** Full board state, sent to a socket immediately after accept. Unordered: clients sort by `position`. */
+/** Full board state, sent to a socket immediately after accept. Unordered: clients sort by `position`. Card activity is not in it: clients read one card's history on demand (ADR 0073). */
 export const SnapshotSchema = z.object({
   type: z.literal("snapshot"),
   /**
@@ -589,7 +599,6 @@ export const SnapshotSchema = z.object({
   checklistItems: z.array(ChecklistItemSchema),
   attachments: z.array(AttachmentSchema),
   comments: z.array(CommentSchema),
-  activities: z.array(ActivitySchema),
   relations: z.array(CardRelationSchema),
   labels: z.array(LabelSchema),
   cardLabels: z.array(CardLabelSchema),

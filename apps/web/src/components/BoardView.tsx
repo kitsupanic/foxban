@@ -34,7 +34,6 @@ import type { Board } from "../lib/boards";
 import {
   UNLABELED_FILTER,
   UNASSIGNED_FILTER,
-  cardActivities,
   cardAttachments,
   cardChecklist,
   cardComments,
@@ -2022,7 +2021,6 @@ export function BoardView({
           boardAttachments={boardAttachments}
           uploadScope={authored}
           comments={cardComments(state, openCard.id)}
-          activities={cardActivities(state, openCard.id)}
           relations={cardRelations(state, openCard.id, activeCardIds)}
           hierarchy={hierarchy}
           labels={state.labels}

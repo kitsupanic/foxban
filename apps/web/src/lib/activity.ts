@@ -1,8 +1,55 @@
+import type { QueryClient } from "@tanstack/react-query";
 import type { Activity, ActivityDetail, Comment } from "@foxban/shared";
-import type { Member } from "./api";
+import { api, type Member } from "./api";
 import { formatDueDate } from "./due-date";
 import { PRIORITY_META } from "./priority";
 import { TASK_TYPE_META } from "./task-type";
+
+/**
+ * A card's history is not in the board snapshot (ADR 0073): the card modal reads it
+ * on demand, and live `activity.recorded` frames merge into the same cache.
+ */
+export function cardActivityQueryKey(boardId: string, cardId: string) {
+  return ["card-activity", boardId, cardId] as const;
+}
+
+export function cardActivityQueryOptions(boardId: string, cardId: string) {
+  return {
+    queryKey: cardActivityQueryKey(boardId, cardId),
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<Activity[]> => {
+      const response = await api.boards[":id"].cards[":cardId"].activity.$get({ param: { id: boardId, cardId } }, { init: { signal } });
+      if (!response.ok) throw new Error("Could not load the card's history.");
+      return ((await response.json()) as { activities: Activity[] }).activities;
+    },
+  };
+}
+
+/** Adds the activities `known` lacks and keeps server sequence order; returns `known` itself when nothing is new. */
+export function mergeActivities(known: Activity[], added: readonly Activity[]): Activity[] {
+  const ids = new Set(known.map((activity) => activity.id));
+  const fresh = added.filter((activity) => !ids.has(activity.id));
+  return fresh.length === 0 ? known : [...known, ...fresh].sort((a, b) => a.sequence - b.sequence);
+}
+
+/**
+ * Folds a live `activity.recorded` frame into the per-card caches. Where a card has
+ * nothing loaded yet, a read may be in flight and predate the frame, so it refetches.
+ */
+export function recordActivities(queryClient: QueryClient, boardId: string, recorded: readonly Activity[]): void {
+  for (const cardId of new Set(recorded.map((activity) => activity.cardId))) {
+    const key = cardActivityQueryKey(boardId, cardId);
+    const added = recorded.filter((activity) => activity.cardId === cardId);
+    const loaded = queryClient.getQueryData(key) !== undefined;
+    if (loaded) queryClient.setQueryData<Activity[]>(key, (known) => mergeActivities(known ?? [], added));
+    // A read in flight may predate this frame and would overwrite the merge: restart it so it lands after.
+    if (!loaded || queryClient.isFetching({ queryKey: key }) > 0) void queryClient.invalidateQueries({ queryKey: key });
+  }
+}
+
+/** A reconnect snapshot is the missed-event backstop: every loaded history is stale and the next read installs the truth. */
+export function invalidateCardActivity(queryClient: QueryClient, boardId: string): void {
+  void queryClient.invalidateQueries({ queryKey: ["card-activity", boardId] });
+}
 
 export type CommentTimelineItem = {
   kind: "comment";

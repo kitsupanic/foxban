@@ -30,15 +30,23 @@ const count = (sql: SqlStorage, table: string) => sql.exec<{ n: number }>(`SELEC
 describe("mutation pipeline", () => {
   it("writes nothing when the gate refuses", () =>
     onBoard((sql, run) => {
-      const refused = { type: "column.create", mutationId: "m", id: "extra", title: "Extra", position: "c" };
+      const refused = { type: "column.create", mutationId: "m", id: "extra", title: "Extra", position: "a2" };
       expect(() => run(refused, { actorId: "u1", boardId: null, canManageColumns: false })).toThrow(MutationRefusal);
       expect([count(sql, "columns"), count(sql, "activities")]).toEqual([2, 0]);
+    }));
+
+  it("refuses a position key the ordering library rejects and writes nothing", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "c1", 1);
+      // "zzz" is not a valid fractional-indexing key: stored, it would make every later insert beside it throw.
+      expect(() => run({ type: "card.move", mutationId: "m", id: "c1", columnId: "done", position: "zzz" })).toThrow("invalid position key");
+      expect(sql.exec<{ column_id: string; position: string }>("SELECT column_id, position FROM cards WHERE id = 'c1'").one()).toEqual({ column_id: "todo", position: "a" });
     }));
 
   it("returns the numbered card with the next task number", () =>
     onBoard((sql, run) => {
       seedCard(sql, "old", 4);
-      const outcome = run({ type: "card.create", mutationId: "m", id: "new", columnId: "todo", title: "New", position: "b" });
+      const outcome = run({ type: "card.create", mutationId: "m", id: "new", columnId: "todo", title: "New", position: "a1" });
       expect(outcome.numberedCard).toEqual({ id: "new", taskNumber: 5 });
       expect(sql.exec<{ task_number: number }>("SELECT task_number FROM cards WHERE id = 'new'").one().task_number).toBe(5);
     }));
@@ -48,7 +56,7 @@ describe("mutation pipeline", () => {
       // A finalized transfer deletes the card without a trace the gate reads, so this is the only fence between a late write and an orphan.
       seedCard(sql, "live", 1);
       const lateWrites = [
-        { type: "checklist.create", mutationId: "m1", id: "item", cardId: "gone", text: "Late", position: "a" },
+        { type: "checklist.create", mutationId: "m1", id: "item", cardId: "gone", text: "Late", position: "a0" },
         { type: "comment.create", mutationId: "m2", id: "note", cardId: "gone", authorId: "u1", parentCommentId: null, body: "Late", createdAt: 1 },
         { type: "label.assign", mutationId: "m3", id: "join", cardId: "gone", labelId: "label" },
         { type: "relation.create", mutationId: "m4", id: "rel-target", sourceCardId: "live", targetCardId: "gone", kind: "blocks" },
@@ -77,12 +85,22 @@ describe("mutation pipeline", () => {
   it("records no activities when an idempotent replay writes nothing", () =>
     onBoard((sql, run) => {
       seedCard(sql, "p", 1);
-      const create = { type: "subtask.create", mutationId: "m", id: "kid", parentCardId: "p", relationId: "r", title: "Kid", position: "b" };
+      const create = { type: "subtask.create", mutationId: "m", id: "kid", parentCardId: "p", relationId: "r", title: "Kid", position: "a1" };
       expect(run(create).activities).not.toHaveLength(0);
       const recorded = count(sql, "activities");
       const replay = run(create);
       expect(replay.activities).toEqual([]);
       expect(replay.numberedCard).toEqual({ id: "kid", taskNumber: 2 });
       expect(count(sql, "activities")).toBe(recorded);
+    }));
+
+  it("refuses a label that is gone and a card linked to itself, writing nothing", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "live", 1);
+      expect(() => run({ type: "label.assign", mutationId: "m1", id: "join", cardId: "live", labelId: "deleted" })).toThrow("label is unavailable");
+      for (const kind of ["blocks", "relates", "subtask"]) {
+        expect(() => run({ type: "relation.create", mutationId: `m-${kind}`, id: `rel-${kind}`, sourceCardId: "live", targetCardId: "live", kind })).toThrow();
+      }
+      expect([count(sql, "card_labels"), count(sql, "card_relations"), count(sql, "activities")]).toEqual([0, 0, 0]);
     }));
 });

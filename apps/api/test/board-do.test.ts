@@ -31,6 +31,7 @@ import {
   MCP_COMMAND_PATH,
   RECONCILE_ATTACHMENTS_PATH,
   STAGE_ATTACHMENT_PATH,
+  routePath,
 } from "../src/board-api";
 import { PreparedCardTransferBundleSchema } from "../src/board-do";
 import type { z } from "zod";
@@ -52,6 +53,7 @@ interface Frame {
 }
 
 interface Client {
+  board: string;
   /** Resolves on the next frame from the DO; a missing frame surfaces as the test's own timeout. */
   next(): Promise<Frame>;
   send(message: unknown): void;
@@ -139,6 +141,7 @@ async function connect(
   socket.accept();
 
   const client: Client = {
+    board,
     closed,
     next() {
       const queued = queue.shift();
@@ -258,12 +261,23 @@ function asBoardDOWithBucket(instance: unknown): BoardDOWithBucket {
 }
 
 
+/** The snapshot, plus every activity row the board holds: the snapshot itself carries none (ADR 0073), so this reads them from storage. */
 async function snapshotOf(client: Client) {
   const frame = await client.next();
   if (frame.message.type !== "snapshot") {
     throw new Error(`expected a snapshot first, got ${frame.message.type}`);
   }
-  return frame.message;
+  expect(frame.message).not.toHaveProperty("activities");
+  const activities = await runInDurableObject(env.BOARD_DO.get(env.BOARD_DO.idFromName(client.board)), (_instance, state) =>
+    state.storage.sql
+      .exec<Omit<Activity, "detail"> & { detailJson: string }>(
+        `SELECT id, card_id AS cardId, actor_id AS actorId, sequence, created_at AS createdAt, detail_json AS detailJson
+           FROM activities ORDER BY card_id, sequence`,
+      )
+      .toArray()
+      .map(({ detailJson, ...row }): Activity => ({ ...row, detail: JSON.parse(detailJson) })),
+  );
+  return { ...frame.message, activities };
 }
 
 async function awaitMatching<T extends ServerMessage>(
@@ -377,7 +391,7 @@ describe("BoardDO", () => {
       expect(await next()).toEqual({
         type: "error", mutationId: "denied", message: "Only the board owner or an admin can change columns.",
       });
-      expect(await snapshotOf(await connect(board))).toEqual(baseline);
+      expect((await (await connect(board)).next()).message).toEqual(baseline);
       expect(await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm())).toBe(alarm);
     } finally {
       socket.close(1000, "test finished");
@@ -3201,19 +3215,65 @@ describe("BoardDO card details", () => {
     expect(await read("SELECT value FROM meta WHERE key = 'attachment_keys_backfilled'")).toBe(1);
   });
 
-  it("prunes MCP receipts older than thirty days when the alarm runs, without scheduling one for them", async () => {
+  it("serves one card's activity in sequence order through its own route, and none for another card", async () => {
+    const board = "board-card-activity-route";
+    const a = await connect(board);
+    await snapshotOf(a);
+    await seedCard(a, "ca");
+    await sendWithActivity(a, { type: "card.prioritize", mutationId: "ca-priority", id: "card-1", priority: "high" });
+    const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
+    const read = async (cardId: string) => {
+      const response = await stub.fetch(`https://board.internal${routePath("cardActivity", { cardId })}`, {
+        headers: { [INTERNAL_BOARD_ID_HEADER]: board },
+      });
+      expect(response.status).toBe(200);
+      return (await response.json<{ activities: Activity[] }>()).activities;
+    };
+    const history = await read("card-1");
+    expect(history.map(({ detail }) => detail.type)).toEqual(["card.created", "priority.changed"]);
+    expect(history.map(({ sequence }) => sequence)).toEqual([...history.map(({ sequence }) => sequence)].sort((x, y) => x - y));
+    expect(await read("card-elsewhere")).toEqual([]);
+  });
+
+  it("schedules an alarm for an MCP receipt's expiry, and the alarm prunes it and does not loop", async () => {
+    const board = "board-receipt-alarm";
+    await snapshotOf(await connect(board));
+    const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
+    await runInDurableObject(stub, (_instance, state) => state.storage.deleteAlarm());
+    const before = Date.now();
+    expect((await mcpCommand(board, { operation: "create_label", name: "bug", color: "red" })).ok).toBe(true);
+    const day = 24 * 60 * 60 * 1000;
+    const alarm = await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
+    expect(alarm).toBeGreaterThanOrEqual(before + 30 * day);
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 30 * day);
+
+    // Age the receipt past retention and run the alarm: it prunes the receipt and leaves nothing scheduled.
+    const after = await runInDurableObject(stub, async (instance, state) => {
+      state.storage.sql.exec("UPDATE mcp_operation_receipts SET created_at = ?", Date.now() - 31 * day);
+      await state.storage.deleteAlarm(); // a firing alarm clears itself
+      await instance.alarm();
+      return {
+        receipts: state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM mcp_operation_receipts").toArray()[0]!.count,
+        alarm: await state.storage.getAlarm(),
+      };
+    });
+    expect(after).toEqual({ receipts: 0, alarm: null });
+  });
+
+  it("prunes MCP receipts older than thirty days when the alarm runs, and re-arms it for the oldest one left", async () => {
     const board = "board-receipt-prune";
     await snapshotOf(await connect(board));
     const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
     const day = 24 * 60 * 60 * 1000;
+    const recentAt = Date.now() - 29 * day;
     const { kept, alarm } = await runInDurableObject(stub, async (instance, state) => {
       const sql = state.storage.sql;
-      for (const [key, ageDays] of [["old", 31], ["recent", 29]] as const) {
+      for (const [key, createdAt] of [["old", Date.now() - 31 * day], ["recent", recentAt]] as const) {
         sql.exec(
           `INSERT INTO mcp_operation_receipts(credential_id, operation_key, actor_id, operation, input_hash, result_json, created_at)
            VALUES ('cred', ?, 'u', 'create_task', 'h', '{}', ?)`,
           key,
-          Date.now() - ageDays * day,
+          createdAt,
         );
       }
       await state.storage.deleteAlarm();
@@ -3224,7 +3284,7 @@ describe("BoardDO card details", () => {
       };
     });
     expect(kept).toEqual(["recent"]);
-    expect(alarm).toBeNull();
+    expect(alarm).toBe(recentAt + 30 * day);
   });
 
   it("defaults the priority to medium and carries a card.prioritize in the snapshot", async () => {
@@ -9952,7 +10012,7 @@ describe("workflow roles follow the board's ends until an admin chooses", () => 
     expect(snapshot.cards.map((card) => [card.id, card.columnId, card.subtaskDone])).toEqual([["card-1", "col-1", false]]);
 
     // Reordering moves the ends.
-    a.send({ type: "column.move", mutationId: "move", id: "col-3", position: "Z" });
+    a.send({ type: "column.move", mutationId: "move", id: "col-3", position: "Zz" });
     await awaitBroadcast(a, "move");
     snapshot = await snapshotOf(await connect(board));
     expect(roles(snapshot)).toEqual([["col-3", true, false], ["col-2", false, false], ["col-1", false, true]]);
@@ -10342,11 +10402,12 @@ describe("audit transfer regressions", () => {
           body: JSON.stringify({ transferId, sourceBoardId: source, cardId: "card-1" }),
         });
         expect(receipt.status).toBe(committed ? 200 : 410);
-        const lateKey = attachmentObjectKey(destination, crypto.randomUUID());
+        const lateId = crypto.randomUUID();
+        const lateKey = attachmentObjectKey(destination, lateId);
         await env.ATTACHMENTS.put(lateKey, "late upload");
         const reconciled = await destinationStub.fetch(`https://board.internal${RECONCILE_ATTACHMENTS_PATH}`, {
           method: "POST", headers: { "Content-Type": "application/json", [INTERNAL_BOARD_ID_HEADER]: destination },
-          body: JSON.stringify({ keys: [lateKey] }),
+          body: JSON.stringify({ objects: [{ key: lateKey, attachmentId: lateId }] }),
         });
         expect(reconciled.status).toBe(200);
         await expectObjectDeleted(lateKey);
@@ -10481,13 +10542,14 @@ describe("transfer settlement on the source board", () => {
     s.client.close();
   });
 
-  it("release: a destination that refuses the fence keeps the lock", async () => {
+  it("release: a destination whose receipt names another operation frees the lock", async () => {
     const s = await lockedCard("settle-rel-refused", "x-rel-refused", "settle-rel-refused-dst");
+    // The same transfer id already committed another card there, so this operation can never commit.
     await receiptAt("settle-rel-refused-dst", "x-rel-refused", "some-other-board", "other-card", 3);
     const res = await s.release();
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: "destination abort fence failed; lock retained" });
-    expect(await s.facts()).toEqual({ card: true, lock: true, op: "prepared" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(await s.facts()).toEqual({ card: true, lock: false, op: "aborted" });
     s.client.close();
   });
 
