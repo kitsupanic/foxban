@@ -720,7 +720,7 @@ type CardRow = Omit<Card, "subtaskDone"> & { subtaskDone: number };
  * membership attempt already owns this board's policy in D1.
  */
 type BoardAccessVerdict =
-  | { kind: "granted"; canManageColumns: boolean }
+  | { kind: "granted"; canManageColumns: boolean; operator: boolean }
   | { kind: "transition" }
   | { kind: "denied" };
 
@@ -902,6 +902,7 @@ export class BoardDO extends DurableObject<Env> {
     return {
       kind: "granted",
       canManageColumns: canManageBoard(facts),
+      operator: facts.operator,
     };
   }
 
@@ -2492,7 +2493,7 @@ export class BoardDO extends DurableObject<Env> {
       request.headers.get(INTERNAL_CAN_MANAGE_COLUMNS_HEADER) === "true";
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ userId, boardId, canManageColumns, generation: after.generation, protocolVersion: REALTIME_PROTOCOL_VERSION });
+    server.serializeAttachment({ userId, boardId, canManageColumns, isAdmin: access.operator, generation: after.generation, protocolVersion: REALTIME_PROTOCOL_VERSION });
     this.send(server, this.snapshot());
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -3729,6 +3730,7 @@ export class BoardDO extends DurableObject<Env> {
       actorId,
       boardId,
       canManageColumns: "canManageColumns" in attachment ? attachment.canManageColumns : undefined,
+      isAdmin: "isAdmin" in attachment && attachment.isAdmin === true,
     };
     try {
       // The synchronous refusals first, so a message that is refused anyway never costs a D1 read.
@@ -3810,15 +3812,17 @@ export class BoardDO extends DurableObject<Env> {
       columns: sql.exec<{ id: string; title: string; position: string; completed: number; starting: number }>("SELECT id, title, position, completed, starting FROM columns").toArray().map(c => ({ ...c, completed: c.completed === 1, starting: c.starting === 1 })),
       cards: sql
         .exec<CardRow>(
-          `SELECT id, column_id AS columnId, title, description, position,
-                  task_number AS taskNumber, subtask_done AS subtaskDone,
+          `SELECT cards.id AS id, column_id AS columnId, cards.title AS title, description, cards.position AS position,
+                  task_number AS taskNumber, columns.completed AS subtaskDone,
                   assignee_id AS assigneeId, priority, task_type AS taskType, due_date AS dueDate,
                   created_at AS createdAt, updated_at AS updatedAt
            FROM cards
+           LEFT JOIN columns ON columns.id = cards.column_id
            WHERE archived_at IS NULL`,
         )
         .toArray()
-        .map((row) => ({ ...row, subtaskDone: isCompleted(sql, row.columnId) })),
+        // An active card's done flag is its column's, read in the same query.
+        .map((row) => ({ ...row, subtaskDone: row.subtaskDone === 1 })),
       archivedCards: sql
         .exec<ArchivedCardRow>(`${ARCHIVED_CARD_SELECT} WHERE archived_at IS NOT NULL`)
         .toArray()

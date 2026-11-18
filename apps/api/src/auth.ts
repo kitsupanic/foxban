@@ -456,6 +456,9 @@ export function toSessionUser(row: SessionUserRow): SessionUser {
   return { ...row, hasPassword: row.hasPassword === 1 };
 }
 
+/** An unspent signup invite stops working this long after it was made, so a link that leaked long ago signs nobody up. */
+export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 /**
  * Spends `invite` and inserts the user in one D1 batch, so a token is never spent without its user nor a
  * user created without a token: the UPDATE claims the token only while it is unspent, and the INSERT's
@@ -469,7 +472,7 @@ export async function createUserWithInvite(
   now: number,
 ): Promise<boolean> {
   const [claim] = await db.batch([
-    db.prepare("UPDATE invites SET used_by = ?, used_at = ? WHERE token = ? AND used_at IS NULL").bind(user.id, now, invite),
+    db.prepare("UPDATE invites SET used_by = ?, used_at = ? WHERE token = ? AND used_at IS NULL AND created_at > ?").bind(user.id, now, invite, now - INVITE_TTL_MS),
     db.prepare(
       `INSERT INTO users (id, email, name, password_hash, created_at, github_login, github_user_id)
        SELECT ?, ?, ?, ?, ?, ?, ?
@@ -610,14 +613,31 @@ const LOOPBACK_IPS: Record<string, true> = {
  * only make the dev loop and the e2e suite fail, for no security gain.
  */
 export const rateLimitAuth = createMiddleware<AppEnv>(async (c, next) => {
-  const limiter = c.env.AUTH_RATE_LIMITER;
-  const key = c.req.header("CF-Connecting-IP");
-  if (limiter && key && !LOOPBACK_IPS[key]) {
-    const { success } = await limiter.limit({ key });
-    if (!success) return c.json({ error: "too many requests" } as const, 429);
-  }
+  if (!(await underAuthLimit(c, c.req.header("CF-Connecting-IP")))) return c.json({ error: "too many requests" } as const, 429);
   await next();
 });
+
+/**
+ * Caps password attempts on one account across every IP (`ACCOUNT_RATE_LIMITER`, higher than the
+ * per-IP limit so a single IP cannot lock the owner out). Login, email change and password change share it.
+ */
+export function underAccountLimit(c: Context<AppEnv>, email: string): Promise<boolean> {
+  return underAuthLimit(c, `account:${email.trim().toLowerCase()}`, c.env.ACCOUNT_RATE_LIMITER);
+}
+
+/**
+ * One more attempt against `key` on `limiter` (default `AUTH_RATE_LIMITER`), true while it is under the limit.
+ * Local and test requests (no edge client address) are never limited.
+ */
+export async function underAuthLimit(
+  c: Context<AppEnv>,
+  key: string | undefined,
+  limiter: RateLimit | undefined = c.env.AUTH_RATE_LIMITER,
+): Promise<boolean> {
+  const ip = c.req.header("CF-Connecting-IP");
+  if (!limiter || !key || !ip || LOOPBACK_IPS[ip]) return true;
+  return (await limiter.limit({ key })).success;
+}
 
 /**
  * Caps exact-email lookups (ADR 0072) per signed-in user, so the one-address-at-a-time
@@ -625,11 +645,8 @@ export const rateLimitAuth = createMiddleware<AppEnv>(async (c, next) => {
  * carries `?email=`, and skips local and test requests the way `rateLimitAuth` does.
  */
 export const rateLimitLookup = createMiddleware<AppEnv>(async (c, next) => {
-  const limiter = c.env.AUTH_RATE_LIMITER;
-  const ip = c.req.header("CF-Connecting-IP");
-  if (limiter && ip && !LOOPBACK_IPS[ip] && c.req.query("email") !== undefined) {
-    const { success } = await limiter.limit({ key: `lookup:${c.get("user").id}` });
-    if (!success) return c.json({ error: "too many requests" } as const, 429);
+  if (c.req.query("email") !== undefined && !(await underAuthLimit(c, `lookup:${c.get("user").id}`))) {
+    return c.json({ error: "too many requests" } as const, 429);
   }
   await next();
 });

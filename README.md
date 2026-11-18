@@ -94,7 +94,7 @@ Your `.env.deploy` file stays on your computer. Git does not send it anywhere.
 2. Click **Sign up**. Use the email that you put in `ADMIN_EMAILS`.
 3. Pick a password.
 
-You are now an admin. An admin can make invite links. Send an invite link to each person who should join. Nobody can sign up without one, except admins.
+You are now an admin. An admin can make invite links. Send an invite link to each person who should join. Nobody can sign up without one, except admins. A link works once, and stops working 7 days after you make it.
 
 Do this right after you deploy. foxban does not check that an email is really yours. Until you sign up, whoever types an address from `ADMIN_EMAILS` on the sign-up page gets that admin account.
 

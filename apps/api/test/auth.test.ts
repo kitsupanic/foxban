@@ -1535,6 +1535,27 @@ describe("profile", () => {
     expect((await post("/auth/login", { email, password: "new horse battery staple" })).status).toBe(200);
   });
 
+  it("caps login attempts on one account across many IPs, above the per-IP limit", async () => {
+    const victim = "spread-victim@foxban.test";
+    await signup(victim, "Spread Victim");
+    const attempt = (email: string, ip: string) =>
+      SELF.fetch(`${ORIGIN}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+        body: JSON.stringify({ email, password: "wrong-password" }),
+      });
+    // Nine tries from each of six IPs: every IP stays under its own 10, the account passes its 50.
+    const statuses: number[] = [];
+    for (let ip = 0; ip < 6; ip++) {
+      for (let i = 0; i < 9; i++) statuses.push((await attempt(victim, `203.0.113.${ip + 1}`)).status);
+    }
+    expect(statuses.slice(0, 50).every((status) => status === 401)).toBe(true);
+    expect(statuses.slice(50).every((status) => status === 429)).toBe(true);
+    // A fresh IP is refused for that account only.
+    expect((await attempt(victim, "203.0.113.99")).status).toBe(429);
+    expect((await attempt("someone-else@foxban.test", "203.0.113.99")).status).toBe(401);
+  });
+
   it("enforces rate limits on email and password changes while requireAuth takes precedence", async () => {
     const admin = await signup("admin-rate@foxban.test", "Admin Rate");
     const invite = await mintInvite(admin);

@@ -1,6 +1,5 @@
 import { Hono, type Context } from "hono";
 import { zValidator } from "@hono/zod-validator";
-import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import {
   APP_NAME,
@@ -8,41 +7,23 @@ import {
   BoardColorSchema,
   BoardAccessModeSchema,
   BoardIconSchema,
-  PASSWORD_MAX_LENGTH,
-  PASSWORD_MIN_LENGTH,
   attachmentMaxBytes,
   isPreviewableImageContentType,
-  newPasswordProblem,
   REALTIME_PROTOCOL_VERSION,
   normalizeAttachmentContentType,
 } from "@foxban/shared";
 import {
   boardExists,
-  createInviteToken,
-  createUserWithInvite,
-  endSession,
-  fetchGitHubUser,
-  GITHUB_LOGIN_RE,
-  hashPassword,
-  NO_PASSWORD_HASH,
-  adminEmails,
   isAdminEmail,
   appOrigin,
-  rateLimitAuth,
   rateLimitLookup,
-  requireAdmin,
   requireAuth,
   requireMember,
   findAccessibleBoard,
   findAccessibleBoardByKey,
-  SESSION_COOKIE,
   SESSION_USER_COLS,
-  signUpWithGitHub,
-  startSession,
   toAuthUser,
   toSessionUser,
-  verifyPassword,
-  verifyUserPassword,
   BOARD_SELECT_COLS,
   boardManageSql,
   boardMemberIdsSql,
@@ -55,18 +36,12 @@ import {
   type SessionUserRow,
 } from "./auth";
 import {
-  GITHUB_ADMIN_PAGE_PATH,
   GITHUB_WEBHOOK_PATH,
-  buildGitHubAppManifest,
-  canCreateGitHubApp,
-  createInstanceGitHubApp,
-  getInstanceGitHubAppSummary,
   loadInstanceGitHubApp,
-  removeInstanceGitHubApp,
 } from "./github-app";
 import { drainBackfill } from "./github-backfill";
 import { readCardDevelopment, readPullRequest } from "./github-development";
-import { findConnectedRepo, listConnectedRepos, refreshConnectedRepos } from "./github-repos";
+import { findConnectedRepo, listConnectedRepos } from "./github-repos";
 import { handleGitHubWebhook } from "./github-webhook";
 import {
   ATTACHMENT_ID,
@@ -75,7 +50,7 @@ import {
   userAvatarObjectKey,
   parseAvatarObjectKey,
 } from "./attachment-lifecycle";
-import { INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
+import { INTERNAL_IS_ADMIN_HEADER, INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
 import { boardClient } from "./board-client";
 import { boardDestination, boardSource, run as runCardTransfer } from "./card-transfer";
 import type { WriteBackCard } from "./board-api";
@@ -93,36 +68,8 @@ import {
 import { agentCredentialsRouter, handleMcpRequest } from "./mcp";
 import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, accessChangesRouter, recoverAccessChanges, resolveAccessChangeAttempt, runAccessChange, AccessChangeConflict } from "./access-changes";
 import { workspacesRouter } from "./workspaces";
-/**
- * Every string is bounded — an unbounded body reaches PBKDF2 and D1 otherwise.
- */
-const EmailSchema = z.string().trim().toLowerCase().pipe(z.email().max(254));
-const PasswordSchema = z.string().max(PASSWORD_MAX_LENGTH);
-const NewPasswordSchema = PasswordSchema.min(PASSWORD_MIN_LENGTH).refine(
-  (password) => newPasswordProblem(password) === null,
-  { message: "password is too predictable" },
-);
-
-const NameSchema = z.string().trim().min(1).max(200);
-
-const SignupSchema = z.object({
-  email: EmailSchema,
-  password: NewPasswordSchema,
-  name: NameSchema,
-  // Bounded well above a 43-character base64url token; the value is only ever
-  // compared against a stored one, never parsed.
-  invite: z.string().max(256).optional(),
-});
-const LoginSchema = z.object({ email: EmailSchema, password: PasswordSchema.min(1) });
-const EmailChangeSchema = z.object({
-  email: EmailSchema,
-  currentPassword: PasswordSchema.min(1),
-});
-const PasswordChangeSchema = z.object({
-  // Absent only for an account with no password yet (ADR 0065); the route decides which accounts may omit it.
-  currentPassword: PasswordSchema.min(1).optional(),
-  newPassword: NewPasswordSchema,
-});
+import { adminRouter } from "./admin-routes";
+import { authRouter, NameSchema, passwordRequired } from "./auth-routes";
 const BoardKeySchema = z
   .string()
   .trim()
@@ -189,36 +136,6 @@ const ProfileSchema = z
     },
   );
 
-const GITHUB_STATE_COOKIE = "github_oauth_state";
-const GITHUB_LOGIN_STATE_COOKIE = "github_login_state";
-/** The signup invite the person holds, kept across the GitHub round trip next to the state. */
-const GITHUB_LOGIN_INVITE_COOKIE = "github_login_invite";
-/** The workspace invitation (`<workspaceId>.<token>`) the login page holds in its `#workspaceInvite=`, which a full-page GitHub round trip would lose. */
-const GITHUB_LOGIN_WORKSPACE_INVITE_COOKIE = "github_login_workspace_invite";
-/** Both halves are ids or base64url tokens, so a match is safe to put in a redirect as it is. */
-const WORKSPACE_CONTINUATION = /^([\w-]{1,64})\.([\w-]{1,128})$/;
-const GITHUB_APP_MANIFEST_STATE_COOKIE = "github_app_manifest_state";
-
-
-/**
- * Verified against when the email is unknown, so a login attempt costs the same
- * PBKDF2 work either way. Fixed bytes with the production iteration count — it
- * is not a hash of any password, and no input can match it.
- */
-const DUMMY_PASSWORD_HASH =
-  "pbkdf2:100000:WlpaWlpaWlpaWlpaWlpaWg==:paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=";
-
-/**
- * Every invite failure answers with this, so signup cannot be used to probe
- * whether a token exists, is spent, or was never minted.
- */
-const INVITE_REQUIRED = { error: "a valid invite is required to sign up" } as const;
-
-/** An account made with GitHub has no password until it sets one (ADR 0065); what needs a password to prove itself is refused until then. */
-const passwordRequired = (error: string) => ({ error, code: "PASSWORD_REQUIRED" }) as const;
-
-/** A fresh instance with no `ADMIN_EMAILS` can never admit its first user; say so. */
-const ADMIN_NOT_CONFIGURED = { error: "no admin is configured", code: "ADMIN_NOT_CONFIGURED" } as const;
 
 /**
  * Safety-net GC for historical objects and any future blob that exists without
@@ -227,6 +144,8 @@ const ADMIN_NOT_CONFIGURED = { error: "no admin is configured", code: "ADMIN_NOT
  */
 export async function reconcileAttachmentObjects(env: Env): Promise<void> {
   const failures = new Set<string>();
+  // Read once per run, not per page: each candidate is rechecked against D1 before its delete anyway.
+  let activeAvatars: { map: Map<string, string>; leases: Set<string> } | null = null;
   let cursor: string | undefined;
   do {
     const listed = await env.ATTACHMENTS.list(cursor === undefined ? undefined : { cursor });
@@ -254,21 +173,21 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
     }
 
     if (avatarKeysToCheck.length > 0) {
-      const now = Date.now();
-      const { results: activeUsers } = await env.DB.prepare(
-        "SELECT id, avatar_version AS avatarVersion FROM users WHERE avatar_version IS NOT NULL",
-      ).all<{ id: string; avatarVersion: string }>();
-      const activeAvatarMap = new Map<string, string>();
-      for (const row of activeUsers) {
-        activeAvatarMap.set(row.id, row.avatarVersion);
+      if (activeAvatars === null) {
+        const { results: activeUsers } = await env.DB.prepare(
+          "SELECT id, avatar_version AS avatarVersion FROM users WHERE avatar_version IS NOT NULL",
+        ).all<{ id: string; avatarVersion: string }>();
+        const { results: activeLeases } = await env.DB.prepare(
+          "SELECT user_id AS userId, version FROM avatar_leases WHERE expires_at > ?",
+        )
+          .bind(Date.now())
+          .all<{ userId: string; version: string }>();
+        activeAvatars = {
+          map: new Map(activeUsers.map((row) => [row.id, row.avatarVersion])),
+          leases: new Set(activeLeases.map((l) => `${l.userId}:${l.version}`)),
+        };
       }
-
-      const { results: activeLeases } = await env.DB.prepare(
-        "SELECT user_id AS userId, version FROM avatar_leases WHERE expires_at > ?",
-      )
-        .bind(now)
-        .all<{ userId: string; version: string }>();
-      const activeLeaseSet = new Set(activeLeases.map((l) => `${l.userId}:${l.version}`));
+      const { map: activeAvatarMap, leases: activeLeaseSet } = activeAvatars;
 
       for (const { key, userId, version } of avatarKeysToCheck) {
         if (activeAvatarMap.get(userId) === version || activeLeaseSet.has(`${userId}:${version}`)) {
@@ -299,8 +218,6 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
         await env.ATTACHMENTS.delete(key);
       }
 
-      // Sweep expired avatar leases
-      await env.DB.prepare("DELETE FROM avatar_leases WHERE expires_at <= ?").bind(now).run();
     }
 
     for (const [boardId, items] of attachmentItemsByBoard) {
@@ -308,6 +225,8 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
     }
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor !== undefined);
+  // Sweep expired avatar leases
+  await env.DB.prepare("DELETE FROM avatar_leases WHERE expires_at <= ?").bind(Date.now()).run();
   // Later pages still run when a board refused; the run fails once, at the end.
   if (failures.size > 0) {
     throw new Error(`attachment reconciliation failed for boards: ${[...failures].join(", ")}`);
@@ -499,34 +418,6 @@ function githubWriteFailure(c: Context<AppEnv>, err: unknown) {
   return c.json({ error: "transient github error" } as const, 502);
 }
 
-/** A cookie that lives for the GitHub round trip. Lax, so it comes back on GitHub's redirect to the callback. */
-function githubFlowCookie(c: Context<AppEnv>) {
-  return { httpOnly: true, sameSite: "Lax", path: "/", secure: new URL(c.req.url).protocol === "https:", maxAge: 600 } as const;
-}
-
-/** Keeps `value` in a flow cookie for the round trip; with none, clears what an abandoned attempt left behind. */
-function carryInFlowCookie(c: Context<AppEnv>, name: string, value: string | undefined) {
-  if (value) setCookie(c, name, value, githubFlowCookie(c));
-  else if (getCookie(c, name)) deleteCookie(c, name, { path: "/" });
-}
-
-/** Reads a flow cookie and clears it, so it is good for one callback. */
-function takeFlowCookie(c: Context<AppEnv>, name: string): string | undefined {
-  const value = getCookie(c, name);
-  if (value !== undefined) deleteCookie(c, name, { path: "/" });
-  return value;
-}
-
-/** Sends the browser to GitHub to approve the instance App, with a fresh `state` also kept in `stateCookie`: the pairing the callback checks. */
-function redirectToGitHub(c: Context<AppEnv>, clientId: string, stateCookie: string, callbackPath: string) {
-  const state = crypto.randomUUID();
-  setCookie(c, stateCookie, state, githubFlowCookie(c));
-  const url = new URL("/login/oauth/authorize", c.env.GITHUB_OAUTH_BASE);
-  url.searchParams.set("client_id", clientId);
-  url.searchParams.set("redirect_uri", `${appOrigin(c.env, c.req.url)}${callbackPath}`);
-  url.searchParams.set("state", state);
-  return c.redirect(url.toString());
-}
 
 const app = new Hono<AppEnv>()
   .get("/", (c) => c.json({ ok: true, app: APP_NAME }))
@@ -535,245 +426,7 @@ const app = new Hono<AppEnv>()
   .route("/me/agent-credentials", agentCredentialsRouter)
   .all("/mcp", (c) => handleMcpRequest(c.req.raw, c.env))
   .all("/mcp/*", (c) => c.json({ error: "not found" } as const, 404, { "Cache-Control": "no-store" }))
-  .post("/auth/signup", rateLimitAuth, zValidator("json", SignupSchema), async (c) => {
-    const { email, password, name, invite } = c.req.valid("json");
-    const user = toAuthUser(c.env, { id: crypto.randomUUID(), email, name, githubLogin: null, avatarVersion: null, timezone: null, hasPassword: true });
-    const now = Date.now();
-    const passwordHash = await hashPassword(password);
-    try {
-      if (user.isAdmin) {
-        // ADMIN_EMAILS is the authorization; an invite passed anyway is ignored
-        // and left unspent, so nobody has to mint one for the first account.
-        await c.env.DB.prepare("INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)")
-          .bind(user.id, email, name, passwordHash, now)
-          .run();
-      } else {
-        if (!invite) {
-          // Only for the no-invite case, so it reveals nothing about any token.
-          const noAdmin = adminEmails(c.env).length === 0;
-          return c.json(noAdmin ? ADMIN_NOT_CONFIGURED : INVITE_REQUIRED, 403);
-        }
-        // A failing INSERT (duplicate email) rolls the invite claim back with the batch.
-        if (!(await createUserWithInvite(c.env.DB, invite, { id: user.id, email, name, passwordHash }, now))) {
-          return c.json(INVITE_REQUIRED, 403);
-        }
-      }
-    } catch (error) {
-      // D1 surfaces the users.email uniqueness index as a constraint error.
-      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
-        return c.json({ error: "email already registered" }, 409);
-      }
-      throw error;
-    }
-    await startSession(c, user.id);
-    return c.json(user);
-  })
-  .post("/auth/login", rateLimitAuth, zValidator("json", LoginSchema), async (c) => {
-    const { email, password } = c.req.valid("json");
-    const row = await c.env.DB.prepare(
-      `SELECT id, email, name, github_login AS githubLogin, avatar_version AS avatarVersion, timezone, password_hash AS passwordHash
-         FROM users WHERE email = ?`,
-    )
-      .bind(email)
-      .first<{
-        id: string;
-        email: string;
-        name: string;
-        githubLogin: string | null;
-        avatarVersion: string | null;
-        timezone: string | null;
-        passwordHash: string;
-      }>();
-    // An unknown email still pays for one PBKDF2 derivation, so the response time
-    // does not reveal which accounts exist. Both failures answer the same 401.
-    const stored = row?.passwordHash ?? DUMMY_PASSWORD_HASH;
-    const ok = await verifyPassword(password, stored);
-    if (!row || !ok) {
-      return c.json({ error: "invalid credentials" }, 401);
-    }
-    if (!(await startSession(c, row.id, stored))) {
-      return c.json({ error: "invalid credentials" }, 401);
-    }
-    return c.json(
-      toAuthUser(c.env, {
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        githubLogin: row.githubLogin,
-        avatarVersion: row.avatarVersion,
-        timezone: row.timezone,
-        // Only a stored password verifies, so this account has one.
-        hasPassword: true,
-      }),
-    );
-  })
-  .post("/auth/logout", async (c) => {
-    await endSession(c);
-    return c.json({ ok: true });
-  })
-  .post(
-    "/auth/email",
-    requireAuth,
-    rateLimitAuth,
-    zValidator("json", EmailChangeSchema),
-    async (c) => {
-      const { email: nextEmail, currentPassword } = c.req.valid("json");
-      const user = c.get("user");
-      // No password to prove ownership with (ADR 0065): refused before any admin or duplicate inspection too.
-      if (!user.hasPassword) return c.json(passwordRequired("set a password before changing your email"), 403);
-      // Current password must be verified before any admin or duplicate inspection,
-      // so an invalid password cannot be used to probe whether an address is taken
-      // or configured as an admin.
-      const verifiedHash = await verifyUserPassword(c.env, user.id, currentPassword);
-      if (!verifiedHash) {
-        return c.json({ error: "invalid credentials" }, 401);
-      }
-
-      if (isAdminEmail(c.env, user.email) !== isAdminEmail(c.env, nextEmail)) {
-        return c.json({ error: "email cannot change administrator access" }, 403);
-      }
-
-      try {
-        const { meta } = await c.env.DB.prepare(
-          "UPDATE users SET email = ? WHERE id = ? AND password_hash = ?",
-        )
-          .bind(nextEmail, user.id, verifiedHash)
-          .run();
-        if (meta.changes === 0) {
-          return c.json({ error: "invalid credentials" }, 401);
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
-          return c.json({ error: "email already registered" }, 409);
-        }
-        throw error;
-      }
-
-      const updatedUser: SessionUser = { ...user, email: nextEmail };
-      return c.json(toAuthUser(c.env, updatedUser));
-    },
-  )
-  .post(
-    "/auth/password",
-    requireAuth,
-    rateLimitAuth,
-    zValidator("json", PasswordChangeSchema),
-    async (c) => {
-      const { currentPassword, newPassword } = c.req.valid("json");
-      const user = c.get("user");
-      // An account with no password has nothing to prove: the session is enough, and the compare-and-set below
-      // against the marker lets only one first password win. Anything else must present the current one.
-      const verifiedHash = user.hasPassword
-        ? currentPassword === undefined ? null : await verifyUserPassword(c.env, user.id, currentPassword)
-        : NO_PASSWORD_HASH;
-      if (!verifiedHash) {
-        return c.json({ error: "invalid credentials" }, 401);
-      }
-
-      const newHash = await hashPassword(newPassword);
-      const sessionId = getCookie(c, SESSION_COOKIE) ?? "";
-
-      const [updateResult] = await c.env.DB.batch([
-        c.env.DB.prepare(
-          "UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?",
-        ).bind(newHash, user.id, verifiedHash),
-        c.env.DB.prepare(
-          `DELETE FROM sessions
-            WHERE user_id = ?
-              AND id != ?
-              AND EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)`,
-        ).bind(user.id, sessionId, user.id, newHash),
-      ]);
-
-      if (updateResult?.meta.changes !== 1) {
-        return c.json({ error: "invalid credentials" }, 401);
-      }
-
-      return c.json({ ok: true });
-    },
-  )
-  // The instance GitHub App's user sign-in flow, and the only writer of `users.github_login`.
-  // Both links are navigated to by the browser, never called through `hc`.
-  .get("/auth/github/start", requireAuth, async (c) => {
-    // No App yet (an Admin creates it, ADR 0064): the feature is off, not broken.
-    const githubApp = await getInstanceGitHubAppSummary(c.env);
-    if (!githubApp) return c.json({ error: "GitHub is not configured" }, 503);
-    return redirectToGitHub(c, githubApp.clientId, GITHUB_STATE_COOKIE, "/auth/github/callback");
-  })
-  .get("/auth/github/callback", requireAuth, async (c) => {
-    const fail = (reason: "error" | "taken" = "error") => c.redirect(`${appOrigin(c.env, c.req.url)}/profile?github=${reason}`);
-    const state = c.req.query("state");
-    const code = c.req.query("code");
-    const expected = getCookie(c, GITHUB_STATE_COOKIE);
-    deleteCookie(c, GITHUB_STATE_COOKIE, { path: "/" });
-    if (!state || !code || !expected || state !== expected) return fail();
-    // A missing or unreadable App record is a misconfigured instance, not a server error to the person linking.
-    const githubApp = await loadInstanceGitHubApp(c.env).catch(() => null);
-    if (!githubApp) return fail();
-    const account = await fetchGitHubUser(c.env, githubApp, code, `${appOrigin(c.env, c.req.url)}/auth/github/callback`);
-    if (account === null) return fail();
-    try {
-      await c.env.DB.prepare("UPDATE users SET github_login = ?, github_user_id = ? WHERE id = ?")
-        .bind(account.login, account.id, c.get("user").id)
-        .run();
-    } catch (error) {
-      // The unique index on github_user_id: another foxban account already has this GitHub account.
-      if (String(error).includes("UNIQUE constraint failed")) return fail("taken");
-      throw error;
-    }
-    return c.redirect(`${appOrigin(c.env, c.req.url)}/profile`);
-  })
-  // Signing in with the instance GitHub App (ADR 0065): public, so both ends are rate limited like login.
-  // Every outcome is a redirect to /login, where `?github=` carries the reason.
-  // `?invite=` is the signup page's link: an unknown GitHub account may sign up with it (ADR 0065).
-  // `?workspaceInvite=<workspaceId>.<token>` is the login or signup page's pending workspace invitation: the person lands on its join page once signed in.
-  .get("/auth/github/login/start", rateLimitAuth, async (c) => {
-    const queried = c.req.query("workspaceInvite");
-    const workspaceInvite = queried !== undefined && WORKSPACE_CONTINUATION.test(queried) ? queried : undefined;
-    const githubApp = await getInstanceGitHubAppSummary(c.env);
-    if (!githubApp) return c.redirect(`${appOrigin(c.env, c.req.url)}/login?github=unavailable${workspaceInvite ? `#workspaceInvite=${workspaceInvite}` : ""}`);
-    // Anything left behind by an abandoned attempt must not ride along with this one.
-    carryInFlowCookie(c, GITHUB_LOGIN_INVITE_COOKIE, c.req.query("invite"));
-    carryInFlowCookie(c, GITHUB_LOGIN_WORKSPACE_INVITE_COOKIE, workspaceInvite);
-    return redirectToGitHub(c, githubApp.clientId, GITHUB_LOGIN_STATE_COOKIE, "/auth/github/login/callback");
-  })
-  .get("/auth/github/login/callback", rateLimitAuth, async (c) => {
-    const origin = appOrigin(c.env, c.req.url);
-    const { state, code, error } = c.req.query();
-    const expected = takeFlowCookie(c, GITHUB_LOGIN_STATE_COOKIE);
-    const invite = takeFlowCookie(c, GITHUB_LOGIN_INVITE_COOKIE);
-    const joining = WORKSPACE_CONTINUATION.exec(takeFlowCookie(c, GITHUB_LOGIN_WORKSPACE_INVITE_COOKIE) ?? "");
-    // A failed round trip goes back to the login page holding the invitation again, so a retry keeps it.
-    const fail = (reason: "error" | "cancelled" | "unlinked" | "exists" = "error") =>
-      c.redirect(`${origin}/login?github=${reason}${joining ? `#workspaceInvite=${joining[0]}` : ""}`);
-    const signedIn = () => c.redirect(joining ? `${origin}/join-workspace/${joining[1]}#invite=${joining[2]}` : `${origin}/`);
-    if (!state || !expected || state !== expected) return fail();
-    // GitHub sends `error=access_denied` when the person presses Cancel on its approval page.
-    if (error) return fail(error === "access_denied" ? "cancelled" : "error");
-    if (!code) return fail();
-    // A missing or unreadable App record is a misconfigured instance, not a server error to the person signing in.
-    const githubApp = await loadInstanceGitHubApp(c.env).catch(() => null);
-    if (!githubApp) return fail();
-    const account = await fetchGitHubUser(c.env, githubApp, code, `${origin}/auth/github/login/callback`);
-    if (account === null) return fail();
-    // The numeric id is the key: a login name can be renamed away and handed to someone else.
-    const row = await c.env.DB.prepare("SELECT id, github_login AS githubLogin FROM users WHERE github_user_id = ?")
-      .bind(account.id)
-      .first<{ id: string; githubLogin: string | null }>();
-    if (!row) {
-      // Not linked to any account: signing up, which the invite (and no GitHub-side e-mail match) allows.
-      const created = await signUpWithGitHub(c.env, account, invite);
-      if (!created.ok) return fail(created.problem);
-      await startSession(c, created.userId);
-      return signedIn();
-    }
-    // Follow a rename, so the avatar stays the account owner's.
-    if (row.githubLogin !== account.login) {
-      await c.env.DB.prepare("UPDATE users SET github_login = ? WHERE id = ?").bind(account.login, row.id).run();
-    }
-    await startSession(c, row.id);
-    return signedIn();
-  })
+  .route("/", authRouter)
   .get("/me", requireAuth, (c) => c.json(toAuthUser(c.env, c.get("user"))))
   // Updates display name and/or disconnects GitHub. The response mirrors GET /me
   // so the client can write the `me` cache straight from it — that query never refetches.
@@ -999,107 +652,9 @@ const app = new Hono<AppEnv>()
 
     return new Response(object.body, { headers });
   })
-  // Invites are global signup grants, not board invitations (those live under
-  // /boards/:id/members), and only an admin ever sees or mints one.
-  .get("/invites", requireAuth, requireAdmin, async (c) => {
-    const { results } = await c.env.DB.prepare(
-      `SELECT token, created_at AS createdAt, used_by AS usedBy, used_at AS usedAt
-         FROM invites
-        ORDER BY created_at DESC, rowid DESC`,
-    ).all<{ token: string; createdAt: number; usedBy: string | null; usedAt: number | null }>();
-    return c.json({ invites: results });
-  })
-  .post("/invites", requireAuth, requireAdmin, async (c) => {
-    const token = createInviteToken();
-    await c.env.DB.prepare("INSERT INTO invites (token, created_by, created_at) VALUES (?, ?, ?)")
-      .bind(token, c.get("user").id, Date.now())
-      .run();
-    return c.json({ token }, 201);
-  })
+  .route("/", adminRouter)
   // GitHub's signed webhooks (ADR 0064): public, authenticated by the signature alone.
   .post(GITHUB_WEBHOOK_PATH, (c) => handleGitHubWebhook(c.env, c.req.raw, c.executionCtx))
-  // The instance GitHub App (ADR 0064): created once by an Admin through GitHub's
-  // app-manifest flow. Nothing here ever returns the App's secrets.
-  .get("/github-app", requireAuth, requireAdmin, async (c) => {
-    const app = await getInstanceGitHubAppSummary(c.env);
-    // Opening the page re-reads the install's repos, so a missed webhook heals here.
-    const refresh = app ? await refreshConnectedRepos(c.env) : null;
-    return c.json({
-      app: app && {
-        ...app,
-        installUrl: `${c.env.GITHUB_OAUTH_BASE}/apps/${app.slug}/installations/new`,
-        repos: await listConnectedRepos(c.env),
-        reposRefreshed: refresh !== null,
-        // Who owns the App and which installs foxban skips for not being theirs (null when GitHub could not be asked).
-        owner: refresh?.owner ?? null,
-        ignoredAccounts: refresh?.ignoredAccounts ?? [],
-        // The App's Advanced settings, where its owner can transfer it to another account.
-        settingsUrl: refresh
-          ? `${c.env.GITHUB_OAUTH_BASE}${refresh.ownerIsOrganization ? `/organizations/${refresh.owner}` : ""}/settings/apps/${app.slug}/advanced`
-          : null,
-      },
-      canCreate: canCreateGitHubApp(c.env),
-    });
-  })
-  // Forgets the App so a new one can be created; GitHub keeps it until its owner deletes it there.
-  .delete("/github-app", requireAuth, requireAdmin, async (c) =>
-    (await removeInstanceGitHubApp(c.env)) ? c.json({ ok: true }) : c.json({ error: "no GitHub App" }, 404),
-  )
-  // The browser posts the manifest to GitHub from a form, so the Admin page gets the
-  // target URL (with the CSRF state) and the manifest, not a redirect.
-  .post(
-    "/github-app/manifest",
-    requireAuth,
-    requireAdmin,
-    zValidator("json", z.object({ organization: z.string().regex(GITHUB_LOGIN_RE).optional() })),
-    async (c) => {
-      // No sealing key: the deploy script has not run since this feature shipped.
-      if (!canCreateGitHubApp(c.env)) return c.json({ error: "GitHub App setup needs GITHUB_APP_ENCRYPTION_KEY; redeploy with pnpm run deploy" }, 503);
-      if (await getInstanceGitHubAppSummary(c.env)) return c.json({ error: "this instance already has a GitHub App" }, 409);
-      const state = crypto.randomUUID();
-      setCookie(c, GITHUB_APP_MANIFEST_STATE_COOKIE, state, {
-        httpOnly: true,
-        sameSite: "Lax",
-        path: "/",
-        secure: new URL(c.req.url).protocol === "https:",
-        maxAge: 3600, // GitHub gives the whole manifest flow an hour
-      });
-      const { organization } = c.req.valid("json");
-      const target = new URL(
-        organization ? `/organizations/${organization}/settings/apps/new` : "/settings/apps/new",
-        c.env.GITHUB_OAUTH_BASE,
-      );
-      target.searchParams.set("state", state);
-      return c.json({ url: target.toString(), manifest: buildGitHubAppManifest(appOrigin(c.env, c.req.url)) });
-    },
-  )
-  // GitHub sends the Admin's browser here after "Create GitHub App" (the manifest's
-  // redirect_url). Both the Admin session and the state cookie must match.
-  .get("/auth/github-app/manifest/callback", requireAuth, requireAdmin, async (c) => {
-    const adminPage = `${appOrigin(c.env, c.req.url)}${GITHUB_ADMIN_PAGE_PATH}`;
-    const fail = () => c.redirect(`${adminPage}?githubApp=error`);
-    const state = c.req.query("state");
-    const code = c.req.query("code");
-    const expected = getCookie(c, GITHUB_APP_MANIFEST_STATE_COOKIE);
-    deleteCookie(c, GITHUB_APP_MANIFEST_STATE_COOKIE, { path: "/" });
-    if (!state || !code || !expected || state !== expected || !canCreateGitHubApp(c.env)) return fail();
-    try {
-      return (await createInstanceGitHubApp(c.env, code)) ? c.redirect(`${adminPage}?githubApp=created`) : fail();
-    } catch {
-      return fail();
-    }
-  })
-  .delete("/invites/:token", requireAuth, requireAdmin, async (c) => {
-    // A spent token stays as the audit trail of who used it, so revoking one is
-    // as much a 404 as a token that never existed.
-    const { meta } = await c.env.DB.prepare(
-      "DELETE FROM invites WHERE token = ? AND used_at IS NULL",
-    )
-      .bind(c.req.param("token"))
-      .run();
-    if (meta.changes !== 1) return c.json({ error: "invite not found" }, 404);
-    return c.json({ ok: true });
-  })
   .get("/boards", requireAuth, async (c) => {
     const user = c.get("user");
     const workspaceId = c.req.query("workspaceId");
@@ -1585,6 +1140,8 @@ const app = new Hono<AppEnv>()
     const stub = c.env.PRESENCE_DO.get(c.env.PRESENCE_DO.idFromName("global"));
     const headers = new Headers(c.req.raw.headers);
     headers.set(INTERNAL_USER_ID_HEADER, user.id);
+    // Always set: the client's own headers are copied, so a forged one must be overwritten.
+    headers.set(INTERNAL_IS_ADMIN_HEADER, isAdminEmail(c.env, user.email) ? "true" : "false");
     if (effectiveTz) {
       headers.set(INTERNAL_TIMEZONE_HEADER, effectiveTz);
     } else {

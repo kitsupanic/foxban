@@ -6,6 +6,7 @@ import {
 } from "@foxban/shared";
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { firstWorkspaceId } from "./first-workspace";
 
 /**
  * PresenceDO behaviour driven through real hibernatable WebSockets and the /presence/ws route.
@@ -254,6 +255,39 @@ describe("presence live protocol and multi-tab lifecycle", () => {
 
     aliceClient.close();
     bobClient.close();
+  });
+
+  it("shows a non-admin only the people on boards they can open", async () => {
+    const admin = await signup("presence-minter@foxban.test");
+    const invite = async () => (await (await post("/invites", {}, admin)).json<{ token: string }>()).token;
+    const join = async (email: string) => {
+      const response = await post("/auth/signup", { email, name: email, password: PASSWORD, invite: await invite() });
+      expect(response.status).toBe(200);
+      return { cookie: sessionCookie(response), id: (await response.json<{ id: string }>()).id };
+    };
+    const carol = await join("carol-scope@user.test");
+    const dave = await join("dave-scope@user.test");
+
+    const carolClient = await connectPresenceWs(carol.cookie);
+    await carolClient.nextUserUpdate(carol.id);
+    // Nothing shared: Dave's snapshot leaves Carol out, and Carol hears nothing of Dave.
+    const daveClient = await connectPresenceWs(dave.cookie);
+    const lonely = (await daveClient.next()).message;
+    expect(lonely.type === "presence.snapshot" && lonely.members.map((m) => m.userId)).toEqual([dave.id]);
+    daveClient.close();
+
+    // Once Dave is on Carol's board, each sees the other.
+    const board = await post("/boards", { name: "Scope", key: `PS${Math.random().toString(36).slice(2, 6).toUpperCase()}`, workspaceId: await firstWorkspaceId(carol.cookie) }, carol.cookie);
+    expect(board.status).toBe(200);
+    const { id: boardId } = await board.json<{ id: string }>();
+    await env.DB.prepare("INSERT INTO board_members(board_id, user_id, role) VALUES (?, ?, 'member')").bind(boardId, dave.id).run();
+    const daveAgain = await connectPresenceWs(dave.cookie);
+    const shared = (await daveAgain.next()).message;
+    expect(shared.type === "presence.snapshot" && shared.members.map((m) => m.userId).sort()).toEqual([carol.id, dave.id].sort());
+    // Carol's first frame about Dave is this online one: the earlier connect never reached her.
+    expect(await carolClient.nextUserUpdate(dave.id)).toMatchObject({ userId: dave.id, online: true });
+    carolClient.close();
+    daveAgain.close();
   });
 
   it("two tabs for one user maintain online after one closes; final close broadcasts offline with persisted timestamp", async () => {
