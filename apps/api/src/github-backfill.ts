@@ -54,9 +54,15 @@ function reserve(budget: Budget, worst: number): void {
 type Claimed = { repoId: number; attempts: number; fullName: string; installationId: number } | "gone" | null;
 
 /**
- * Takes the oldest due repo and leases it. The claim itself counts as an attempt (`attempts` is the new count),
- * so a repo whose failure handling cannot run still gives up. "gone" means it was disconnected since it was queued (and is dropped). */
+ * Takes the oldest due repo and leases it. The claim itself counts as an attempt (`attempts` is the new count).
+ * A run that is killed (time limit, hung fetch) never reaches `afterFailure`, so the claim is also where a repo
+ * gives up: a due row that already used `MAX_ATTEMPTS` claims is dropped, never claimed again. (A row whose lease
+ * is still running is not due, so its last attempt is not cut short.) "gone" means it was disconnected since it was queued (and is dropped). */
 async function claim(env: Env, now: number): Promise<Claimed> {
+  const spent = await env.DB.prepare("DELETE FROM github_backfill_queue WHERE run_after <= ?1 AND attempts >= ?2 RETURNING repo_id AS repoId")
+    .bind(now, MAX_ATTEMPTS)
+    .all<{ repoId: number }>();
+  for (const { repoId } of spent.results) console.warn(`[github-backfill] repo ${repoId} dropped after ${MAX_ATTEMPTS} attempts`);
   const row = await env.DB.prepare(
     `UPDATE github_backfill_queue SET run_after = ?2, attempts = attempts + 1
       WHERE repo_id = (SELECT repo_id FROM github_backfill_queue WHERE run_after <= ?1 ORDER BY queued_at, repo_id LIMIT 1)

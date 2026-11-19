@@ -20,6 +20,7 @@ import {
   type Column,
   type Label,
   type LabelColor,
+  type PositionsRebalanced,
   type ServerMessage,
   type SubtaskHierarchy,
   TRANSFER_TERMINAL_CODE,
@@ -3372,6 +3373,7 @@ export class BoardDO extends DurableObject<Env> {
       result.archivedCards,
       result.purgedCardIds,
       result.numberedCard,
+      result.rebalanced,
     );
   }
 
@@ -3385,6 +3387,7 @@ export class BoardDO extends DurableObject<Env> {
     let activities: Activity[] = [];
     let numberedCard: { id: string; taskNumber: number } | undefined;
     let heldRoutes: HeldRoutes | undefined;
+    let rebalanced: PositionsRebalanced | null = null;
     const result = this.ctx.storage.transactionSync((): McpToolResult => {
       const sql = this.ctx.storage.sql;
       const receipt = sql.exec<{
@@ -3580,6 +3583,7 @@ export class BoardDO extends DurableObject<Env> {
       numberedCard = ran.numberedCard;
       activities = ran.activities;
       heldRoutes = ran.heldRoutes;
+      rebalanced = ran.rebalanced;
       // Each operation answers with its own concrete shape: a label-only call has no
       // task result to give, and a task call never borrows the comment shape.
       switch (request.command.operation) {
@@ -3651,7 +3655,7 @@ export class BoardDO extends DurableObject<Env> {
     // The new receipt expires on its own: wake the board then, even if no other work ever does.
     if (!replayed) this.ctx.waitUntil(this.scheduleAlarmAt(now + MCP_RECEIPT_RETENTION_MS));
     if (!replayed && message !== null) {
-      this.fanOutMutation(JSON.stringify(message), message, activities, [], [], numberedCard);
+      this.fanOutMutation(JSON.stringify(message), message, activities, [], [], numberedCard, rebalanced);
     }
     return result;
   }
@@ -3663,14 +3667,17 @@ export class BoardDO extends DurableObject<Env> {
     archivedCards: ArchivedCard[],
     purgedCardIds: string[],
     numberedCard: { id: string; taskNumber: number } | undefined,
+    rebalanced: PositionsRebalanced | null,
   ): void {
     // The caller's own bytes are echoed verbatim; the lifecycle extras are ours.
+    // The verbatim frame carries the key the client chose; the rewrite follows as its own frame (ADR 0076).
     const frames = [
       acceptedFrame,
       ...(purgedCardIds.length ? [JSON.stringify({ type: "archive.purged", cardIds: purgedCardIds } satisfies ServerMessage)] : []),
       ...(archivedCards.length ? [JSON.stringify({ type: "cards.archived", mutationId: message.mutationId, cards: archivedCards } satisfies ServerMessage)] : []),
       ...(numberedCard ? [JSON.stringify({ type: "card.numbered", mutationId: message.mutationId, id: numberedCard.id, taskNumber: numberedCard.taskNumber } satisfies ServerMessage)] : []),
       ...(activities.length ? [JSON.stringify({ type: "activity.recorded", mutationId: message.mutationId, activities } satisfies ServerMessage)] : []),
+      ...(rebalanced ? [JSON.stringify(rebalanced satisfies ServerMessage)] : []),
     ];
     for (const socket of this.ctx.getWebSockets()) {
       try {

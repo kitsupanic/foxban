@@ -381,6 +381,16 @@ describe("a repo whose backfill keeps failing", () => {
     await backfillDone();
   });
 
+  it("drops a repo whose runs were killed five times, instead of claiming it again", async () => {
+    // Killed runs never reach the failure handler: the row is left with its lease expired and `attempts` at the limit.
+    await env.DB.exec("DELETE FROM github_backfill_queue");
+    await connectRepos(env, 7, [{ id: REPO_ID, fullName: REPO_NAME, private: false }]);
+    await env.DB.exec(`INSERT INTO github_backfill_queue(repo_id, queued_at, run_after, attempts) VALUES (${REPO_ID}, 1, 0, 5)`);
+    await drainBackfill(env);
+    expect(fake.pullRequests).toEqual([]);
+    expect(await attemptsOf()).toBeUndefined();
+  });
+
   it("does not count a rate limit against the repo", async () => {
     fake.limit = { retryAfter: 120 };
     await install();

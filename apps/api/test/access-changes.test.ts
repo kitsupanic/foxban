@@ -1374,6 +1374,48 @@ describe("access change journal", () => {
     await env.DB.prepare("DELETE FROM access_change_operations WHERE id=?").bind(id).run();
   });
 
+  it("does not let rows that keep failing starve a newer operation out of the recovery pass", async () => {
+    // More failing rows than one pass reads (20), all older than the row that can be recovered.
+    const insert = (id: string, updatedAt: number) =>
+      env.DB.prepare(
+        `INSERT INTO access_change_operations(id,actor_id,kind,payload_json,payload_hash,phase,notify_user_ids_json,notified,created_at,updated_at)
+         VALUES(?,'actor','board-member-add','not json','hash','preparing','[]',0,?,?)`,
+      ).bind(id, updatedAt, updatedAt);
+    const failing = new Set(Array.from({ length: 25 }, () => crypto.randomUUID()));
+    const healthy = crypto.randomUUID();
+    const base = Date.now() - 60_000;
+    await env.DB.batch([...[...failing].map((id, index) => insert(id, base + index)), insert(healthy, base + 1_000)]);
+    // The participant read fails for the failing rows only, so driving them throws.
+    const flaky = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (sql: string) => {
+            const statement = target.prepare(sql);
+            if (!sql.includes("FROM access_change_boards WHERE operation_id=?")) return statement;
+            return {
+              ...statement,
+              bind: (id: string) => {
+                if (failing.has(id)) throw new Error("D1 unavailable");
+                return statement.bind(id);
+              },
+            };
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (let pass = 0; pass < 3; pass++) await recoverAccessChanges({ ...env, DB: flaky });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("[access-changes] recovery of operation"), "D1 unavailable");
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await readOperation(healthy)).toMatchObject({ phase: "completed", outcome: "aborted" });
+    await env.DB.prepare(`DELETE FROM access_change_operations WHERE id IN (${[...failing, healthy].map(() => "?").join(",")})`).bind(...failing, healthy).run();
+  });
+
   it("answers a replay of a pruned attempt as a new attempt, not as an error in the journal", async () => {
     const admin = await signupAdmin();
     const workspace = await createWorkspace(admin, "Replay window");

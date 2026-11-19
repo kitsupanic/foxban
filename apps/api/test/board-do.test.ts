@@ -34,10 +34,14 @@ import {
   routePath,
 } from "../src/board-api";
 import { PreparedCardTransferBundleSchema } from "../src/board-do";
+import { REBALANCE_KEY_LENGTH } from "../src/board-mutations";
+import { COMMENT_TIME_TOLERANCE_MS } from "../src/mutation-gate";
 import type { z } from "zod";
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 });
+/** A live comment is stamped by the client and must sit near the board's clock (ADR 0074), so fixtures count from now. */
+const T0 = Date.now();
 /**
  * BoardDO behaviour driven through real hibernatable WebSockets: every test
  * talks to the DO the way a browser does (upgrade, snapshot, mutations,
@@ -301,6 +305,7 @@ async function awaitBroadcast(client: Client, mutationId: string): Promise<Clien
       message.type !== "cards.archived" &&
       message.type !== "archive.purged" &&
       message.type !== "card.numbered" &&
+      message.type !== "positions.rebalanced" &&
       message.type !== "github.invalidated" &&
       message.mutationId === mutationId,
   );
@@ -1086,7 +1091,7 @@ describe("BoardDO", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "important note",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     await awaitBroadcast(a, "d-cmt");
     await awaitBroadcast(b, "d-cmt");
@@ -1375,7 +1380,7 @@ describe("BoardDO", () => {
       authorId: "user-a",
       parentCommentId: null,
       body: "Saved comment",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
 
     const before = await snapshotOf(await connect(board));
@@ -1610,7 +1615,7 @@ describe("BoardDO", () => {
       authorId: "purge-user-a",
       parentCommentId: null,
       body: "Owned comment",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     await sendToBoth({
       type: "label.create",
@@ -1804,7 +1809,7 @@ describe("BoardDO", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "Comment",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     await awaitBroadcast(a, "ro-cmt");
     await awaitBroadcast(b, "ro-cmt");
@@ -1853,14 +1858,14 @@ describe("BoardDO", () => {
       // 2. Direct cardId creates
       { type: "checklist.create", mutationId: "ro-chk-c", id: "item-new", cardId: "card-archived", text: "nope", position: "a1" },
       { type: "attachment.create", mutationId: "ro-att-c", id: "att-new", cardId: "card-archived", fileName: "nope.png", contentType: "image/png", size: 4 },
-      { type: "comment.create", mutationId: "ro-cmt-c", id: "note-new", cardId: "card-archived", authorId: "test-user", parentCommentId: null, body: "nope", createdAt: 1 },
+      { type: "comment.create", mutationId: "ro-cmt-c", id: "note-new", cardId: "card-archived", authorId: "test-user", parentCommentId: null, body: "nope", createdAt: T0 },
       { type: "label.assign", mutationId: "ro-la-c", id: "join-new", cardId: "card-archived", labelId: "label-1" },
 
       // 3. Stored parent update/delete/unassign ids
       { type: "checklist.update", mutationId: "ro-chk-u", id: "item-ro", text: "nope" },
       { type: "checklist.delete", mutationId: "ro-chk-d", id: "item-ro" },
       { type: "attachment.delete", mutationId: "ro-att-d", id: roAttId },
-      { type: "comment.update", mutationId: "ro-cmt-u", id: "note-ro", body: "nope", updatedAt: 1 },
+      { type: "comment.update", mutationId: "ro-cmt-u", id: "note-ro", body: "nope", updatedAt: T0 },
       { type: "label.unassign", mutationId: "ro-la-d", id: "join-ro" },
 
       // 4. Relation endpoints / create / delete
@@ -2507,7 +2512,7 @@ describe("BoardDO activity", () => {
       authorId: "actor-children",
       parentCommentId: null,
       body: "Original",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     };
     a.send(commentCreate);
     expect(await awaitBroadcast(a, commentCreate.mutationId)).toEqual(commentCreate);
@@ -2518,7 +2523,7 @@ describe("BoardDO activity", () => {
           mutationId: "activity-comment-update",
           id: "comment-1",
           body: "Edited",
-          updatedAt: 1_700_000_000_001,
+          updatedAt: T0 + 1,
         })
       )[0]?.detail,
     ).toEqual({ type: "comment.edited" });
@@ -2837,7 +2842,7 @@ describe("BoardDO activity edge cases", () => {
         mutationId: "missing-comment-update",
         id: "missing-comment",
         body: "Missing",
-        updatedAt: 1,
+        updatedAt: T0,
       },
       {
         type: "comment.delete",
@@ -3176,7 +3181,7 @@ describe("BoardDO card details", () => {
 
     const lateWrites: ClientMessage[] = [
       { type: "checklist.create", mutationId: "oc-item", id: "item-1", cardId: "card-1", text: "Late", position: "a0" },
-      { type: "comment.create", mutationId: "oc-note", id: "note-1", cardId: "card-1", authorId: "test-user", parentCommentId: null, body: "Late", createdAt: 1 },
+      { type: "comment.create", mutationId: "oc-note", id: "note-1", cardId: "card-1", authorId: "test-user", parentCommentId: null, body: "Late", createdAt: T0 },
       { type: "label.assign", mutationId: "oc-join", id: "join-1", cardId: "card-1", labelId: "label-1" },
       { type: "relation.create", mutationId: "oc-rel-source", id: "rel-1", sourceCardId: "card-1", targetCardId: "card-2", kind: "blocks" },
       { type: "relation.create", mutationId: "oc-rel-target", id: "rel-2", sourceCardId: "card-2", targetCardId: "card-1", kind: "blocks" },
@@ -5594,7 +5599,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "**looks good**",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     const echo = await awaitBroadcast(a, "cm-1");
     expect(echo).toEqual({
@@ -5605,7 +5610,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "**looks good**",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
 
     // A fresh comment is unedited: both timestamp columns take `createdAt`.
@@ -5618,10 +5623,37 @@ describe("BoardDO card details", () => {
         parentCommentId: null,
         deleted: false,
         body: "**looks good**",
-        createdAt: 1_700_000_000_000,
-        updatedAt: 1_700_000_000_000,
+        createdAt: T0,
+        updatedAt: T0,
       },
     ]);
+  });
+
+  it("refuses a live comment stamped far from the board's clock and takes one near it", async () => {
+    const a = await connect("board-comment-clock");
+    await snapshotOf(a);
+    await seedCard(a, "cc");
+    const create = (mutationId: string, createdAt: number) => ({
+      type: "comment.create", mutationId, id: mutationId, cardId: "card-1", authorId: "test-user", parentCommentId: null, body: "hi", createdAt,
+    });
+
+    // Backdated and post-dated comments are refused to the sender, never stored or relayed.
+    a.send(create("cc-past", 0));
+    a.send(create("cc-future", Date.now() + 2 * COMMENT_TIME_TOLERANCE_MS));
+    expect((await awaitError(a, "cc-past")).message).toMatch(/Comment time is out of range/);
+    expect((await awaitError(a, "cc-future")).message).toMatch(/Comment time is out of range/);
+    expect(await countDurableRows("board-comment-clock", "SELECT COUNT(*) AS n FROM comments")).toBe(0);
+
+    // Skew inside the window is fine.
+    const nearly = Date.now() - COMMENT_TIME_TOLERANCE_MS / 2;
+    a.send(create("cc-ok", nearly));
+    expect(await awaitBroadcast(a, "cc-ok")).toMatchObject({ createdAt: nearly });
+
+    a.send({ type: "comment.update", mutationId: "cc-edit-old", id: "cc-ok", body: "backdated", updatedAt: 0 });
+    expect((await awaitError(a, "cc-edit-old")).message).toMatch(/Comment time is out of range/);
+    a.send({ type: "comment.update", mutationId: "cc-edit", id: "cc-ok", body: "edited", updatedAt: Date.now() });
+    await awaitBroadcast(a, "cc-edit");
+    expect(await countDurableRows("board-comment-clock", "SELECT COUNT(*) AS n FROM comments WHERE body = 'edited'")).toBe(1);
   });
 
   it("changes only the body and updatedAt on comment.update", async () => {
@@ -5637,14 +5669,14 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "first pass",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     a.send({
       type: "comment.update",
       mutationId: "cu-2",
       id: "note-1",
       body: "revised",
-      updatedAt: 1_700_000_060_000,
+      updatedAt: T0 + 60_000,
     });
     await awaitBroadcast(a, "cu-2");
 
@@ -5657,8 +5689,8 @@ describe("BoardDO card details", () => {
         parentCommentId: null,
         deleted: false,
         body: "revised",
-        createdAt: 1_700_000_000_000,
-        updatedAt: 1_700_000_060_000,
+        createdAt: T0,
+        updatedAt: T0 + 60_000,
       },
     ]);
   });
@@ -5676,7 +5708,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "gone soon",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     a.send({ type: "comment.delete", mutationId: "cd-2", id: "note-1" });
     await awaitBroadcast(a, "cd-2");
@@ -5706,7 +5738,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "doomed",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     a.send({
       type: "comment.create",
@@ -5716,7 +5748,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "kept",
-      createdAt: 1_700_000_000_001,
+      createdAt: T0 + 1,
     });
     a.send({ type: "card.delete", mutationId: "cx-3", id: "card-1" });
     await awaitBroadcast(a, "cx-3");
@@ -5748,7 +5780,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "preserved",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     a.send({
       type: "comment.create",
@@ -5758,7 +5790,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "kept",
-      createdAt: 1_700_000_000_001,
+      createdAt: T0 + 1,
     });
     a.send({ type: "column.delete", mutationId: "cz-3", id: "col-1" });
     await awaitBroadcast(a, "cz-3");
@@ -5782,7 +5814,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "Root comment",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     await awaitBroadcast(a, "cr-root");
 
@@ -5795,7 +5827,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: "root-1",
       body: "First reply",
-      createdAt: 1_700_000_001_000,
+      createdAt: T0 + 1_000,
     });
     await awaitBroadcast(a, "cr-reply-1");
 
@@ -5808,7 +5840,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: "reply-1",
       body: "Nested reply attempt",
-      createdAt: 1_700_000_002_000,
+      createdAt: T0 + 2_000,
     });
     const errNested = await a.next();
     expect(errNested.message.type).toBe("error");
@@ -5826,7 +5858,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: "does-not-exist",
       body: "Missing parent attempt",
-      createdAt: 1_700_000_003_000,
+      createdAt: T0 + 3_000,
     });
     const errMissing = await a.next();
     expect(errMissing.message.type).toBe("error");
@@ -5854,7 +5886,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: "root-1",
       body: "Cross card reply attempt",
-      createdAt: 1_700_000_004_000,
+      createdAt: T0 + 4_000,
     });
     const errCross = await a.next();
     expect(errCross.message.type).toBe("error");
@@ -5877,8 +5909,8 @@ describe("BoardDO card details", () => {
       parentCommentId: null,
       deleted: true,
       body: "",
-      createdAt: 1_700_000_000_000,
-      updatedAt: 1_700_000_000_000,
+      createdAt: T0,
+      updatedAt: T0,
     });
     const replyAfterTombstone = snapshot.comments.find((c) => c.id === "reply-1");
     expect(replyAfterTombstone?.deleted).toBe(false);
@@ -5889,7 +5921,7 @@ describe("BoardDO card details", () => {
       mutationId: "cr-upd-tombstone",
       id: "root-1",
       body: "Reviving tombstone",
-      updatedAt: 1_700_000_010_000,
+      updatedAt: T0 + 10_000,
     });
     await awaitBroadcast(a, "cr-upd-tombstone");
     snapshot = await snapshotOf(await connect("board-comment-replies"));
@@ -5904,7 +5936,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: "root-1",
       body: "Second reply to tombstoned root",
-      createdAt: 1_700_000_011_000,
+      createdAt: T0 + 11_000,
     });
     await awaitBroadcast(a, "cr-reply-2");
 
@@ -6325,7 +6357,7 @@ describe("BoardDO card details", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "still here",
-      createdAt: 1_700_000_000_000,
+      createdAt: T0,
     });
     a.send({ type: "card.assign", mutationId: "rs-2", id: "card-1", assigneeId: "user-7" });
     a.send({ type: "card.prioritize", mutationId: "rs-2b", id: "card-1", priority: "high" });
@@ -6383,8 +6415,8 @@ describe("BoardDO card details", () => {
         parentCommentId: null,
         deleted: false,
         body: "still here",
-        createdAt: 1_700_000_000_000,
-        updatedAt: 1_700_000_000_000,
+        createdAt: T0,
+        updatedAt: T0,
       },
     ]);
     expect(snapshot.relations).toEqual([
@@ -7010,7 +7042,7 @@ describe("BoardDO internal card transfer endpoints", () => {
       authorId: "test-user",
       parentCommentId: null,
       body: "Thread root",
-      createdAt: 1700000002000,
+      createdAt: T0 + 2_000,
     });
     await awaitBroadcast(client, "prep-cmt-root");
 
@@ -7025,7 +7057,7 @@ describe("BoardDO internal card transfer endpoints", () => {
       authorId: "user-2",
       parentCommentId: "cmt-root-1",
       body: "Reply one",
-      createdAt: 1700000003000,
+      createdAt: T0 + 3_000,
     });
     await awaitBroadcast(replier, "prep-cmt-rep1");
 
@@ -7037,7 +7069,7 @@ describe("BoardDO internal card transfer endpoints", () => {
       authorId: "user-2",
       parentCommentId: "cmt-root-1",
       body: "Reply two",
-      createdAt: 1700000004000,
+      createdAt: T0 + 4_000,
     });
     await awaitBroadcast(replier, "prep-cmt-rep2");
 
@@ -7128,8 +7160,8 @@ describe("BoardDO internal card transfer endpoints", () => {
         parentCommentId: null,
         deleted: true,
         body: "",
-        createdAt: 1700000002000,
-        updatedAt: 1700000002000,
+        createdAt: T0 + 2_000,
+        updatedAt: T0 + 2_000,
       },
       {
         id: "cmt-rep-1",
@@ -7138,8 +7170,8 @@ describe("BoardDO internal card transfer endpoints", () => {
         parentCommentId: "cmt-root-1",
         deleted: false,
         body: "Reply one",
-        createdAt: 1700000003000,
-        updatedAt: 1700000003000,
+        createdAt: T0 + 3_000,
+        updatedAt: T0 + 3_000,
       },
       {
         id: "cmt-rep-2",
@@ -7148,8 +7180,8 @@ describe("BoardDO internal card transfer endpoints", () => {
         parentCommentId: "cmt-root-1",
         deleted: false,
         body: "Reply two",
-        createdAt: 1700000004000,
-        updatedAt: 1700000004000,
+        createdAt: T0 + 4_000,
+        updatedAt: T0 + 4_000,
       },
     ]);
     expect(bundle.attachments).toHaveLength(1);
@@ -9741,6 +9773,100 @@ describe("BoardDO fractional ordering", () => {
     const midpoint = generateKeyBetween("Zz", tail);
     expect(midpoint > "Zz" && midpoint < tail).toBe(true);
     expect(generateKeyBetween(tail, "a1") < "a1").toBe(true);
+  });
+
+  const rebalancedFrame = (message: ServerMessage): message is Extract<ServerMessage, { type: "positions.rebalanced" }> => message.type === "positions.rebalanced";
+
+  it("keeps room in a gap that every drop lands in, by rewriting the column's keys and telling everyone", async () => {
+    const board = "board-rebalance-gap";
+    const a = await connect(board);
+    const watcher = await connect(board, "watcher");
+    await snapshotOf(a);
+    await snapshotOf(watcher);
+    a.send({ type: "column.create", mutationId: "gap-col", id: "col-1", title: "Todo", position: "a0" });
+    a.send({ type: "card.create", mutationId: "gap-top", id: "top", columnId: "col-1", title: "top", position: "a0" });
+    a.send({ type: "card.create", mutationId: "gap-bottom", id: "bottom", columnId: "col-1", title: "bottom", position: "a1" });
+    await awaitBroadcast(a, "gap-bottom");
+
+    // Always just below the top card: unrepaired, the key passes the wire's 64 characters after 373 drops and every later one is refused.
+    let top = "a0";
+    let below = "a1";
+    let rewrites = 0;
+    for (let i = 0; i < 480; i++) {
+      const id = `gap-${i}`;
+      const position = generateKeyBetween(top, below);
+      a.send({ type: "card.create", mutationId: id, id, columnId: "col-1", title: id, position });
+      const answer = await awaitMatching(a, (m): m is ServerMessage => "mutationId" in m && m.mutationId === id && m.type !== "card.numbered" && m.type !== "activity.recorded");
+      expect(answer.type, `drop ${i}`).toBe("card.create");
+      if (position.length <= REBALANCE_KEY_LENGTH) {
+        below = position;
+        continue;
+      }
+      // The long key was stored, then replaced; the sender and the watcher both learn the new keys from one rebalance frame.
+      rewrites++;
+      const { table, positions } = await awaitMatching(a, rebalancedFrame);
+      expect(table).toBe("cards");
+      const keyOf = new Map(positions.map((entry) => [entry.id, entry.position]));
+      top = keyOf.get("top")!;
+      below = keyOf.get(id)!;
+    }
+    expect(rewrites).toBeGreaterThan(1);
+    // The watcher, who sent nothing, got one frame per rewrite, each listing the column in the order the drops asked for, with strictly rising short keys.
+    for (let i = 0; i < rewrites; i++) {
+      const { positions } = await awaitMatching(watcher, rebalancedFrame);
+      const dropped = positions.length - 2;
+      expect(positions.map((entry) => entry.id)).toEqual(["top", ...Array.from({ length: dropped }, (_, n) => `gap-${dropped - 1 - n}`), "bottom"]);
+      expect(positions.every((entry, n) => entry.position.length <= REBALANCE_KEY_LENGTH && (n === 0 || positions[n - 1]!.position < entry.position))).toBe(true);
+    }
+
+    const rows = await rootPositions(board);
+    // Newest first below the top card, the first insert last above the bottom one: the order the drops asked for.
+    expect(rows.map((row) => row.id)).toEqual(["top", ...Array.from({ length: 480 }, (_, i) => `gap-${479 - i}`), "bottom"]);
+    expect(Math.max(...rows.map((row) => row.position.length))).toBeLessThanOrEqual(REBALANCE_KEY_LENGTH);
+  });
+
+  it("rewrites a column's keys when an MCP placement finds no room, and broadcasts them as a rebalance frame", async () => {
+    const board = "board-rebalance-mcp";
+    const a = await connect(board);
+    await snapshotOf(a);
+    a.send({ type: "column.create", mutationId: "rb-col", id: "col-1", title: "Todo", position: "a0" });
+    for (const [id, position] of [["card-a", "a0"], ["card-b", "a1"], ["card-m", "a5"]] as const) {
+      a.send({ type: "card.create", mutationId: `rb-${id}`, id, columnId: "col-1", title: id, position });
+    }
+    await awaitBroadcast(a, "rb-card-m");
+    // The longest key that still fits under the threshold, so a placement between it and card-a must go past it.
+    let tight = "a1";
+    while (generateKeyBetween("a0", tight).length <= REBALANCE_KEY_LENGTH) tight = generateKeyBetween("a0", tight);
+    await runInDurableObject(env.BOARD_DO.get(env.BOARD_DO.idFromName(board)), (_instance, state) => {
+      state.storage.sql.exec("UPDATE cards SET position = ? WHERE id = 'card-b'", tight);
+    });
+
+    const moved = await mcpCommand(board, { operation: "move_task", task: { id: "card-m" }, columnId: "col-1", placement: { after: { id: "card-a" } } });
+    expect(moved.ok).toBe(true);
+
+    const rows = await rootPositions(board);
+    expect(rows.map((row) => row.id)).toEqual(["card-a", "card-m", "card-b"]);
+    expect(rows.map((row) => row.position)).toEqual(["a0", "a1", "a2"]);
+    const { table, positions } = await awaitMatching(a, rebalancedFrame);
+    expect(table).toBe("cards");
+    expect(positions).toEqual([{ id: "card-a", position: "a0" }, { id: "card-m", position: "a1" }, { id: "card-b", position: "a2" }]);
+  });
+
+  it("rewrites the columns' own keys when a column lands on a long one", async () => {
+    const board = "board-rebalance-columns";
+    const a = await connect(board);
+    await snapshotOf(a);
+    for (const [id, position] of [["col-1", "a0"], ["col-2", "a1"], ["col-3", "a2"]] as const) {
+      a.send({ type: "column.create", mutationId: `rc-${id}`, id, title: id, position });
+    }
+    let long = "a1";
+    while (long.length <= REBALANCE_KEY_LENGTH) long = generateKeyBetween("a0", long);
+    a.send({ type: "column.move", mutationId: "rc-move", id: "col-3", position: long });
+    await awaitBroadcast(a, "rc-move");
+
+    const { table, positions } = await awaitMatching(a, rebalancedFrame);
+    expect(table).toBe("columns");
+    expect(positions).toEqual([{ id: "col-1", position: "a0" }, { id: "col-3", position: "a1" }, { id: "col-2", position: "a2" }]);
   });
 });
 

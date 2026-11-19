@@ -598,3 +598,81 @@ test.describe("Creation settlement through the reconciler", () => {
     expect(absent.settledPending[0]?.presentInSnapshot).toBe(false);
   });
 });
+
+test.describe("positions.rebalanced through the reconciler (ADR 0076)", () => {
+  const card = (id: string, position: string): Card => ({
+    ...createInitialState().cards[0]!,
+    id,
+    columnId: "col-1",
+    title: id,
+    position,
+  });
+  const rebalanced: ServerMessage = {
+    type: "positions.rebalanced",
+    table: "cards",
+    positions: [
+      { id: "x1", position: "a0" },
+      { id: "x2", position: "a1" },
+      { id: "x3", position: "a2" },
+    ],
+  };
+
+  test("re-keys the base and keeps every in-flight mutation pending", () => {
+    const longKey = "a0VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV";
+    const session = createBoardReconciler(
+      { ...createInitialState(), cards: [card("x1", "a0"), card("x2", longKey), card("x3", "a1")] },
+      "board-test",
+    );
+    const comment: ClientMessage = {
+      type: "comment.create",
+      mutationId: "mut-comment",
+      id: "cmt-1",
+      cardId: "x1",
+      authorId: "me",
+      parentCommentId: null,
+      body: "still in flight",
+      createdAt: 5000,
+    };
+    const edit: ClientMessage = { type: "card.update", mutationId: "mut-edit", id: "x2", title: "edited" };
+    const move: ClientMessage = { type: "card.move", mutationId: "mut-move", id: "x3", columnId: "col-2", position: "a5" };
+    for (const msg of [comment, edit, move]) session.sendOptimistic(msg);
+
+    const outcome = session.applyServerMessage(rebalanced);
+
+    // Nothing is settled, retired or rolled back: a rebalance is a peer change, not a reconnect snapshot.
+    expect(outcome.ackedMutationIds).toEqual([]);
+    expect(outcome.rolledBackMutationId).toBeUndefined();
+    expect(session.getPendingMutations()).toEqual([comment, edit, move]);
+    // The base carries the new keys, and the pending mutations are re-applied over them.
+    expect(session.getBaseState()!.cards.map((c) => [c.id, c.position])).toEqual([["x1", "a0"], ["x2", "a1"], ["x3", "a2"]]);
+    expect(session.getBaseState()!.cards.find((c) => c.id === "x2")!.title).toBe("x2");
+    const cache = session.getCacheState()!;
+    expect(cache.comments.map((c) => c.id)).toEqual(["cmt-1"]);
+    expect(cache.cards.find((c) => c.id === "x2")!.title).toBe("edited");
+    expect(cache.cards.find((c) => c.id === "x3")).toMatchObject({ columnId: "col-2", position: "a5" });
+
+    // The own echo still settles the comment normally afterwards.
+    const echo = session.applyServerMessage(comment);
+    expect(echo.ackedMutationIds).toEqual(["mut-comment"]);
+    expect(session.getPendingMutations()).toEqual([edit, move]);
+  });
+
+  test("re-keys columns by id and ignores ids it does not hold", () => {
+    const initial = createInitialState();
+    const session = createBoardReconciler(
+      { ...initial, columns: initial.columns.map((c, i) => ({ ...c, position: ["a0", "a0VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV", "a1"][i]! })) },
+      "board-test",
+    );
+    session.applyServerMessage({
+      type: "positions.rebalanced",
+      table: "columns",
+      positions: [
+        { id: "col-1", position: "a0" },
+        { id: "col-2", position: "a1" },
+        { id: "col-3", position: "a2" },
+        { id: "gone", position: "a3" },
+      ],
+    });
+    expect(session.getCacheState()!.columns.map((c) => [c.id, c.position])).toEqual([["col-1", "a0"], ["col-2", "a1"], ["col-3", "a2"]]);
+  });
+});

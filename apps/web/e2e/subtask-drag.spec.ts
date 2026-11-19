@@ -9,7 +9,7 @@ async function longFamily(page: Page) {
   await page.getByRole("link", { name, exact: true }).click();
   // Seed only this test's newly created board through the actual BoardDO socket.
   await page.evaluate(async ({ id }) => {
-    const socket = new WebSocket(`${location.origin.replace("http", "ws")}/boards/${id}/ws?realtimeVersion=11`);
+    const socket = new WebSocket(`${location.origin.replace("http", "ws")}/boards/${id}/ws?realtimeVersion=12`);
     await new Promise<void>((resolve, reject) => {
       socket.addEventListener("error", () => reject(new Error("fixture socket failed")), { once: true });
       socket.addEventListener("message", function ready(event) {

@@ -2,6 +2,7 @@ import type { BoardAccessMode, BoardCapabilities, BoardColor, BoardIcon, Workspa
 import { createMiddleware } from "hono/factory";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
+import { GITHUB_FETCH_TIMEOUT_MS } from "./github";
 
 /** The signed-in user, as identified by the session cookie. */
 export type SessionUser = {
@@ -327,6 +328,7 @@ export async function fetchGitHubUser(
         code,
         redirect_uri: redirectUri,
       }),
+      signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
     });
     if (!tokenResponse.ok) return null;
     const { access_token } = (await tokenResponse.json()) as { access_token?: string };
@@ -337,13 +339,13 @@ export async function fetchGitHubUser(
       // GitHub's API rejects requests without a User-Agent.
       "User-Agent": "foxban",
     };
-    const userResponse = await fetch(`${env.GITHUB_API_BASE}/user`, { headers });
+    const userResponse = await fetch(`${env.GITHUB_API_BASE}/user`, { headers, signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS) });
     if (!userResponse.ok) return null;
     const { id, login } = (await userResponse.json()) as { id?: unknown; login?: unknown };
     if (typeof login !== "string" || !GITHUB_LOGIN_RE.test(login) || !Number.isSafeInteger(id) || (id as number) <= 0) return null;
     const verifiedEmails = async () => {
       try {
-        const response = await fetch(`${env.GITHUB_API_BASE}/user/emails`, { headers });
+        const response = await fetch(`${env.GITHUB_API_BASE}/user/emails`, { headers, signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS) });
         if (!response.ok) return null;
         const list = (await response.json()) as unknown;
         if (!Array.isArray(list)) return null;

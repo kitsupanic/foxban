@@ -12,6 +12,7 @@ import {
   interpretAccessStatus,
   isPollingExhausted,
   markAccessAttemptUnresolvable,
+  BOARD_AUTHORED_RESYNC_CLOSE,
   planBoardReconnect,
   readAccessAttempt,
   requestAccessChange,
@@ -292,6 +293,30 @@ test("a stale metadata read cannot claim the board is ready during a transition"
   // is still a transition close rather than a transport one.
   const plan = planBoardReconnect({ code: 1006, attempt: 0, failures: 0, inTransition: true, probe: "unknown" });
   expect(plan).toMatchObject({ mode: "transition", failures: 0 });
+});
+
+test("a deliberate resync close never exhausts the failure budget", () => {
+  let attempt = 0;
+  let failures = 0;
+  for (let close = 0; close < 5; close += 1) {
+    const plan = planBoardReconnect({ code: BOARD_AUTHORED_RESYNC_CLOSE, attempt, failures, inTransition: false, probe: "ready" });
+    expect(plan.mode).toBe("transport");
+    expect(plan.delayMs).not.toBeNull();
+    ({ attempt, failures } = plan);
+  }
+  expect(failures).toBe(0);
+});
+
+test("three ordinary closes still stop reconnecting", () => {
+  let attempt = 0;
+  let failures = 0;
+  let mode = "";
+  for (let close = 0; close < 3; close += 1) {
+    const plan = planBoardReconnect({ code: 1006, attempt, failures, inTransition: false, probe: "ready" });
+    mode = plan.mode;
+    ({ attempt, failures } = plan);
+  }
+  expect(mode).toBe("stopped");
 });
 
 test("a denied close stops reconnecting", () => {

@@ -3,12 +3,14 @@
  * Plain functions over the board's `SqlStorage`: no Durable Object state and no
  * I/O but SQL, so the BoardDO imports this and never the other way round.
  */
+import { generateNKeysBetween } from "fractional-indexing";
 import {
   removeAttachmentReferences,
   type Activity,
   type ArchivedCard,
   type Card,
   type ClientMessage,
+  type PositionsRebalanced,
 } from "@foxban/shared";
 import { activityDrafts, insertActivities } from "./activity";
 import { attachmentObjectKey } from "./attachment-lifecycle";
@@ -45,6 +47,8 @@ type MutationOutcome = {
   numberedCard?: { id: string; taskNumber: number };
   /** What a purge held; empty for every other mutation. */
   heldRoutes: HeldRoutes;
+  /** The new keys when the mutation's list was rewritten (ADR 0076): the verbatim frame alone leaves peers with the old ones. */
+  rebalanced: PositionsRebalanced | null;
 };
 
 type ApplyResult = {
@@ -63,6 +67,48 @@ type ApplyResult = {
 const NO_LIFECYCLE_CHANGES: ApplyResult = { archivedCards: [], purgedCardIds: [] };
 
 /**
+ * ADR 0076: dropping again and again into one gap lengthens its key until the
+ * wire's 64-character bound refuses every further drop there. A mutation that
+ * writes a key longer than this has its whole list rewritten with short keys.
+ */
+export const REBALANCE_KEY_LENGTH = 40;
+
+/** The list a mutation's position keys landed in, and the keys it wrote there; null when it wrote none. */
+function keyedList(message: ClientMessage): { table: "cards" | "columns"; where: string; args: string[]; written: string[] } | null {
+  const inColumn = (columnId: string, written: string[]) => ({ table: "cards" as const, where: "column_id = ? AND archived_at IS NULL", args: [columnId], written });
+  switch (message.type) {
+    case "card.create":
+    case "card.move":
+    case "card.restore":
+      return inColumn(message.columnId, [message.position]);
+    case "card.finish":
+      return inColumn(message.columnId, [message.position, ...message.children.map((child) => child.position)]);
+    case "column.create":
+    case "column.move":
+      return { table: "columns", where: "1", args: [], written: [message.position] };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Rewrites the active cards of the column (or the columns of the board) the
+ * mutation just wrote a long key into, in the order they already have and with
+ * evenly spaced keys. Archived cards keep theirs: restore brings its own.
+ * Returns the rewritten keys for the frame that tells peers, or null when it wrote none.
+ */
+function rebalanceLongKeys(sql: SqlStorage, message: ClientMessage): PositionsRebalanced | null {
+  const list = keyedList(message);
+  if (!list?.written.some((key) => key.length > REBALANCE_KEY_LENGTH)) return null;
+  const rows = sql.exec<{ id: string }>(`SELECT id FROM ${list.table} WHERE ${list.where} ORDER BY position, id`, ...list.args).toArray();
+  if (rows.length === 0) return null; // a move of a card that is gone wrote nothing
+  const keys = generateNKeysBetween(null, null, rows.length);
+  const positions = rows.map((row, index) => ({ id: row.id, position: keys[index]! }));
+  for (const { id, position } of positions) sql.exec(`UPDATE ${list.table} SET position = ? WHERE id = ?`, position, id);
+  return { type: "positions.rebalanced", table: list.table, positions };
+}
+
+/**
  * Runs one mutation: the gate, then the activity drafts, then the write, then the
  * activities (skipped for an idempotent replay). Call it inside the caller's
  * transaction: a throw, a refusal included, means the caller's transaction rolls
@@ -74,12 +120,13 @@ export function runMutation(
   context: MutationContext,
   now: number,
 ): MutationOutcome {
-  checkMutation(sql, message, context);
+  checkMutation(sql, message, context, now);
   const drafts = activityDrafts(sql, message);
   const { skipActivities, heldRoutes, ...changes } = apply(sql, message, now, context.boardId);
   return {
     activities: skipActivities ? [] : insertActivities(sql, drafts, context.actorId, now),
     heldRoutes: heldRoutes ?? { pullRequests: [], branches: [] },
+    rebalanced: rebalanceLongKeys(sql, message),
     ...changes,
   };
 }
@@ -604,8 +651,8 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       sql.exec("DELETE FROM attachments WHERE id = ?", message.id);
       return NO_LIFECYCLE_CHANGES;
     }
-    // Legacy comment attribution and timestamps stay on the wire for
-    // compatibility (ADR 0015); activity attribution uses socket identity.
+    // The wire's author and timestamps are kept for compatibility (ADR 0015);
+    // the gate holds them to the socket's user and the board's clock (ADR 0074, 0077).
     case "comment.create": {
       requireLiveCard(sql, message.cardId);
       if (message.parentCommentId !== null) {

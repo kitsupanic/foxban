@@ -11,6 +11,7 @@ import { boardQueryKey, clearBoardAccessCaches } from "./board-cache";
 import { invalidateCardActivity, recordActivities } from "./activity";
 import { invalidateDevelopmentQueries } from "./card-development";
 import {
+  BOARD_AUTHORED_RESYNC_CLOSE,
   planBoardReconnect,
   STABLE_CONNECTION_MS,
   type AccessProbe,
@@ -153,6 +154,8 @@ export function useBoardSocket(
         pendingSentMutationsRef.current.delete(mutationId);
       }
       const subs = mutationSubscribersRef.current.get(mutationId);
+      // Nobody can retry an unsubscribed instant mutation, and a late echo still applies as a peer frame.
+      if (!subs && status === "timeout") pendingSentMutationsRef.current.delete(mutationId);
       if (!subs) return;
       if (status !== "uncertain" && status !== "timeout" && status !== "verified-retry") {
         mutationSubscribersRef.current.delete(mutationId);
@@ -191,7 +194,7 @@ export function useBoardSocket(
       if (reason === "timeout" && mutationSubscribersRef.current.has(mutationId)) {
         const ws = socketRef.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.close(4000, "authored operation timeout resync");
+          ws.close(BOARD_AUTHORED_RESYNC_CLOSE, "authored operation timeout resync");
         }
       }
     },
