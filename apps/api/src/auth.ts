@@ -4,6 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import { GITHUB_FETCH_TIMEOUT_MS } from "./github";
 import { boardClient } from "./board-client";
+import { base64Url } from "./base64url";
 import { REVOKE_SESSIONS_PATH, type SessionRevocation } from "./session-revocation";
 
 /** The signed-in user, as identified by the session cookie. */
@@ -233,6 +234,7 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+
 function fromBase64(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -251,7 +253,7 @@ function randomHex(byteLength: number): string {
  */
 export function createInviteToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
-  return toBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return base64Url(bytes);
 }
 
 export async function sha256Hex(value: string): Promise<string> {

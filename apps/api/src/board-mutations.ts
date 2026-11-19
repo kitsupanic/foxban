@@ -75,18 +75,18 @@ const NO_LIFECYCLE_CHANGES: ApplyResult = { archivedCards: [], purgedCardIds: []
 export const REBALANCE_KEY_LENGTH = 40;
 
 /** The list a mutation's position keys landed in, and the keys it wrote there; null when it wrote none. */
-function keyedList(message: ClientMessage): { table: "cards" | "columns"; where: string; args: string[]; written: string[] } | null {
-  const inColumn = (columnId: string, written: string[]) => ({ table: "cards" as const, where: "column_id = ? AND archived_at IS NULL", args: [columnId], written });
+function keyedList(message: ClientMessage): { table: "cards" | "columns"; where: string; args: string[]; written: string[]; id: string } | null {
+  const inColumn = (columnId: string, written: string[], id: string) => ({ table: "cards" as const, where: "column_id = ? AND archived_at IS NULL", args: [columnId], written, id });
   switch (message.type) {
     case "card.create":
     case "card.move":
     case "card.restore":
-      return inColumn(message.columnId, [message.position]);
+      return inColumn(message.columnId, [message.position], message.id);
     case "card.finish":
-      return inColumn(message.columnId, [message.position, ...message.children.map((child) => child.position)]);
+      return inColumn(message.columnId, [message.position, ...message.children.map((child) => child.position)], message.id);
     case "column.create":
     case "column.move":
-      return { table: "columns", where: "1", args: [], written: [message.position] };
+      return { table: "columns", where: "1", args: [], written: [message.position], id: message.id };
     default:
       return null;
   }
@@ -102,7 +102,7 @@ function rebalanceLongKeys(sql: SqlStorage, message: ClientMessage): PositionsRe
   const list = keyedList(message);
   if (!list?.written.some((key) => key.length > REBALANCE_KEY_LENGTH)) return null;
   const rows = sql.exec<{ id: string }>(`SELECT id FROM ${list.table} WHERE ${list.where} ORDER BY position, id`, ...list.args).toArray();
-  if (rows.length === 0) return null; // a move of a card that is gone wrote nothing
+  if (!rows.some((row) => row.id === list.id)) return null; // a stale move of a card or column that is gone wrote nothing
   const keys = generateNKeysBetween(null, null, rows.length);
   const positions = rows.map((row, index) => ({ id: row.id, position: keys[index]! }));
   for (const { id, position } of positions) sql.exec(`UPDATE ${list.table} SET position = ? WHERE id = ?`, position, id);
@@ -132,7 +132,6 @@ export function runMutation(
   };
 }
 
-/** True for the mutations that may enqueue cleanup keys or create an archive deadline, so the caller schedules the lifecycle alarm before the write. */
 /** One card's comments, tombstones included, oldest first: the card modal's read (ADR 0078) and the transfer bundle's. */
 export function readCardComments(sql: SqlStorage, cardId: string): Comment[] {
   return sql
@@ -161,6 +160,7 @@ function requireCommentOnCard(sql: SqlStorage, id: string, cardId: string): { pa
   return row;
 }
 
+/** True for the mutations that may enqueue cleanup keys or create an archive deadline, so the caller schedules the lifecycle alarm before the write. */
 export function createsLifecycleWork(message: ClientMessage): boolean {
   return (
     message.type === "attachment.delete" ||
@@ -660,10 +660,10 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
         )
         .toArray()[0];
       if (owner) {
-        if (boardId === null) throw new Error("Reconnect to delete attachments.");
+        // checkMutation (the only way here) already refused a board-less delete of a live card's attachment.
         const description = removeAttachmentReferences(
           owner.description,
-          boardId,
+          boardId!,
           message.id,
         );
         if (description !== owner.description) {

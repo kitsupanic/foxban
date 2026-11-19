@@ -126,6 +126,8 @@ export function useBoardSocket(
   const [attemptEpoch, setAttemptEpoch] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
   const reconcilerRef = useRef(new BoardReconciler(boardId));
+  // False from connect() until this socket's snapshot lands: before it, the base is the previous socket's.
+  const snapshotSeenRef = useRef(false);
   const pendingTimersRef = useRef(new Map<string, number>());
   const mutationSubscribersRef = useRef(new Map<string, Set<MutationSettledCallback>>());
   const pendingSentMutationsRef = useRef(new Map<string, ClientMessage>());
@@ -316,6 +318,7 @@ export function useBoardSocket(
         byCard.set(msg.cardId, (byCard.get(msg.cardId) ?? 0) + 1);
       }
       if (msg.type === "snapshot") {
+        snapshotSeenRef.current = true;
         setAccessState("ready");
         inTransition = false;
         // A reconnect snapshot is the missed-event backstop: whatever changed
@@ -413,6 +416,7 @@ export function useBoardSocket(
       url.searchParams.set("realtimeVersion", REALTIME_PROTOCOL_VERSION);
       const ws = new WebSocket(url.toString());
       socketRef.current = ws;
+      snapshotSeenRef.current = false;
       ws.onopen = () => {
         setConnected(true);
       };
@@ -526,7 +530,7 @@ export function useBoardSocket(
       }
       const baseState = reconcilerRef.current.getBaseState();
       const current = reconcilerRef.current.getCacheState();
-      if (!baseState || !current) {
+      if (!snapshotSeenRef.current || !baseState || !current) {
         console.warn("board socket: no snapshot yet, dropping", msg.type);
         return false;
       }

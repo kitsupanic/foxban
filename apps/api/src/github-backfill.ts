@@ -155,7 +155,12 @@ async function backfillBranches(env: Env, token: string, repo: { id: number; ful
 }
 
 /** Why a repo's run did not finish, and so when it may run again. `attempts` already counts this run (see `claim`). */
-async function afterFailure(env: Env, repoId: number, attempts: number, error: unknown): Promise<"stop" | "next"> {
+async function afterFailure(env: Env, repoId: number, attempts: number, opsAtClaim: number, error: unknown): Promise<"stop" | "next"> {
+  if (error instanceof BudgetSpent && opsAtClaim > 0) {
+    // Earlier repos in this drain spent the budget, so this repo may fit a fresh drain: not its failure, so refund the attempt.
+    await holdUntil(env, repoId, Date.now(), true);
+    return "stop";
+  }
   if (error instanceof BudgetSpent) {
     // Out of subrequests: this drain is over, but the repo is held like any failure, so a repo too big to fit cannot starve the others and is dropped at MAX_ATTEMPTS.
     console.warn(`[github-backfill] repo ${repoId} needs more subrequests than one drain has (attempt ${attempts})`);
@@ -186,6 +191,7 @@ export async function drainBackfill(env: Env, ceiling = OPS_CEILING): Promise<vo
       const claimed = await claim(env, Date.now());
       if (claimed === null) return;
       if (claimed === "gone") continue;
+      const opsAtClaim = budget.ops;
       try {
         let token = tokens.get(claimed.installationId);
         if (!token) {
@@ -198,7 +204,7 @@ export async function drainBackfill(env: Env, ceiling = OPS_CEILING): Promise<vo
         await backfillBranches(env, token, repo, budget);
         await finish(env, claimed.repoId);
       } catch (error) {
-        if ((await afterFailure(env, claimed.repoId, claimed.attempts, error)) === "stop") return;
+        if ((await afterFailure(env, claimed.repoId, claimed.attempts, opsAtClaim, error)) === "stop") return;
       }
     }
   } catch (error) {

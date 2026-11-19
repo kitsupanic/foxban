@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 import type { ClientMessage, Comment, ServerMessage } from "@foxban/shared";
 import { buildBoardIndex, cardFace, purgeArchivedCards } from "../src/lib/apply-mutation";
-import { createBoardReconciler, extractBoardState } from "../src/lib/reconciliation";
+import { extractBoardState } from "../src/lib/reconciliation";
+import { createBoardReconciler } from "./reconciler-helpers";
 
 // ADR 0078: the snapshot carries per-card comment counts; comments are a cache of the cards read.
 
