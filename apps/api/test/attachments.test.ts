@@ -950,6 +950,33 @@ describe("card transfer route and R2 lifecycle", () => {
     sockDst.close(1000);
   });
 
+  it("rejects a transfer id the R2 key parser would refuse, at the route", async () => {
+    const ownerCookie = await signup("xfer-bad-id@foxban.test");
+    const sourceBoard = await createBoard(ownerCookie, "Bad Id Src", "BADSRC");
+    const destBoard = await createBoard(ownerCookie, "Bad Id Dst", "BADDST");
+    for (const transferId of ["a/b", "has space", "x".repeat(65), ""]) {
+      const res = await post(
+        `/boards/${sourceBoard}/cards/card-1/transfer`,
+        { transferId, destinationBoardId: destBoard, destinationColumnId: "col-dst" },
+        ownerCookie,
+      );
+      expect(res.status, JSON.stringify(transferId)).toBe(400);
+    }
+  });
+
+  it("refuses an upload whose content-length is over the limit before reading the body", async () => {
+    const owner = await signup("att-declared-length@foxban.test");
+    const boardId = await createBoard(owner, "Declared length");
+    // A one-byte body: only the declared length can trigger the 413.
+    const response = await SELF.fetch(`${ORIGIN}/boards/${boardId}/attachments`, {
+      method: "POST",
+      headers: { "content-type": "image/png", "content-length": "10485761", cookie: owner },
+      body: new Uint8Array(1),
+    });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "too large" });
+  });
+
   it("exact-receipt retry never compensates destination objects if destination column is subsequently removed", async () => {
     const ownerCookie = await signup("xfer-retry-safe@foxban.test");
     const sourceBoard = await createBoard(ownerCookie, "Retry Src", "RTSRC");

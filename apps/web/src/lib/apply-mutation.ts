@@ -803,6 +803,21 @@ export function reconcileTaskNumber(
 }
 
 /**
+ * Installs the keys of a server-only `positions.rebalanced` frame on the active
+ * cards or the columns it names (ADR 0076). Ids not in the state are ignored.
+ */
+export function applyRebalancedPositions(
+  state: BoardState,
+  table: "cards" | "columns",
+  positions: readonly { id: string; position: string }[],
+): BoardState {
+  const keys = new Map(positions.map(({ id, position }) => [id, position]));
+  const rekey = <T extends { id: string; position: string }>(rows: T[]): T[] =>
+    rows.map((row) => (keys.has(row.id) ? { ...row, position: keys.get(row.id)! } : row));
+  return table === "cards" ? { ...state, cards: rekey(state.cards) } : { ...state, columns: rekey(state.columns) };
+}
+
+/**
  * Synchronizes the server-only `archive.purged` frame by permanently purging
  * matching ids from both archived and active cards (an active match can only be
  * a stale optimistic restore), plus checklist items, attachments, comments,

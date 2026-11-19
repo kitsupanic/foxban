@@ -407,6 +407,8 @@ export type AccessProbe = "pending" | "ready" | "unknown";
 
 export const BOARD_ACCESS_TRANSITION_CLOSE = 4010;
 export const BOARD_ACCESS_DENIED_CLOSE = 4003;
+/** The client closes its own socket with this code to resync after an authored operation timed out (ADR 0069). */
+export const BOARD_AUTHORED_RESYNC_CLOSE = 4000;
 const FAILED_SYNCHRONIZATION_LIMIT = 3;
 const RECONNECT_MIN_MS = 500;
 const RECONNECT_MAX_MS = 8_000;
@@ -443,6 +445,9 @@ export function planBoardReconnect(input: {
     (input.inTransition && input.probe !== "ready");
   if (transitioning)
     return { mode: "transition", delayMs: ACCESS_ATTEMPT_POLL_MS, attempt: input.attempt, failures: 0, inTransition: true };
+  // A deliberate resync is not a transport failure: reconnect promptly and keep the budget as it was.
+  if (input.code === BOARD_AUTHORED_RESYNC_CLOSE)
+    return { mode: "transport", delayMs: RECONNECT_MIN_MS, attempt: input.attempt, failures: input.failures, inTransition: false };
   const failures = input.failures + 1;
   if (failures >= FAILED_SYNCHRONIZATION_LIMIT)
     return { mode: "stopped", delayMs: null, attempt: input.attempt, failures, inTransition: false };

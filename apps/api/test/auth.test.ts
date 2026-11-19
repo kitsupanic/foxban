@@ -722,6 +722,13 @@ describe("boards and membership", () => {
     expect(version9Res.status).toBe(409);
     expect(await version9Res.json()).toEqual({ error: "realtime client update required" });
 
+    // Version 12 added the `positions.rebalanced` frame, which a version 11 client cannot parse (ADR 0076).
+    const version11Res = await get(`/boards/${boardId}/ws?realtimeVersion=11`, owner, {
+      Upgrade: "websocket",
+    });
+    expect(version11Res.status).toBe(409);
+    expect(await version11Res.json()).toEqual({ error: "realtime client update required" });
+
     // Precedence: unauthenticated caller gets 401 even with wrong or missing version
     const unauthWrong = await get(`/boards/${boardId}/ws?realtimeVersion=999`, undefined, {
       Upgrade: "websocket",
@@ -2808,6 +2815,17 @@ describe("user avatar endpoints and lifecycle", () => {
     const bigBody = new Uint8Array(10 * 1024 * 1024 + 1);
     const bigRes = await uploadAvatar(cookie, bigBody, "image/png");
     expect(bigRes.status).toBe(413);
+  });
+
+  it("refuses an avatar whose content-length is over the limit before reading the body", async () => {
+    const cookie = await signup("avatar-declared-length@foxban.test", "Declared Length");
+    // A one-byte body: only the declared length can trigger the 413.
+    const res = await SELF.fetch(`${ORIGIN}/me/avatar`, {
+      method: "POST",
+      headers: { "content-type": "image/png", "content-length": String(10 * 1024 * 1024 + 1), cookie },
+      body: new Uint8Array(1),
+    });
+    expect(res.status).toBe(413);
   });
 
   it("uploads an avatar, projects avatarVersion on /me and members, serves immutable binary with nosniff, replaces it, and supports idempotent delete", async () => {

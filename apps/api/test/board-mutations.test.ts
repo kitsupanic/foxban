@@ -1,8 +1,9 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { ClientMessageSchema } from "@foxban/shared";
 import { describe, expect, it } from "vitest";
-import { runMutation } from "../src/board-mutations";
-import { MutationRefusal, type MutationContext } from "../src/mutation-gate";
+import { generateKeyBetween } from "fractional-indexing";
+import { REBALANCE_KEY_LENGTH, runMutation } from "../src/board-mutations";
+import { COMMENT_TIME_TOLERANCE_MS, MutationRefusal, type MutationContext } from "../src/mutation-gate";
 
 /**
  * The mutation pipeline straight against a board's real SQLite (a fresh BoardDO
@@ -10,13 +11,13 @@ import { MutationRefusal, type MutationContext } from "../src/mutation-gate";
  * the end-to-end contract.
  */
 let boardCount = 0;
-async function onBoard(check: (sql: SqlStorage, run: (message: unknown, context?: MutationContext) => ReturnType<typeof runMutation>) => void): Promise<void> {
+async function onBoard(check: (sql: SqlStorage, run: (message: unknown, context?: MutationContext, now?: number) => ReturnType<typeof runMutation>) => void): Promise<void> {
   const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(`board-mutations-${++boardCount}`));
   await runInDurableObject(stub, (_instance, state) => {
     const sql = state.storage.sql;
     sql.exec("INSERT INTO columns(id, title, position, starting, completed) VALUES ('todo','To do','a',1,0), ('done','Done','b',0,1)");
-    const run = (message: unknown, context: MutationContext = { actorId: "u1", boardId: null, canManageColumns: true }) =>
-      state.storage.transactionSync(() => runMutation(sql, ClientMessageSchema.parse(message), context, 1000));
+    const run = (message: unknown, context: MutationContext = { actorId: "u1", boardId: null, canManageColumns: true }, now = 1000) =>
+      state.storage.transactionSync(() => runMutation(sql, ClientMessageSchema.parse(message), context, now));
     check(sql, run);
   });
 }
@@ -43,6 +44,88 @@ describe("mutation pipeline", () => {
       run({ type: "comment.delete", mutationId: "m6", id: "note" }, { ...bob, isAdmin: true });
       expect(count(sql, "comments")).toBe(0);
     }));
+
+  it("holds a live comment's own timestamp to the board's clock", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "c1", 1);
+      const now = 1_800_000_000_000;
+      const create = (id: string, createdAt: number) => ({ type: "comment.create", mutationId: `m-${id}`, id, cardId: "c1", authorId: "u1", parentCommentId: null, body: "hi", createdAt });
+      // Backdated to the epoch, or a hair past the window either way: refused, nothing written.
+      for (const [id, createdAt] of [["epoch", 0], ["past", now - COMMENT_TIME_TOLERANCE_MS - 1], ["future", now + COMMENT_TIME_TOLERANCE_MS + 1]] as const) {
+        expect(() => run(create(id, createdAt), undefined, now)).toThrow(MutationRefusal);
+      }
+      expect(count(sql, "comments")).toBe(0);
+      // The window's own edges are in, and so is now.
+      for (const [id, createdAt] of [["edge-past", now - COMMENT_TIME_TOLERANCE_MS], ["edge-future", now + COMMENT_TIME_TOLERANCE_MS], ["now", now]] as const) {
+        run(create(id, createdAt), undefined, now);
+      }
+      expect(count(sql, "comments")).toBe(3);
+      // An edit is held to the same clock.
+      expect(() => run({ type: "comment.update", mutationId: "m-u", id: "now", body: "later", updatedAt: 0 }, undefined, now)).toThrow(MutationRefusal);
+      run({ type: "comment.update", mutationId: "m-u2", id: "now", body: "later", updatedAt: now }, undefined, now);
+      expect(sql.exec<{ body: string }>("SELECT body FROM comments WHERE id = 'now'").one().body).toBe("later");
+    }));
+
+  describe("position key rebalance", () => {
+    const place = (sql: SqlStorage, id: string, columnId: string, position: string, archived = false) => {
+      seedCard(sql, id, Number(sql.exec<{ n: number }>("SELECT COUNT(*) + 1 AS n FROM cards").one().n));
+      sql.exec("UPDATE cards SET column_id = ?, position = ?, archived_at = ? WHERE id = ?", columnId, position, archived ? 1 : null, id);
+    };
+    const order = (sql: SqlStorage, columnId: string, archived = false) =>
+      sql.exec<{ id: string; position: string }>(`SELECT id, position FROM cards WHERE column_id = ? AND archived_at IS ${archived ? "NOT " : ""}NULL ORDER BY position, id`, columnId).toArray();
+    // The first key between a0 and a1 past the threshold: what a client computes dropping into a gap that has run out of room.
+    const longKey = () => {
+      let key = "a1";
+      while (key.length <= REBALANCE_KEY_LENGTH) key = generateKeyBetween("a0", key);
+      return key;
+    };
+
+    it("spreads the column's active keys in their order, tied keys included, and leaves everything else", () =>
+      onBoard((sql, run) => {
+        place(sql, "first", "todo", "a0");
+        place(sql, "tied-b", "todo", "a1");
+        place(sql, "tied-a", "todo", "a1");
+        place(sql, "mover", "todo", "a2");
+        place(sql, "elsewhere", "done", "a9");
+        place(sql, "archived", "todo", "a1V", true);
+        const rebalanced = run({ type: "card.move", mutationId: "m", id: "mover", columnId: "todo", position: longKey() }).rebalanced;
+        // mover sits between first and the tied pair; the tie is broken by id, as every client does.
+        const spread = [
+          { id: "first", position: "a0" }, { id: "mover", position: "a1" }, { id: "tied-a", position: "a2" }, { id: "tied-b", position: "a3" },
+        ];
+        expect(order(sql, "todo")).toEqual(spread);
+        // The frame lists exactly what was written, in that order.
+        expect(rebalanced).toEqual({ type: "positions.rebalanced", table: "cards", positions: spread });
+        expect(order(sql, "done")).toEqual([{ id: "elsewhere", position: "a9" }]);
+        expect(order(sql, "todo", true)).toEqual([{ id: "archived", position: "a1V" }]);
+      }));
+
+    it("does nothing for a key under the threshold, and rewrites columns by the same rule", () =>
+      onBoard((sql, run) => {
+        place(sql, "c1", "todo", "a0");
+        expect(run({ type: "card.move", mutationId: "m1", id: "c1", columnId: "todo", position: "a5" }).rebalanced).toBeNull();
+        expect(order(sql, "todo")).toEqual([{ id: "c1", position: "a5" }]);
+
+        expect(run({ type: "column.create", mutationId: "m2", id: "mid", title: "Mid", position: "a0V" }).rebalanced).toBeNull();
+        expect(run({ type: "column.move", mutationId: "m3", id: "mid", position: longKey() }).rebalanced).toEqual({
+          type: "positions.rebalanced",
+          table: "columns",
+          positions: [{ id: "todo", position: "a0" }, { id: "mid", position: "a1" }, { id: "done", position: "a2" }],
+        });
+        expect(sql.exec<{ id: string; position: string }>("SELECT id, position FROM columns ORDER BY position, id").toArray()).toEqual([
+          { id: "todo", position: "a0" }, { id: "mid", position: "a1" }, { id: "done", position: "a2" },
+        ]);
+        // The workflow roles follow position, which did not change.
+        expect(sql.exec<{ id: string }>("SELECT id FROM columns WHERE starting = 1").one().id).toBe("todo");
+        expect(sql.exec<{ id: string }>("SELECT id FROM columns WHERE completed = 1").one().id).toBe("done");
+      }));
+
+    it("sends no frame when the list is empty: a move of a card that is gone writes nothing", () =>
+      onBoard((sql, run) => {
+        expect(run({ type: "card.move", mutationId: "m", id: "missing", columnId: "todo", position: longKey() }).rebalanced).toBeNull();
+        expect(order(sql, "todo")).toEqual([]);
+      }));
+  });
 
   it("writes nothing when the gate refuses", () =>
     onBoard((sql, run) => {

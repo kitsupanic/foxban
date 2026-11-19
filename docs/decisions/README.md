@@ -83,3 +83,5 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0073 — Card activity loads per card, not in the snapshot](0073-per-card-activity-loading.md) (amends 0029)
 - [0074 — The board enforces comment authorship](0074-server-enforced-comment-authorship.md) (amends 0015)
 - [0075 — Presence is scoped to the boards a viewer can open](0075-presence-scoped-to-shared-boards.md) (amends 0039)
+- [0076 — Long position keys are rebalanced by the board](0076-position-key-rebalance.md) (amends 0006, 0010)
+- [0077 — A live comment's timestamp must be near the board's clock](0077-comment-time-near-server-clock.md) (amends 0074)

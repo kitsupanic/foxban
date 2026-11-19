@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { createElement, act } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ClientMessage, ServerMessage } from "@foxban/shared";
+import type { BoardState } from "../src/lib/apply-mutation";
 
 // Service-free (ADR 0049): `useBoardSocket` runs under react-dom in Node against a fake
 // WebSocket, so the socket-to-attachments wiring is checked without a browser or server.
@@ -62,7 +63,7 @@ const boardId = crypto.randomUUID();
 const cardId = crypto.randomUUID();
 const attachmentId = crypto.randomUUID();
 
-function snapshot(): ServerMessage {
+function snapshot(extra: Record<string, unknown> = {}): ServerMessage {
   return {
     type: "snapshot",
     workflowRolesExplicit: false,
@@ -75,10 +76,11 @@ function snapshot(): ServerMessage {
     relations: [],
     labels: [],
     cardLabels: [],
+    ...extra,
   } as ServerMessage;
 }
 
-async function mount() {
+async function mount(snapshotExtra: Record<string, unknown> = {}) {
   // Imported after the globals exist: the modules read `window` and `WebSocket` lazily, but react-dom probes the DOM on load.
   const { createRoot } = await import("react-dom/client");
   const { useBoardSocket } = await import("../src/lib/socket");
@@ -117,7 +119,7 @@ async function mount() {
   const ws = FakeSocket.last!;
   await act(async () => {
     ws.open();
-    ws.receive(snapshot());
+    ws.receive(snapshot(snapshotExtra));
   });
   const deleteAttachment = async () => {
     const mutationId = crypto.randomUUID();
@@ -126,7 +128,7 @@ async function mount() {
     });
     return mutationId;
   };
-  return { attachments, calls, ws, deleteAttachment, unmount: () => act(() => root.unmount()) };
+  return { attachments, calls, ws, socket, queryClient, deleteAttachment, unmount: () => act(() => root.unmount()) };
 }
 
 test("an own delete echo reaches the attachments module as own, resolves it and clears the gate", async () => {
@@ -207,3 +209,36 @@ for (const [name, fire] of [
     await unmount();
   });
 }
+
+test("a rebalance frame re-keys the board and leaves an in-flight authored mutation pending (ADR 0076)", async () => {
+  const { boardQueryKey } = await import("../src/lib/board-cache");
+  const columnId = crypto.randomUUID();
+  const longKey = "a0VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV";
+  const card = (id: string, position: string) => ({
+    id, columnId, title: id, description: "", position, taskNumber: 1, assigneeId: null, priority: "medium",
+    taskType: "task", dueDate: null, subtaskDone: false, createdAt: 1, updatedAt: 1,
+  });
+  const { ws, socket, queryClient, unmount } = await mount({
+    columns: [{ id: columnId, title: "Tasks", position: "a0" }],
+    cards: [card("x1", "a0"), card("x2", longKey), card("x3", "a1")],
+  });
+  const mutationId = crypto.randomUUID();
+  const comment = { type: "comment.create", mutationId, id: crypto.randomUUID(), cardId: "x1", authorId: "me", parentCommentId: null, body: "in flight", createdAt: Date.now() } as const;
+  const settled: string[] = [];
+  socket.current!.subscribeMutation(mutationId, ({ status }) => settled.push(status));
+  await act(async () => {
+    expect(socket.current!.sendMutation(comment)).toBe(true);
+  });
+
+  const board = () => queryClient.getQueryData<BoardState>(boardQueryKey(boardId))!;
+  await act(async () => ws.receive({ type: "positions.rebalanced", table: "cards", positions: [{ id: "x1", position: "a0" }, { id: "x2", position: "a1" }, { id: "x3", position: "a2" }] }));
+  // Re-keyed, with the unacknowledged comment still on top, the socket still up, and nothing settled.
+  expect(board().cards.map((c) => [c.id, c.position])).toEqual([["x1", "a0"], ["x2", "a1"], ["x3", "a2"]]);
+  expect(board().comments.map((c) => c.id)).toEqual([comment.id]);
+  expect(ws.readyState).toBe(FakeSocket.OPEN);
+  expect(settled).toEqual([]);
+
+  await act(async () => ws.receive(comment));
+  expect(settled).toEqual(["accepted"]);
+  await unmount();
+});

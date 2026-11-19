@@ -45,6 +45,7 @@ import { findConnectedRepo, listConnectedRepos } from "./github-repos";
 import { handleGitHubWebhook } from "./github-webhook";
 import {
   ATTACHMENT_ID,
+  ATTACHMENT_TRANSFER_ID,
   attachmentObjectKey,
   parseAttachmentObjectKey,
   userAvatarObjectKey,
@@ -97,7 +98,7 @@ const BoardMoveSchema = z.strictObject({
 });
 const MemberSchema = z.object({ userId: z.string().trim().min(1).max(128), operationId: z.string().uuid().optional() });
 const TransferCardSchema = z.strictObject({
-  transferId: z.string().trim().min(1).max(64),
+  transferId: z.string().trim().regex(ATTACHMENT_TRANSFER_ID),
   destinationBoardId: z.string().trim().min(1).max(64),
   destinationColumnId: z.string().trim().min(1).max(64),
 });
@@ -468,6 +469,10 @@ const app = new Hono<AppEnv>()
     const contentType = normalizeAttachmentContentType(c.req.header("content-type"));
     if (!isPreviewableImageContentType(contentType)) {
       return c.json({ error: "unsupported image type" } as const, 415);
+    }
+    // Refuse before buffering when the declared length already exceeds the limit; `byteLength` below stays authoritative.
+    if (Number(c.req.header("content-length")) > 10 * 1024 * 1024) {
+      return c.json({ error: "file exceeds maximum size of 10 MB" } as const, 413);
     }
     const body = await c.req.arrayBuffer();
     if (body.byteLength > 10 * 1024 * 1024) {
@@ -981,6 +986,7 @@ const app = new Hono<AppEnv>()
     const maxBytes = attachmentMaxBytes(contentType);
     // At most 50 MB, so buffering is fine; `byteLength` is authoritative and a
     // lying content-length header cannot get around the declared-type limit.
+    if (Number(c.req.header("content-length")) > maxBytes) return c.json({ error: "too large" } as const, 413);
     const body = await c.req.arrayBuffer();
     if (body.byteLength === 0) return c.json({ error: "empty body" } as const, 400);
     if (body.byteLength > maxBytes) return c.json({ error: "too large" } as const, 413);

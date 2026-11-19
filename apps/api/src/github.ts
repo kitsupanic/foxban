@@ -149,6 +149,8 @@ export async function createGitHubAppJwt(appId: string, privateKeyPem: string): 
  */
 const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 
+/** A GitHub call that takes longer than this is abandoned, so a hung connection cannot hold a drain, a webhook or a login. */
+export const GITHUB_FETCH_TIMEOUT_MS = 8_000;
 /** Default ceiling on a GitHub response body. */
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
@@ -181,13 +183,23 @@ async function githubFetch<T>(
     body = JSON.stringify(options.body);
   }
 
-  const response = await fetch(url, {
-    method: options.method || "GET",
-    headers,
-    body,
-  });
+  let response: Response;
+  let text: string;
+  try {
+    // The signal covers the body too, so a stalled body times out the same way.
+    response = await fetch(url, {
+      method: options.method || "GET",
+      headers,
+      body,
+      signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
+    });
+    text = await readBoundedText(response, DEFAULT_MAX_RESPONSE_BYTES);
+  } catch (error) {
+    // Surfaces as the error type callers already handle (502 on the webhook, a retry in backfill).
+    if (error instanceof Error && error.name === "TimeoutError") throw new GitHubApiError(504, "GitHub request timed out");
+    throw error;
+  }
 
-  const text = await readBoundedText(response, DEFAULT_MAX_RESPONSE_BYTES);
   let parsed: unknown = null;
   let malformed = false;
   if (text.length > 0) {

@@ -44,8 +44,9 @@ export const DESCRIPTION_MAX_BYTES = 100_000;
  * inherited subtask mode: `workflow.configure` only sets roles and
  * `subtask.complete` is gone, and the snapshot says whether the workflow roles
  * are explicit. Version 11 drops `activities` from the snapshot (ADR 0073).
+ * Version 12 adds the `positions.rebalanced` frame (ADR 0076).
  */
-export const REALTIME_PROTOCOL_VERSION = "11";
+export const REALTIME_PROTOCOL_VERSION = "12";
 export const TRANSFER_TERMINAL_CODE = "transfer_terminal" as const;
 export type TransferTerminalCode = typeof TRANSFER_TERMINAL_CODE;
 
@@ -634,6 +635,17 @@ export const CardNumberedSchema = z.strictObject({
   taskNumber: TaskNumber,
 });
 
+/**
+ * Server -> client, after the verbatim frame of the mutation that wrote a long key (ADR 0076):
+ * the new keys of the cards of one column (`cards`) or of the board's columns (`columns`).
+ * Clients set them by id and keep their pending mutations; it is not a snapshot.
+ */
+export const PositionsRebalancedSchema = z.strictObject({
+  type: z.literal("positions.rebalanced"),
+  table: z.enum(["cards", "columns"]),
+  positions: z.array(z.strictObject({ id: Identifier, position: Position })).min(1).max(10000),
+});
+
 
 const PositiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
@@ -718,6 +730,7 @@ export const ServerMessageSchema = z.discriminatedUnion("type", [
   CardsArchivedSchema,
   ArchivePurgedSchema,
   CardNumberedSchema,
+  PositionsRebalancedSchema,
   GithubInvalidatedSchema,
   ...clientMessages,
 ]);
@@ -740,6 +753,7 @@ export type TaskType = z.infer<typeof TaskTypeSchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 export type CardNumbered = z.infer<typeof CardNumberedSchema>;
+export type PositionsRebalanced = z.infer<typeof PositionsRebalancedSchema>;
 export type BoardDevelopment = z.infer<typeof BoardDevelopmentSchema>;
 export type CardPullRequestAssociation = z.infer<typeof CardPullRequestAssociationSchema>;
 export type DevelopmentBranch = z.infer<typeof DevelopmentBranchSchema>;

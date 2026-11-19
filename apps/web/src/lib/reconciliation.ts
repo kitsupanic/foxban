@@ -1,6 +1,7 @@
 import type { ClientMessage, ServerMessage } from "@foxban/shared";
 import {
   applyMutation,
+  applyRebalancedPositions,
   purgeArchivedCards,
   reconcileArchivedCards,
   reconcileTaskNumber,
@@ -153,6 +154,17 @@ export class BoardReconciler {
     if (msg.type === "card.numbered") {
       if (this.baseState) {
         this.baseState = reconcileTaskNumber(this.baseState, msg.id, msg.taskNumber);
+      }
+      return {
+        cacheState: this.getCacheState(),
+        ackedMutationIds: [],
+      };
+    }
+
+    if (msg.type === "positions.rebalanced") {
+      // A peer change, not a snapshot: re-key the base and rebase what is still pending over it (ADR 0076).
+      if (this.baseState) {
+        this.baseState = applyRebalancedPositions(this.baseState, msg.table, msg.positions);
       }
       return {
         cacheState: this.getCacheState(),

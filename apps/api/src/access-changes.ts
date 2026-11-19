@@ -1698,8 +1698,16 @@ export async function recoverAccessChanges(env: Env): Promise<void> {
     await mapChunks(results, RECOVERY_CONCURRENCY, async (operation) => {
       try {
         await driveOperation(env, operation, Budget.until(deadline));
-      } catch {
-        // A dependency failure leaves the row for the next pass; time never unlocks.
+      } catch (error) {
+        // A dependency failure leaves the row for the next pass; time never unlocks. Bumping
+        // `updated_at` sends it to the back of the oldest-first queue, so a few rows that keep
+        // failing cannot hold every slot of the pass and starve newer operations.
+        console.warn(`[access-changes] recovery of operation ${operation.id} failed:`, error instanceof Error ? error.message : error);
+        try {
+          await env.DB.prepare("UPDATE access_change_operations SET updated_at=? WHERE id=?").bind(Date.now(), operation.id).run();
+        } catch {
+          // Best effort: the row is simply retried first next pass.
+        }
       }
     });
   }

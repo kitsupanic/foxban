@@ -19,6 +19,9 @@ export class MutationRefusal extends Error {
   }
 }
 
+/** How far a live comment's own timestamp may sit from the board's clock (ADR 0077): frames are rebroadcast verbatim, so a stale or future time is refused, never corrected. */
+export const COMMENT_TIME_TOLERANCE_MS = 10 * 60 * 1000;
+
 export type MutationContext = {
   actorId: string;
   boardId: string | null;
@@ -162,8 +165,14 @@ export function checkCardWritable(sql: SqlStorage, cardId: string): void {
   refuseIfBlocked(sql, writes(cardId));
 }
 
+function checkCommentTime(at: number, now: number): void {
+  if (Math.abs(at - now) > COMMENT_TIME_TOLERANCE_MS) {
+    throw new MutationRefusal("forbidden", "Comment time is out of range. Check your device clock.");
+  }
+}
+
 /** Throws MutationRefusal when `message` must not reach `apply`. */
-export function checkMutation(sql: SqlStorage, message: ClientMessage, context: MutationContext): void {
+export function checkMutation(sql: SqlStorage, message: ClientMessage, context: MutationContext, now = Date.now()): void {
   switch (message.type) {
     case "workflow.configure":
     case "column.create":
@@ -182,6 +191,7 @@ export function checkMutation(sql: SqlStorage, message: ClientMessage, context: 
     // Authorship is the socket's identity, never the frame's: nobody posts as, or rewrites, someone else.
     case "comment.create":
       if (message.authorId !== context.actorId) throw new MutationRefusal("forbidden", "Comments are posted as yourself.");
+      checkCommentTime(message.createdAt, now);
       break;
     case "comment.update":
     case "comment.delete": {
@@ -192,6 +202,7 @@ export function checkMutation(sql: SqlStorage, message: ClientMessage, context: 
       if (author !== undefined && author !== context.actorId && !adminDelete) {
         throw new MutationRefusal("forbidden", "Only the author can change this comment.");
       }
+      if (message.type === "comment.update") checkCommentTime(message.updatedAt, now);
       break;
     }
   }
