@@ -68,7 +68,22 @@ export function TransferCardDialog({
 
   const boards = optionsQuery.data?.boards ?? [];
   const selectedBoard = boards.find((b) => b.id === selectedBoardId);
-  const columns = selectedBoard?.columns ?? [];
+  // Columns are read for the selected destination only, so opening the dialog wakes no board.
+  const columnsQuery = useQuery({
+    queryKey: ["board-transfer-options", boardId, selectedBoardId],
+    queryFn: async () => {
+      const res = await api.boards[":id"]["transfer-options"][":destinationBoardId"].$get({
+        param: { id: boardId, destinationBoardId: selectedBoardId },
+      });
+      if (!res.ok) {
+        throw new Error("could not load statuses");
+      }
+      return await res.json();
+    },
+    enabled: selectedBoardId !== "",
+    retry: false,
+  });
+  const columns = columnsQuery.data?.columns ?? [];
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -149,7 +164,7 @@ export function TransferCardDialog({
     }
   };
 
-  const hasNoColumns = selectedBoard !== undefined && columns.length === 0;
+  const hasNoColumns = selectedBoard !== undefined && columnsQuery.isSuccess && columns.length === 0;
   const isFormValid = selectedBoardId !== "" && selectedColumnId !== "";
   const isTransferBlocked =
     hasLinksOrSubtasks ||
@@ -318,7 +333,14 @@ export function TransferCardDialog({
               <label htmlFor={statusSelectId} className="block text-sm font-medium text-foreground">
                 Status
               </label>
-              {hasNoColumns ? (
+              {columnsQuery.isError ? (
+                <div className="mt-1 flex items-center gap-2 text-xs text-destructive">
+                  <span role="alert">Could not load statuses.</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void columnsQuery.refetch()}>
+                    Retry
+                  </Button>
+                </div>
+              ) : hasNoColumns ? (
                 <div className="mt-1 text-xs text-muted-foreground">
                   This board has no statuses.
                 </div>
@@ -330,7 +352,7 @@ export function TransferCardDialog({
                   disabled={isSubmitting || selectedBoardId === "" || columns.length === 0}
                   className="mt-1 block h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-base sm:text-sm text-foreground shadow-sm focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
                 >
-                  <option value="">Select status</option>
+                  <option value="">{columnsQuery.isLoading ? "Loading statuses…" : "Select status"}</option>
                   {columns.map((col) => (
                     <option key={col.id} value={col.id}>
                       {col.title}

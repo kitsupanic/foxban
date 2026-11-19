@@ -150,12 +150,6 @@ export function usePresenceSocket(user: User | null | undefined): void {
         // onclose will follow and handle reconnection
       };
     };
-    const refreshWorkspaceData = () => {
-      if (document.visibilityState === "visible") {
-        void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
-        void queryClient.invalidateQueries({ queryKey: ["boards"] });
-      }
-    };
     // A short network drop can exhaust the failure budget; coming back online
     // or visible starts a fresh loop.
     const restartIfStopped = () => {
@@ -168,8 +162,6 @@ export function usePresenceSocket(user: User | null | undefined): void {
     const onVisible = () => {
       if (document.visibilityState === "visible") restartIfStopped();
     };
-    window.addEventListener("focus", refreshWorkspaceData);
-    document.addEventListener("visibilitychange", refreshWorkspaceData);
     window.addEventListener("online", restartIfStopped);
     document.addEventListener("visibilitychange", onVisible);
     retryTimer = window.setTimeout(connect, 0);
@@ -178,8 +170,6 @@ export function usePresenceSocket(user: User | null | undefined): void {
       unmounted = true;
       clearTimeout(retryTimer);
       clearTimeout(stableTimer);
-      window.removeEventListener("focus", refreshWorkspaceData);
-      document.removeEventListener("visibilitychange", refreshWorkspaceData);
       window.removeEventListener("online", restartIfStopped);
       document.removeEventListener("visibilitychange", onVisible);
       const ws = socketRef.current;

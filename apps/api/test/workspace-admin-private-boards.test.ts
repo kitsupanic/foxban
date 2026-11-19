@@ -458,6 +458,9 @@ describe("a workspace admin manages a Private board they were not added to", () 
     // An Operator may open the source, but destinations follow what they hold as a
     // member, Guest or workspace admin: not every board in the instance.
     expect(await offered(operator)).not.toContain(board.id);
+    // The per-destination read follows the same rule.
+    expect((await get(`/boards/${source.id}/transfer-options/${board.id}`, admin.cookie)).status).toBe(200);
+    expect((await get(`/boards/${source.id}/transfer-options/${board.id}`, member.cookie)).status).toBe(403);
   });
 
   it("hands a moved board from the source workspace's admins to the destination's", async () => {

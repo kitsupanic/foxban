@@ -1240,9 +1240,11 @@ export function BoardView({
   };
 
   const handleDragOver = ({ active, over }: DragOverEvent | DragMoveEvent) => {
-    setDropHint(state && over && active.data.current?.type === "card"
+    const next = state && over && active.data.current?.type === "card"
       ? resolveCardDrop(state, hierarchy, String(active.id), String(over.id), pointerDropSideRef.current)?.hint ?? null
-      : null);
+      : null;
+    // Pointer moves fire constantly; an equal hint must not re-render the board.
+    setDropHint(prev => (prev?.cardId === next?.cardId && prev?.placement === next?.placement ? prev : next));
   };
 
   const handleDragCancel = () => {
@@ -1683,7 +1685,7 @@ export function BoardView({
                   const hit = hits[0];
                   if (!hit) return [];
                   const columnId = String(hit.id).replace("column-drop:", "");
-                  const candidates = cardTargets.filter(container => state.cards.some(card => card.id === container.id && card.columnId === columnId));
+                  const candidates = cardTargets.filter(container => boardIndex?.cardsById.get(String(container.id))?.columnId === columnId);
                   const tail = Math.max(...candidates.map(container => args.droppableRects.get(container.id)?.bottom ?? -Infinity));
                   // Interior whitespace picks its nearest body boundary. Only the
                   // real tail/empty column appends, including hidden filtered tails.

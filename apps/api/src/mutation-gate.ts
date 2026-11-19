@@ -134,15 +134,19 @@ function touchedCards(sql: SqlStorage, message: ClientMessage): Touched {
 
     case "relation.create":
       return writes(message.sourceCardId, message.targetCardId);
-    case "relation.delete":
-      return writes(
-        ...sql
-          .exec<{ a: string; b: string }>(
-            "SELECT source_card_id AS a, target_card_id AS b FROM card_relations WHERE id = ?",
-            message.id,
-          )
-          .toArray().flatMap((row) => [row.a, row.b]),
-      );
+    case "relation.delete": {
+      // An archived endpoint is not edited by the unlink, so it must not pin the active one to the link.
+      const ends = sql
+        .exec<{ a: string; b: string }>(
+          "SELECT source_card_id AS a, target_card_id AS b FROM card_relations WHERE id = ?",
+          message.id,
+        )
+        .toArray().flatMap((row) => [row.a, row.b]);
+      return {
+        written: ends.filter((id) => !isCardArchived(sql, id)),
+        swept: ends.filter((id) => isCardArchived(sql, id)),
+      };
+    }
   }
 }
 

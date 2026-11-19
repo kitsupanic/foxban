@@ -66,8 +66,9 @@ export function directSubtaskCounts(
   hierarchy: SubtaskHierarchy,
   parentCardId: string,
 ): { done: number; total: number } {
-  const cardById = new Map(cards.map((card) => [card.id, card]));
   const children = hierarchy.childrenByParent.get(parentCardId) ?? [];
+  if (children.length === 0) return { done: 0, total: 0 };
+  const cardById = new Map(cards.map((card) => [card.id, card]));
   let done = 0;
   for (const childId of children) {
     if (cardById.get(childId)?.subtaskDone === true) done += 1;

@@ -97,6 +97,11 @@ async function seedIdentity(board: string, userId: string): Promise<void> {
     env.DB.prepare(
       `INSERT OR IGNORE INTO board_members(board_id,user_id,role) VALUES(?,?,'manager')`,
     ).bind(board, userId),
+    // A board manager manages only while in the board's workspace (ADR 0066).
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO workspace_members(workspace_id,user_id,role,created_at,updated_at)
+       SELECT workspace_id,?,'member',?,? FROM boards WHERE id=?`,
+    ).bind(userId, now, now, board),
   ]);
 }
 
@@ -1883,7 +1888,6 @@ describe("BoardDO", () => {
       // 4. Relation endpoints / create / delete
       { type: "relation.create", mutationId: "ro-rel-src", id: "rel-src", sourceCardId: "card-archived", targetCardId: "card-active", kind: "relates" },
       { type: "relation.create", mutationId: "ro-rel-tgt", id: "rel-tgt", sourceCardId: "card-active", targetCardId: "card-archived", kind: "relates" },
-      { type: "relation.delete", mutationId: "ro-rel-d", id: "rel-ro" },
     ];
 
     for (const mutation of readOnlyMutations) {

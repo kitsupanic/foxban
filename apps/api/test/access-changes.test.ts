@@ -3,7 +3,7 @@ import { scheduler } from "node:timers/promises";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { PresenceServerMessageSchema, REALTIME_PROTOCOL_VERSION } from "@foxban/shared";
-import { ACCESS_CHANGE_ABORT, AccessChangeConflict, pruneAccessChanges, recoverAccessChanges, runAccessChange } from "../src/access-changes";
+import { ACCESS_CHANGE_ABORT, AccessChangeConflict, pruneAccessChanges, pruneWorkspaceInvites, recoverAccessChanges, runAccessChange } from "../src/access-changes";
 import type { SessionUser } from "../src/auth";
 import type { BoardDO } from "../src/board-do";
 import { INTERNAL_BOARD_ID_HEADER, INTERNAL_USER_ID_HEADER } from "../src/internal-headers";
@@ -1342,6 +1342,68 @@ describe("access change journal", () => {
     await recoverAccessChanges(env);
     expect(await readOperation(id)).toBeNull();
     expect(await countRows("SELECT COUNT(*) AS n FROM access_change_boards WHERE operation_id=?", id)).toBe(0);
+  });
+
+  it("prunes workspace invites that expired or were revoked over thirty days ago, and keeps the rest", async () => {
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const tag = crypto.randomUUID();
+    const insert = (name: string, expiresAt: number, revokedAt: number | null) =>
+      env.DB.prepare(
+        `INSERT INTO workspace_invites(id,workspace_id,role,token_hash,invited_by,created_at,expires_at,revoked_at) VALUES(?,?, 'member',?,'inviter',?,?,?)`,
+      ).bind(`${tag}-${name}`, `${tag}-workspace`, `${tag}-${name}-hash`, now - 90 * DAY, expiresAt, revokedAt);
+    await env.DB.batch([
+      insert("expired-long-ago", now - 31 * DAY, null),
+      insert("revoked-long-ago", now + 5 * DAY, now - 31 * DAY),
+      insert("expired-recently", now - 29 * DAY, null),
+      insert("revoked-recently", now + 5 * DAY, now - 29 * DAY),
+      insert("live", now + 5 * DAY, null),
+    ]);
+    await pruneWorkspaceInvites(env, now);
+    const left = await env.DB.prepare("SELECT id FROM workspace_invites WHERE workspace_id=? ORDER BY id").bind(`${tag}-workspace`).all<{ id: string }>();
+    expect(left.results.map((row) => row.id)).toEqual(["expired-recently", "live", "revoked-recently"].map((name) => `${tag}-${name}`));
+    await env.DB.prepare("DELETE FROM workspace_invites WHERE workspace_id=?").bind(`${tag}-workspace`).run();
+  });
+
+  it("sends an operation that is still pending to the back of the recovery queue, like one that throws", async () => {
+    const id = crypto.randomUUID();
+    const old = Date.now() - 60_000;
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO access_change_operations(id,actor_id,kind,payload_json,payload_hash,phase,notify_user_ids_json,notified,created_at,updated_at)
+         VALUES(?,'actor','workspace-member-remove',?,'hash','preparing','[]',0,?,?)`,
+      ).bind(id, JSON.stringify({ workspaceId: "w", userId: "u" }), old, old),
+      env.DB.prepare(`INSERT INTO access_change_boards(operation_id,board_id,expected_version,next_version,prepared,released) VALUES(?,?,0,1,0,0)`).bind(id, `board-of-${id}`),
+    ]);
+    // The participant never answers, so the row cannot get past prepare: it is not an error, only not done.
+    const unreachable = { idFromName: () => "board", get: () => ({ fetch: () => Promise.reject(new Error("DO unavailable")) }) };
+    await recoverAccessChanges({ ...env, BOARD_DO: unreachable } as unknown as typeof env);
+    const row = await env.DB.prepare("SELECT phase,updated_at AS updatedAt FROM access_change_operations WHERE id=?").bind(id).first<{ phase: string; updatedAt: number }>();
+    expect(row?.phase).toBe("preparing");
+    expect(row!.updatedAt).toBeGreaterThan(old);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM access_change_boards WHERE operation_id=?").bind(id),
+      env.DB.prepare("DELETE FROM access_change_operations WHERE id=?").bind(id),
+    ]);
+  });
+
+  it("deletes a board's GitHub routing pointers with the board", async () => {
+    const admin = await signupAdmin();
+    const workspace = await createWorkspace(admin, "Routes workspace");
+    const doomed = await createBoard(admin, workspace, "workspace");
+    const kept = await createBoard(admin, workspace, "workspace");
+    const repoId = Math.floor(Math.random() * 1_000_000_000);
+    await env.DB.batch(
+      [doomed.id, kept.id].flatMap((boardId) => [
+        env.DB.prepare("INSERT INTO github_pr_routes(repo_id,pr_number,board_id) VALUES(?,?,?)").bind(repoId, 7, boardId),
+        env.DB.prepare("INSERT INTO github_branch_routes(repo_id,branch_name,board_id) VALUES(?,?,?)").bind(repoId, "feature/x", boardId),
+      ]),
+    );
+    expect((await del(`/boards/${doomed.id}?operationId=${crypto.randomUUID()}`, admin)).status).toBe(200);
+    for (const table of ["github_pr_routes", "github_branch_routes"]) {
+      const rows = await env.DB.prepare(`SELECT board_id AS boardId FROM ${table} WHERE repo_id=?`).bind(repoId).all<{ boardId: string }>();
+      expect(rows.results, table).toEqual([{ boardId: kept.id }]);
+    }
   });
 
   it("recovers stuck operations even when pruning fails, and says so", async () => {

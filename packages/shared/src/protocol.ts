@@ -21,8 +21,8 @@ import {
  * could push arbitrarily large payloads into every other socket and into storage.
  */
 export const Identifier = z.string().min(1).max(64);
-/** A client-sent fractional-indexing key. The library throws on malformed keys, so a bad one stored once would break every later insert next to it. */
-export const Position = Identifier.refine((key) => {
+/** A client-sent fractional-indexing key. The library throws on malformed keys and does not check the characters after the first two ("a0~" would sort after the keys generated beside it), so a bad one stored once would break every later insert next to it. */
+export const Position = Identifier.regex(/^[0-9A-Za-z]+$/, "invalid position key").refine((key) => {
   try {
     generateKeyBetween(key, null);
     return true;

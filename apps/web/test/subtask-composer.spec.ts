@@ -40,11 +40,14 @@ const item = (id: string, text: string): ChecklistItem => ({ id, cardId: "card-1
 function setup() {
   const fake = fakeTransport();
   const scope = createAuthoredScope(fake.transport);
-  const env = { isSubtask: false, placed: 0 };
+  const env = { isSubtask: false, placed: 0, doneFlags: [] as boolean[] };
   const subtasks = createSubtaskComposer(scope, {
     cardId: () => "card-1",
     isSubtask: () => env.isSubtask,
-    placeTail: () => `tail-${++env.placed}`,
+    placeTail: (done) => {
+      env.doneFlags.push(done);
+      return `tail-${++env.placed}`;
+    },
   });
   const last = () => fake.ids[fake.ids.length - 1];
   const compose = (text: string) => {
@@ -342,4 +345,12 @@ test("getState keeps its identity until something changes, and subscribers hear 
   const before = heard;
   subtasks.openComposer();
   expect(heard).toBe(before);
+});
+
+test("placement follows the item's done flag: a done item lands in the completed column, a new subtask in the starting one", () => {
+  const { env, subtasks, compose } = setup();
+  subtasks.convert({ ...item("item-1", "Ship"), done: true });
+  compose("New");
+  subtasks.add();
+  expect(env.doneFlags).toEqual([true, false]);
 });

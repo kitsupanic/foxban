@@ -7,8 +7,8 @@ import { firstWorkspaceId } from "./first-workspace";
 import { queriesOf, workerWithPausedD1 } from "./paused-d1";
 
 /**
- * Who manages a board, and who may take a manager off it: the creator manages only
- * while still in the board's workspace, removing a board manager takes manage rights,
+ * Who manages a board, and who may take a manager off it: the creator and a board manager
+ * manage only while still in the board's workspace, removing a board manager takes manage rights,
  * and a board is not "moved" to the workspace it is already in.
  */
 const ORIGIN = "https://foxban.test";
@@ -135,6 +135,37 @@ describe("a creator who is no longer in the workspace", () => {
   });
 });
 
+describe("a board manager who is no longer in the workspace", () => {
+  it("keeps the open right but loses every manage right once removed from it", async () => {
+    const admin = await person();
+    const owner = await person();
+    const manager = await person();
+    const workspace = await createWorkspace(admin);
+    await add(admin, workspace, owner);
+    await add(admin, workspace, manager);
+    const board = await createBoard(owner, workspace, "restricted");
+    expect((await post(`/boards/${board.id}/members`, { userId: manager.id }, owner.cookie)).status).toBe(200);
+    await env.DB.prepare("UPDATE board_members SET role='manager' WHERE board_id=? AND user_id=?").bind(board.id, manager.id).run();
+    const rights = async () => (await get(`/boards/${board.id}`, manager.cookie).then((r) => r.json<Board>())).capabilities;
+    expect(await rights()).toMatchObject({ canManageBoard: true, canManageColumns: true });
+
+    expect((await removeFromWorkspace(admin, workspace, manager)).status).toBe(200);
+
+    expect(await rights()).toMatchObject({ canManageBoard: false, canManageColumns: false });
+    const own = await firstWorkspaceId(manager.cookie);
+    expect((await patch(`/boards/${board.id}`, { name: "Renamed", key: "RNMD" }, manager.cookie)).status).toBe(403);
+    expect((await post(`/boards/${board.id}/move-workspace`, {
+      operationId: crypto.randomUUID(), destinationWorkspaceId: own, expectedWorkspaceId: workspace, expectedAccessVersion: 0,
+    }, manager.cookie)).status).toBe(403);
+    expect((await request(`/boards/${board.id}?operationId=${crypto.randomUUID()}`, "DELETE", undefined, manager.cookie)).status).toBe(403);
+    expect(await env.DB.prepare("SELECT name,workspace_id AS workspaceId FROM boards WHERE id=?").bind(board.id).first()).toEqual({ name: "Rights board", workspaceId: workspace });
+
+    // Joining again gives the manager their grant's right back.
+    await add(admin, workspace, manager);
+    expect(await rights()).toMatchObject({ canManageBoard: true });
+  });
+});
+
 describe("moving a board to the workspace it is already in", () => {
   it("answers 400, not a retryable conflict, and changes nothing", async () => {
     const owner = await person();
@@ -173,7 +204,7 @@ describe("a workspace role change refused for want of the right", () => {
 });
 
 describe("removing a board manager", () => {
-  /** A board owned by a workspace member, with two managers (X, T), a plain guest (M) and a second plain guest (P). */
+  /** A board owned by a workspace member, with two managers (X, T, who are members of its workspace), a plain guest (M) and a second plain guest (P). */
   async function scene() {
     const admin = await person();
     const owner = await person();
@@ -182,6 +213,7 @@ describe("removing a board manager", () => {
     const board = await createBoard(owner, workspace, "restricted");
     const [x, t, m, p] = [await person(), await person(), await person(), await person()];
     for (const who of [x, t, m, p]) expect((await post(`/boards/${board.id}/members`, { userId: who.id }, owner.cookie)).status).toBe(200);
+    for (const who of [x, t]) await add(admin, workspace, who);
     for (const who of [x, t]) await env.DB.prepare("UPDATE board_members SET role='manager' WHERE board_id=? AND user_id=?").bind(board.id, who.id).run();
     return { admin, owner, workspace, board, x, t, m, p };
   }

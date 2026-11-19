@@ -230,7 +230,7 @@ export function CardModal({
   const subtasks = useSubtaskComposer(authoredScope, {
     cardId: card.id,
     isSubtask: card.taskType === "subtask",
-    placeTail: () => commands.placeNewCard(columns.find(c => c.starting)?.id ?? card.columnId),
+    placeTail: (done) => commands.placeNewCard((done ? columns.find(c => c.completed) : columns.find(c => c.starting))?.id ?? card.columnId),
   });
   const attachmentDeletePending = attachmentView.isDeletePending(card.id);
   const checklist = useChecklist(authoredScope, {
