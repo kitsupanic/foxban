@@ -690,6 +690,7 @@ test.describe("editor, draft and layout regressions", () => {
                   type: "comment.delete",
                   mutationId: crypto.randomUUID(),
                   id: frame.id,
+                  cardId: frame.cardId,
                 }),
               );
             };
@@ -702,6 +703,7 @@ test.describe("editor, draft and layout regressions", () => {
                   type: "comment.delete",
                   mutationId: crypto.randomUUID(),
                   id: frame.id,
+                  cardId: frame.cardId,
                 }),
               );
             };
