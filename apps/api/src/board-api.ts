@@ -27,6 +27,7 @@ import {
   McpTaskListRequestSchema,
   McpTaskReadRequestSchema,
 } from "./mcp-contract";
+import { REVOKE_SESSIONS_PATH, SessionRevocationSchema } from "./session-revocation";
 
 /**
  * The Worker's internal API to a board's Durable Object: every route the DO answers
@@ -36,8 +37,9 @@ import {
  *
  * A route's `gate` says what the DO checks before it runs the handler:
  *
- *   fence       access prepare/release and board delete. A board id; dispatched ahead of
- *               the deletion and freeze gates, because it is how a board enters and leaves them.
+ *   fence       access prepare/release, board delete and session revoke. A board id; dispatched ahead of
+ *               the deletion and freeze gates: the first three are how a board enters and leaves them, and
+ *               a revoke must close sockets whatever state the board is in.
  *   settlement  settling a transfer that already exists. A board id; bypasses deletion and freeze,
  *               so a frozen or deleted board still drains its in-flight transfers.
  *   cleanup     attachment reconcile. A board id; bypasses deletion (a deleted board still
@@ -261,6 +263,10 @@ export const boardRoutes = {
     input: AccessOperationSchema, invalid: invalidText("invalid access operation"),
   }),
   boardDelete: route({ path: DELETE_BOARD_PATH, methods: ["POST"], gate: "fence", stamp: false }),
+  sessionRevoke: bodyRoute({
+    path: REVOKE_SESSIONS_PATH, methods: ["POST"], gate: "fence", stamp: false,
+    input: SessionRevocationSchema, invalid: invalidText("invalid session revocation"),
+  }),
 
   transferReceipt: bodyRoute({
     path: CARD_TRANSFER_RECEIPT_PATH, methods: ["POST"], gate: "settlement", stamp: true,

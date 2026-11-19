@@ -19,6 +19,7 @@ beforeAll(async () => {
 import worker, { reconcileAttachmentObjects } from "../src/index";
 import { firstWorkspaceId } from "./first-workspace";
 import { parseAvatarObjectKey } from "../src/attachment-lifecycle";
+import { sha256Hex } from "../src/auth";
 import { GitHubApiError, getBranch } from "../src/github";
 
 const PASSWORD = "correct horse battery";
@@ -1068,16 +1069,58 @@ async function createGitHubApp(admin: string): Promise<void> {
   expect(done.headers.get("location")).toContain("githubApp=created");
 }
 
-/** The browser round trip for "Connect GitHub": GitHub approves `code` and sends the browser back. Returns where the callback redirected. */
-async function connectGitHub(cookie: string, code: string): Promise<string> {
-  const start = await SELF.fetch(`${ORIGIN}/auth/github/start`, { headers: { cookie }, redirect: "manual" });
-  const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
-  const callback = await SELF.fetch(`${ORIGIN}/auth/github/callback?code=${code}&state=${state}`, {
+/** What "Connect GitHub" calls (ADR 0081): the current password, if the account has one, in exchange for the GitHub URL. */
+function startGitHubLink(cookie: string, password?: string, extra?: HeadersInit): Promise<Response> {
+  return post("/auth/github/link", password === undefined ? {} : { currentPassword: password }, cookie, extra);
+}
+
+/** The state of the GitHub URL `POST /auth/github/link` answered. */
+async function linkState(start: Response): Promise<string> {
+  return new URL((await start.json<{ url: string }>()).url).searchParams.get("state")!;
+}
+
+/** The callback GitHub sends the browser back to, carrying `state` in both the query and the cookie. */
+function githubLinkCallback(cookie: string, code: string, state: string): Promise<Response> {
+  return SELF.fetch(`${ORIGIN}/auth/github/callback?code=${code}&state=${state}`, {
     headers: { cookie: `${cookie}; github_oauth_state=${state}` },
     redirect: "manual",
   });
+}
+
+/** The browser round trip for "Connect GitHub": GitHub approves `code` and sends the browser back. Returns where the callback redirected. */
+async function connectGitHub(cookie: string, code: string, password: string | undefined = PASSWORD): Promise<string> {
+  const start = await startGitHubLink(cookie, password);
+  expect(start.status).toBe(200);
+  const callback = await githubLinkCallback(cookie, code, await linkState(start));
   expect(callback.status).toBe(302);
   return callback.headers.get("location")!;
+}
+
+/**
+ * What "Set a password" does first for an account with none (ADR 0081): the same round trip as a link, to the same callback,
+ * where GitHub approves `code`. Returns where the callback redirected.
+ */
+async function reauthWithGitHub(cookie: string, code: string): Promise<string> {
+  const start = await post("/auth/github/reauth", {}, cookie);
+  expect(start.status).toBe(200);
+  const callback = await githubLinkCallback(cookie, code, await linkState(start));
+  expect(callback.status).toBe(302);
+  return callback.headers.get("location")!;
+}
+
+/** The GitHub confirmation (`github_reauth_until`) the session `cookie` holds, or null. */
+async function storedReauth(cookie: string): Promise<number | null> {
+  const row = await env.DB.prepare("SELECT github_reauth_until AS until FROM sessions WHERE id = ?")
+    .bind(cookie.slice("session=".length))
+    .first<{ until: number | null }>();
+  return row!.until;
+}
+
+/** The stored link state of the session `cookie` holds. */
+async function storedLinkState(cookie: string): Promise<{ hash: string | null; expiresAt: number | null } | null> {
+  return env.DB.prepare("SELECT github_link_state_hash AS hash, github_link_expires_at AS expiresAt FROM sessions WHERE id = ?")
+    .bind(cookie.slice("session=".length))
+    .first();
 }
 
 describe("profile", () => {
@@ -1092,22 +1135,20 @@ describe("profile", () => {
 
   it("is off until an Admin has created the instance GitHub App", async () => {
     const cookie = await signup("gh-noapp@foxban.test", "Gh No App");
-    const response = await SELF.fetch(`${ORIGIN}/auth/github/start`, { headers: { cookie }, redirect: "manual" });
+    const response = await startGitHubLink(cookie, PASSWORD);
     expect(response.status).toBe(503);
     expect(response.headers.get("set-cookie")).toBeNull();
+    expect(await storedLinkState(cookie)).toEqual({ hash: null, expiresAt: null });
   });
 
-  it("starts the link with the instance App's client id and a state bound to the response cookie", async () => {
+  it("starts the link with the instance App's client id and a state bound to the response cookie and the session", async () => {
     const cookie = await signup("gh-start@foxban.test", "Gh Start");
     await createGitHubApp(cookie);
 
-    const response = await SELF.fetch(`${ORIGIN}/auth/github/start`, {
-      headers: { cookie },
-      redirect: "manual",
-    });
-    expect(response.status).toBe(302);
+    const response = await startGitHubLink(cookie, PASSWORD);
+    expect(response.status).toBe(200);
 
-    const location = new URL(response.headers.get("location")!);
+    const location = new URL((await response.json<{ url: string }>()).url);
     expect(location.origin).toBe("https://github.example");
     expect(location.pathname).toBe("/login/oauth/authorize");
     expect(location.searchParams.get("client_id")).toBe(GITHUB_APP.client_id);
@@ -1122,9 +1163,16 @@ describe("profile", () => {
     expect(setCookie.startsWith("github_oauth_state=")).toBe(true);
     expect(setCookie.split(";")[0]!.slice("github_oauth_state=".length)).toBe(state);
 
-    expect(
-      (await SELF.fetch(`${ORIGIN}/auth/github/start`, { redirect: "manual" })).status,
-    ).toBe(401);
+    // And the server keeps only its hash, with an expiry ten minutes out, against this session.
+    const stored = (await storedLinkState(cookie))!;
+    expect(stored.hash).toBe(await sha256Hex(state!));
+    expect(stored.hash).not.toBe(state);
+    expect(stored.expiresAt!).toBeGreaterThan(Date.now() + 9 * 60_000);
+    expect(stored.expiresAt!).toBeLessThanOrEqual(Date.now() + 10 * 60_000);
+
+    expect((await post("/auth/github/link", {})).status).toBe(401);
+    // Nothing starts a link by navigation any more.
+    expect((await SELF.fetch(`${ORIGIN}/auth/github/start`, { headers: { cookie }, redirect: "manual" })).status).not.toBe(302);
   });
 
   it("falls back to the request origin when APP_ORIGIN and MCP_API_ORIGIN are unset", async () => {
@@ -1132,8 +1180,12 @@ describe("profile", () => {
     const bare = { ...env, APP_ORIGIN: "", MCP_API_ORIGIN: undefined } as unknown as typeof env;
     await createGitHubApp(cookie);
 
-    const start = await worker.fetch!(new Request(`${ORIGIN}/auth/github/start`, { headers: { cookie } }), bare, createExecutionContext());
-    expect(new URL(start.headers.get("location")!).searchParams.get("redirect_uri")).toBe(`${ORIGIN}/auth/github/callback`);
+    const start = await worker.fetch!(
+      new Request(`${ORIGIN}/auth/github/link`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ currentPassword: PASSWORD }) }),
+      bare,
+      createExecutionContext(),
+    );
+    expect(new URL((await start.json<{ url: string }>()).url).searchParams.get("redirect_uri")).toBe(`${ORIGIN}/auth/github/callback`);
 
     const callback = await worker.fetch!(new Request(`${ORIGIN}/auth/github/callback?code=x&state=wrong`, { headers: { cookie: `${cookie}; github_oauth_state=right` } }), bare, createExecutionContext());
     expect(callback.headers.get("location")).toBe(`${ORIGIN}/profile?github=error`);
@@ -1193,13 +1245,9 @@ describe("profile", () => {
 
     // The App was removed between the start and the callback.
     github.accounts.octo = { id: 583231, login: "octocat" };
-    const start = await SELF.fetch(`${ORIGIN}/auth/github/start`, { headers: { cookie }, redirect: "manual" });
-    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    const state = await linkState(await startGitHubLink(cookie, PASSWORD));
     await env.DB.exec("DELETE FROM github_app");
-    const callback = await SELF.fetch(`${ORIGIN}/auth/github/callback?code=octo&state=${state}`, {
-      headers: { cookie: `${cookie}; github_oauth_state=${state}` },
-      redirect: "manual",
-    });
+    const callback = await githubLinkCallback(cookie, "octo", state);
     expect(callback.headers.get("location")).toBe("https://app.example/profile?github=error");
     expect(await (await get("/me", cookie)).json()).toMatchObject({ githubLogin: null });
   });
@@ -2130,11 +2178,12 @@ describe("GitHub-only accounts", () => {
     }
   });
 
-  it("sets a password without a current one, rotating like a change: this session stays, the others go, and the password signs in", async () => {
+  it("sets a password without a current one once GitHub has confirmed the account, rotating like a change: this session stays, the others go, and the password signs in", async () => {
     const solo = await githubOnly("solo", { id: 720003, login: "solo-set" });
     const otherSession = signedInCookie(await logInWithGitHub("solo"))!;
     expect((await get("/me", otherSession)).status).toBe(200);
 
+    expect(await reauthWithGitHub(solo.cookie, "solo")).toBe("https://app.example/profile?github=reauthed");
     const set = await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie);
     expect(set.status).toBe(200);
     expect(await set.json()).toEqual({ ok: true });
@@ -2161,6 +2210,7 @@ describe("GitHub-only accounts", () => {
 
   it("asks for the current password once there is one, answering the generic 401 when it is missing or wrong", async () => {
     const solo = await githubOnly("solo", { id: 720005, login: "solo-twice" });
+    await reauthWithGitHub(solo.cookie, "solo");
     expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie)).status).toBe(200);
 
     for (const body of [{ newPassword: "second-password-try" }, { currentPassword: "wrong password", newPassword: "second-password-try" }]) {
@@ -2179,6 +2229,7 @@ describe("GitHub-only accounts", () => {
 
   it("lets only one of two simultaneous first passwords win", async () => {
     const solo = await githubOnly("solo", { id: 720006, login: "solo-race" });
+    await reauthWithGitHub(solo.cookie, "solo");
     const passwords = ["race-password-one", "race-password-two"];
     const results = await Promise.all(passwords.map((newPassword) => post("/auth/password", { newPassword }, solo.cookie)));
 
@@ -2202,6 +2253,7 @@ describe("GitHub-only accounts", () => {
     // Only the disconnect is refused.
     expect((await patch("/me", { name: "Renamed" }, solo.cookie)).status).toBe(200);
 
+    await reauthWithGitHub(solo.cookie, "solo");
     expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie)).status).toBe(200);
     const disconnected = await patch("/me", { githubLogin: null }, solo.cookie);
     expect(disconnected.status).toBe(200);
@@ -2222,10 +2274,300 @@ describe("GitHub-only accounts", () => {
     }
     expect(await (await get("/me", solo.cookie)).json()).toMatchObject({ email: solo.email });
 
+    await reauthWithGitHub(solo.cookie, "solo");
     expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie)).status).toBe(200);
     const changed = await post("/auth/email", { email: "free-address@example.test", currentPassword: NEW_PASSWORD }, solo.cookie);
     expect(changed.status).toBe(200);
     expect(await changed.json()).toMatchObject({ email: "free-address@example.test", hasPassword: true });
+  });
+
+  it("refuses a first password on the session alone: a stolen session cannot start the chain of set password, disconnect GitHub, link its own (ADR 0081)", async () => {
+    const solo = await githubOnly("solo", { id: 720011, login: "solo-chain" });
+    const otherSession = signedInCookie(await logInWithGitHub("solo"))!;
+
+    const refused = await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie);
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toEqual({ error: "confirm with GitHub first", code: "GITHUB_REAUTH_REQUIRED" });
+
+    // Nothing changed: no password, the other session still works, and so does the disconnect refusal that guarded the chain's second step.
+    expect(await (await get("/me", solo.cookie)).json()).toMatchObject({ hasPassword: false, githubLogin: "solo-chain" });
+    expect((await get("/me", otherSession)).status).toBe(200);
+    expect((await post("/auth/login", { email: solo.email, password: NEW_PASSWORD })).status).toBe(401);
+    expect((await patch("/me", { githubLogin: null }, solo.cookie)).status).toBe(403);
+  });
+
+  it("writes no confirmation when GitHub approves a different account, so the first password stays refused", async () => {
+    const solo = await githubOnly("solo", { id: 720012, login: "solo-mismatch" });
+    github.accounts.thief = { id: 720013, login: "thief" };
+
+    expect(await reauthWithGitHub(solo.cookie, "thief")).toBe("https://app.example/profile?github=reauth-error");
+    expect(await storedReauth(solo.cookie)).toBeNull();
+    expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie)).status).toBe(401);
+    expect(await (await get("/me", solo.cookie)).json()).toMatchObject({ hasPassword: false, githubLogin: "solo-mismatch" });
+  });
+
+  it("answers reauth-error when GitHub reports an error on a stored reauth state, not the generic error", async () => {
+    const solo = await githubOnly("solo", { id: 720090, login: "solo-denied" });
+    const start = await post("/auth/github/reauth", {}, solo.cookie);
+    expect(start.status).toBe(200);
+    const state = await linkState(start);
+
+    const callback = await SELF.fetch(`${ORIGIN}/auth/github/callback?error=access_denied&state=${state}`, {
+      headers: { cookie: `${solo.cookie}; github_oauth_state=${state}` },
+      redirect: "manual",
+    });
+    expect(callback.headers.get("location")).toBe("https://app.example/profile?github=reauth-error");
+    expect(await storedReauth(solo.cookie)).toBeNull();
+  });
+
+  it("accepts the confirmation once, for the session that earned it", async () => {
+    const solo = await githubOnly("solo", { id: 720014, login: "solo-once" });
+    const otherSession = signedInCookie(await logInWithGitHub("solo"))!;
+
+    expect(await reauthWithGitHub(solo.cookie, "solo")).toBe("https://app.example/profile?github=reauthed");
+    expect(await storedReauth(solo.cookie)).toBeGreaterThan(Date.now() + 9 * 60_000);
+    expect(await storedReauth(solo.cookie)).toBeLessThanOrEqual(Date.now() + 10 * 60_000);
+    // Another session of the same account has not confirmed anything.
+    expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, otherSession)).status).toBe(401);
+
+    expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie)).status).toBe(200);
+    expect(await storedReauth(solo.cookie)).toBeNull();
+    // Spent: a second attempt without a new confirmation is refused, and now it needs the current password too.
+    expect((await post("/auth/password", { newPassword: "second-password-try" }, solo.cookie)).status).toBe(401);
+    expect((await post("/auth/login", { email: solo.email, password: NEW_PASSWORD })).status).toBe(200);
+    expect((await post("/auth/login", { email: solo.email, password: "second-password-try" })).status).toBe(401);
+  });
+
+  it("lets the confirmation run out after ten minutes", async () => {
+    const solo = await githubOnly("solo", { id: 720015, login: "solo-late" });
+    await reauthWithGitHub(solo.cookie, "solo");
+    await env.DB.prepare("UPDATE sessions SET github_reauth_until = ? WHERE id = ?").bind(Date.now() - 1, solo.cookie.slice("session=".length)).run();
+
+    const refused = await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie);
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toMatchObject({ code: "GITHUB_REAUTH_REQUIRED" });
+    expect(await (await get("/me", solo.cookie)).json()).toMatchObject({ hasPassword: false });
+
+    // A fresh confirmation works again.
+    await reauthWithGitHub(solo.cookie, "solo");
+    expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie)).status).toBe(200);
+  });
+
+  it("keeps the two purposes apart: a reauth state never links, and a link state never confirms", async () => {
+    // A reauth for an account whose GitHub slot is empty: nothing to match, and it must not fill the slot.
+    const solo = await githubOnly("solo", { id: 720016, login: "solo-empty" });
+    await env.DB.prepare("UPDATE users SET github_login = NULL, github_user_id = NULL WHERE email = ?").bind(solo.email).run();
+    expect(await reauthWithGitHub(solo.cookie, "solo")).toBe("https://app.example/profile?github=reauth-error");
+    expect(await (await get("/me", solo.cookie)).json()).toMatchObject({ githubLogin: null });
+    expect(await storedReauth(solo.cookie)).toBeNull();
+    expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie)).status).toBe(401);
+
+    // A reauth that approves the right account follows no rename either: it is not a link.
+    const owner = await githubOnly("owner", { id: 720017, login: "owner-before" });
+    github.accounts.renamed = { id: 720017, login: "owner-after" };
+    expect(await reauthWithGitHub(owner.cookie, "renamed")).toBe("https://app.example/profile?github=reauthed");
+    expect(await (await get("/me", owner.cookie)).json()).toMatchObject({ githubLogin: "owner-before" });
+
+    // A link state, completed by the owner's own GitHub account, links (follows the rename) and confirms nothing.
+    const linker = await githubOnly("linker", { id: 720018, login: "linker-before" });
+    github.accounts.linkerRenamed = { id: 720018, login: "linker-after" };
+    expect(await connectGitHub(linker.cookie, "linkerRenamed", undefined)).toBe("https://app.example/profile");
+    expect(await (await get("/me", linker.cookie)).json()).toMatchObject({ githubLogin: "linker-after" });
+    expect(await storedReauth(linker.cookie)).toBeNull();
+    expect((await post("/auth/password", { newPassword: NEW_PASSWORD }, linker.cookie)).status).toBe(401);
+
+    // And a state is spent by one callback whichever purpose it carries.
+    const start = await post("/auth/github/reauth", {}, owner.cookie);
+    const state = await linkState(start);
+    expect((await githubLinkCallback(owner.cookie, "renamed", state)).headers.get("location")).toBe("https://app.example/profile?github=reauthed");
+    expect((await githubLinkCallback(owner.cookie, "renamed", state)).headers.get("location")).toBe("https://app.example/profile?github=error");
+  });
+
+  it("starts a reauthorization only for an account with no password, and only for a signed-in one", async () => {
+    expect((await post("/auth/github/reauth", {})).status).toBe(401);
+
+    const classic = await signup("has-a-password@foxban.test");
+    const refused = await post("/auth/github/reauth", {}, classic);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "this account already has a password" });
+    expect(await storedLinkState(classic)).toEqual({ hash: null, expiresAt: null });
+
+    const solo = await githubOnly("solo", { id: 720019, login: "solo-start" });
+    const start = await post("/auth/github/reauth", {}, solo.cookie);
+    expect(start.status).toBe(200);
+    const url = new URL((await start.json<{ url: string }>()).url);
+    expect(url.origin).toBe("https://github.example");
+    expect(url.searchParams.get("redirect_uri")).toBe("https://app.example/auth/github/callback");
+    // The server keeps only a hash of the state, with the purpose it was started for.
+    const stored = await env.DB.prepare("SELECT github_link_state_hash AS hash, github_link_purpose AS purpose FROM sessions WHERE id = ?")
+      .bind(solo.cookie.slice("session=".length))
+      .first();
+    expect(stored).toEqual({ hash: await sha256Hex(url.searchParams.get("state")!), purpose: "reauth" });
+  });
+
+  it("cannot link a different GitHub account over its own, so the owner's GitHub login keeps working (ADR 0081)", async () => {
+    const solo = await githubOnly("solo", { id: 720009, login: "solo-owner" });
+    github.accounts.intruder = { id: 720010, login: "intruder" };
+    github.emails.intruder = [];
+
+    // No password to prove, so the link starts; the callback refuses to replace the id.
+    expect(await connectGitHub(solo.cookie, "intruder", undefined)).toBe("https://app.example/profile?github=error");
+    expect(await (await get("/me", solo.cookie)).json()).toMatchObject({ githubLogin: "solo-owner" });
+    const signedIn = signedInCookie(await logInWithGitHub("solo"));
+    expect(await (await get("/me", signedIn!)).json()).toMatchObject({ email: solo.email });
+    // The intruder's GitHub account signs in to nothing.
+    const refused = await logInWithGitHub("intruder");
+    expect(refused.headers.get("location")).toBe("https://app.example/login?github=unlinked");
+    expect(signedInCookie(refused)).toBeNull();
+
+    // The same account again is no clash: it follows a rename.
+    github.accounts.renamed = { id: 720009, login: "solo-renamed" };
+    expect(await connectGitHub(solo.cookie, "renamed", undefined)).toBe("https://app.example/profile");
+    expect(await (await get("/me", solo.cookie)).json()).toMatchObject({ githubLogin: "solo-renamed" });
+  });
+});
+
+describe("linking GitHub proves the account first (ADR 0081)", () => {
+  let github: ReturnType<typeof fakeGitHub>;
+  beforeEach(async () => {
+    await env.DB.exec("DELETE FROM github_app");
+    // The pool shares D1 across the file, and every test here reuses the same GitHub ids.
+    await env.DB.exec("UPDATE users SET github_login = NULL, github_user_id = NULL");
+    github = fakeGitHub();
+    await createGitHubApp(await signup(`gh-link-admin-${crypto.randomUUID()}@foxban.test`));
+  });
+  afterEach(() => github.restore());
+
+  const githubIdOf = async (cookie: string) =>
+    (await env.DB.prepare("SELECT github_user_id AS id FROM users WHERE id = ?").bind(await getUserId(cookie)).first<{ id: number | null }>())!.id;
+
+  it("starts only with the current password, and stores no state for a refusal", async () => {
+    const cookie = await signup("gh-pw@foxban.test", "Gh Pw");
+    github.accounts.octo = { id: 730001, login: "octocat" };
+
+    for (const password of [undefined, "wrong password", ""]) {
+      const refused = await startGitHubLink(cookie, password);
+      expect(refused.status).toBe(password === "" ? 400 : 401);
+      expect(refused.headers.get("set-cookie")).toBeNull();
+      expect(await storedLinkState(cookie)).toEqual({ hash: null, expiresAt: null });
+    }
+    // A callback has nothing to spend, even with a matching cookie and query.
+    expect((await githubLinkCallback(cookie, "octo", "made-up-state")).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(await githubIdOf(cookie)).toBeNull();
+
+    const start = await startGitHubLink(cookie, PASSWORD);
+    expect(start.status).toBe(200);
+    expect((await githubLinkCallback(cookie, "octo", await linkState(start))).headers.get("location")).toBe("https://app.example/profile");
+    expect(await githubIdOf(cookie)).toBe(730001);
+    expect(await storedLinkState(cookie)).toEqual({ hash: null, expiresAt: null });
+  });
+
+  it("answers 429 past the account's limit, as the password routes do", async () => {
+    const cookie = await signup("gh-limit@foxban.test", "Gh Limit");
+    const limited = { ...env, ACCOUNT_RATE_LIMITER: { limit: async () => ({ success: false }) } } as unknown as typeof env;
+    const response = await worker.fetch!(
+      new Request(`${ORIGIN}/auth/github/link`, {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json", "CF-Connecting-IP": "203.0.113.9" },
+        body: JSON.stringify({ currentPassword: PASSWORD }),
+      }),
+      limited,
+      createExecutionContext(),
+    );
+    expect(response.status).toBe(429);
+    expect(await storedLinkState(cookie)).toEqual({ hash: null, expiresAt: null });
+  });
+
+  it("refuses a state the browser made up, or one stored for another session, and writes no link", async () => {
+    const owner = await signup("gh-forge@foxban.test", "Gh Forge");
+    const attacker = sessionCookie(await post("/auth/login", { email: "gh-forge@foxban.test", password: PASSWORD }));
+    github.accounts.attacker = { id: 730002, login: "attacker" };
+
+    // Never called /auth/github/link: the cookie and the query agree, and that is all the attacker can arrange.
+    expect((await githubLinkCallback(attacker, "attacker", "forged")).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(github.tokenRequests).toEqual([]);
+
+    // The owner's own session started a link; another session of theirs cannot finish it, and cannot spend it.
+    const state = await linkState(await startGitHubLink(owner, PASSWORD));
+    expect((await githubLinkCallback(attacker, "attacker", state)).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(await storedLinkState(owner)).toMatchObject({ hash: await sha256Hex(state) });
+    expect(await githubIdOf(owner)).toBeNull();
+
+    // A state that is right but whose cookie is not (the double-submit pairing) fails too, and spends the stored one.
+    const wrongCookie = await SELF.fetch(`${ORIGIN}/auth/github/callback?code=attacker&state=${state}`, {
+      headers: { cookie: `${owner}; github_oauth_state=other` },
+      redirect: "manual",
+    });
+    expect(wrongCookie.headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(await storedLinkState(owner)).toEqual({ hash: null, expiresAt: null });
+    expect(github.tokenRequests).toEqual([]);
+  });
+
+  it("spends the stored state once, whatever the callback does, and refuses it after it expires", async () => {
+    const cookie = await signup("gh-once@foxban.test", "Gh Once");
+    github.accounts.octo = { id: 730003, login: "octocat" };
+
+    // A callback that fails at GitHub still spends it: the same state cannot be tried again with a good code.
+    const failed = await linkState(await startGitHubLink(cookie, PASSWORD));
+    expect((await githubLinkCallback(cookie, "refused", failed)).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect((await githubLinkCallback(cookie, "octo", failed)).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(await githubIdOf(cookie)).toBeNull();
+
+    // A state that worked cannot be replayed.
+    const used = await linkState(await startGitHubLink(cookie, PASSWORD));
+    expect((await githubLinkCallback(cookie, "octo", used)).headers.get("location")).toBe("https://app.example/profile");
+    github.accounts.other = { id: 730004, login: "other" };
+    expect((await githubLinkCallback(cookie, "other", used)).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(await githubIdOf(cookie)).toBe(730003);
+    await patch("/me", { githubLogin: null }, cookie);
+
+    // Past its ten minutes it is refused, and cleared.
+    const stale = await linkState(await startGitHubLink(cookie, PASSWORD));
+    await env.DB.prepare("UPDATE sessions SET github_link_expires_at = ? WHERE id = ?").bind(Date.now() - 1, cookie.slice("session=".length)).run();
+    expect((await githubLinkCallback(cookie, "octo", stale)).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(await githubIdOf(cookie)).toBeNull();
+    expect(await storedLinkState(cookie)).toEqual({ hash: null, expiresAt: null });
+
+    // A newer start replaces an older one: only the latest state works.
+    const first = await linkState(await startGitHubLink(cookie, PASSWORD));
+    const second = await linkState(await startGitHubLink(cookie, PASSWORD));
+    expect((await githubLinkCallback(cookie, "octo", first)).headers.get("location")).toBe("https://app.example/profile?github=error");
+    expect(await githubIdOf(cookie)).toBeNull();
+    // ...and a failed attempt spent the second one too, so it starts again.
+    expect((await githubLinkCallback(cookie, "octo", second)).headers.get("location")).toBe("https://app.example/profile?github=error");
+  });
+
+  it("does not let a stolen session link its own GitHub account to sign back in after the owner changes the password", async () => {
+    const stolen = await signup("gh-stolen@foxban.test", "Gh Stolen");
+    const owner = sessionCookie(await post("/auth/login", { email: "gh-stolen@foxban.test", password: PASSWORD }));
+    github.accounts.attacker = { id: 730005, login: "attacker" };
+    github.emails.attacker = [];
+
+    // The thief has the cookie and not the password: both ways to start or fake a link are closed.
+    expect((await startGitHubLink(stolen)).status).toBe(401);
+    expect((await startGitHubLink(stolen, "guess")).status).toBe(401);
+    expect((await githubLinkCallback(stolen, "attacker", "forged")).headers.get("location")).toBe("https://app.example/profile?github=error");
+
+    expect((await post("/auth/password", { currentPassword: PASSWORD, newPassword: "a brand new passphrase" }, owner)).status).toBe(200);
+    expect((await get("/me", stolen)).status).toBe(401);
+
+    const attempt = await logInWithGitHub("attacker");
+    expect(attempt.headers.get("location")).toBe("https://app.example/login?github=unlinked");
+    expect(signedInCookie(attempt)).toBeNull();
+    expect(await githubIdOf(owner)).toBeNull();
+  });
+
+  it("keeps a linked account's id: a start with the password still cannot replace it, and a different account's id is a clash", async () => {
+    const owner = await signup("gh-keep@foxban.test", "Gh Keep");
+    const other = await signup("gh-keep-other@foxban.test", "Gh Keep Other");
+    github.accounts.mine = { id: 730006, login: "mine" };
+    github.accounts.theirs = { id: 730007, login: "theirs" };
+
+    expect(await connectGitHub(owner, "mine")).toBe("https://app.example/profile");
+    expect(await connectGitHub(owner, "theirs")).toBe("https://app.example/profile?github=error");
+    expect(await githubIdOf(owner)).toBe(730006);
+    expect(await connectGitHub(other, "mine")).toBe("https://app.example/profile?github=taken");
+    expect(signedInCookie(await logInWithGitHub("mine"))).not.toBeNull();
   });
 });
 

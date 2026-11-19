@@ -134,6 +134,7 @@ export function BoardView({
     accessState,
     connected,
     handshakeFailed,
+    signedOut,
     retry,
     sendMutation,
     subscribeMutation,
@@ -1299,10 +1300,17 @@ export function BoardView({
   // than replaced, because replacing it is what discarded an unsent draft. The
   // socket's own transition means the same thing and keeps the board visible
   // under the same banner.
+  const connectionLabel = signedOut
+    ? "You were signed out."
+    : accessState === "transitioning" ? "Updating access…" : connected ? "Live" : handshakeFailed ? "Could not connect." : "reconnecting…";
   const accessFenced = accessChangePending && state !== undefined;
   const accessChanging = accessFenced || (accessState === "transitioning" && state !== undefined);
   if (accessState === "denied") {
     return <div className="route-state"><p>You no longer have access to this board.</p><Link to="/" className={buttonVariants({ variant: "link" })}>Back to Home</Link></div>;
+  }
+  // The session ended (ADR 0082) and the redirect to /login may have been cancelled by an unsent draft's leave prompt: say so rather than reconnect.
+  if (signedOut && !state) {
+    return <div className="route-state"><p>You were signed out.</p><a href="/login" className={buttonVariants({ variant: "link" })}>Sign in</a></div>;
   }
   if (handshakeFailed && !state) {
     return (
@@ -1400,15 +1408,20 @@ export function BoardView({
                 "board-connection-state",
                 connected
                   ? "board-connection-live"
-                  : handshakeFailed
+                  : handshakeFailed || signedOut
                     ? "board-connection-failed"
                     : "board-connection-pending",
               )}
-              title={accessState === "transitioning" ? "Updating access…" : connected ? "Live" : handshakeFailed ? "Could not connect." : "reconnecting…"}
+              title={connectionLabel}
             >
               {connected && <span className="board-connection-dot" aria-hidden="true" />}
-              {accessState === "transitioning" ? "Updating access…" : connected ? "Live" : handshakeFailed ? "Could not connect." : "reconnecting…"}
+              {connectionLabel}
             </span>
+            {signedOut && (
+              <a href="/login" className={buttonVariants({ variant: "outline", size: "xs", className: "board-connection-retry" })}>
+                Sign in
+              </a>
+            )}
             {handshakeFailed && (
               <Button
                 type="button"

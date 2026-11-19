@@ -7,12 +7,15 @@ import {
 } from "@foxban/shared";
 import { boardMemberSql, boardOpenSql } from "./auth";
 import { INTERNAL_IS_ADMIN_HEADER, INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
+import { REVOKE_SESSIONS_PATH, SessionRevocationSchema, closeRevokedSockets, sessionHashOf } from "./session-revocation";
 
 type SocketAttachment = {
   userId: string;
   timezone: string | null;
   /** An instance Admin opens every board, so sees everyone's presence. */
   isAdmin?: boolean;
+  /** SHA-256 of the session id the socket was opened with (ADR 0082); absent on a socket accepted before it existed. */
+  sessionHash?: string;
 };
 
 /**
@@ -77,6 +80,12 @@ export class PresenceDO extends DurableObject<Env> {
       }
       return Response.json({ok:true});
     }
+    if (url.pathname === REVOKE_SESSIONS_PATH) {
+      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+      const parsed = SessionRevocationSchema.safeParse(await request.json().catch(() => null));
+      if (!parsed.success) return new Response("invalid session revocation", { status: 400 });
+      return Response.json({ closed: closeRevokedSockets(this.ctx.getWebSockets(), parsed.data) });
+    }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket upgrade", { status: 426 });
     }
@@ -92,7 +101,7 @@ export class PresenceDO extends DurableObject<Env> {
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server);
 
-    const attachment: SocketAttachment = { userId, timezone, isAdmin: request.headers.get(INTERNAL_IS_ADMIN_HEADER) === "true" };
+    const attachment: SocketAttachment = { userId, timezone, isAdmin: request.headers.get(INTERNAL_IS_ADMIN_HEADER) === "true", sessionHash: sessionHashOf(request.headers) };
     server.serializeAttachment(attachment);
 
     // Upsert SQLite presence row: clear last_seen_at as online-cycle marker and update latest known timezone

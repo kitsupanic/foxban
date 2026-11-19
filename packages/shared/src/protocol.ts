@@ -49,6 +49,12 @@ export const DESCRIPTION_MAX_BYTES = 100_000;
  * makes `comment.update` / `comment.delete` name their card (ADR 0078).
  */
 export const REALTIME_PROTOCOL_VERSION = "13";
+/**
+ * Close code of a realtime socket (board or presence) whose session was revoked, by sign-out or by a
+ * password change from another session (ADR 0082). A close code, not a frame, so it needs no version bump.
+ * The client must not reconnect: it leaves like a sign-out.
+ */
+export const SESSION_REVOKED_CLOSE = 4011;
 export const TRANSFER_TERMINAL_CODE = "transfer_terminal" as const;
 export type TransferTerminalCode = typeof TRANSFER_TERMINAL_CODE;
 

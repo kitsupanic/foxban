@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   REALTIME_PROTOCOL_VERSION,
+  SESSION_REVOKED_CLOSE,
   ServerMessageSchema,
   type ClientMessage,
   type Comment,
@@ -9,6 +10,7 @@ import {
 } from "@foxban/shared";
 import { api } from "./api";
 import { requestAppUpdateCheck } from "./app-update";
+import { leaveRevokedSession } from "./auth";
 import { boardQueryKey, clearBoardAccessCaches } from "./board-cache";
 import { invalidateCardActivity, recordActivities } from "./activity";
 import { invalidateDevelopmentQueries } from "./card-development";
@@ -57,7 +59,7 @@ export type BoardEventObserver = {
   sent?(msg: ClientMessage, before: BoardState, after: BoardState): void;
   /** An own pending mutation left the pending set: acked, rejected, timed out or rolled back. A transport close is not one. */
   resolved?(mutationId: string): void;
-  /** The socket stopped reconnecting (access denied, or the reconnect budget ran out); nothing settles until a manual retry. */
+  /** The socket stopped reconnecting (access denied, the reconnect budget ran out, or the session ended); nothing settles until a manual retry. */
   halted?(): void;
 };
 
@@ -97,6 +99,8 @@ export function useBoardSocket(
   connected: boolean;
   accessState: "ready" | "transitioning" | "denied";
   handshakeFailed: boolean;
+  /** The server ended this session (close `SESSION_REVOKED_CLOSE`, ADR 0082): terminal, nothing reconnects. */
+  signedOut: boolean;
   retry: () => void;
   sendMutation: SendMutation;
   subscribeMutation: (mutationId: string, callback: MutationSettledCallback) => () => void;
@@ -116,6 +120,7 @@ export function useBoardSocket(
   eventsRef.current = handlers.events;
   const [connected, setConnected] = useState(false);
   const [handshakeFailed, setHandshakeFailed] = useState(false);
+  const [signedOut, setSignedOut] = useState(false);
   const [accessState, setAccessState] = useState<"ready" | "transitioning" | "denied">("transitioning");
   // Bumped by `retry()` to tear the connect loop down and start it over.
   const [attemptEpoch, setAttemptEpoch] = useState(0);
@@ -419,6 +424,13 @@ export function useBoardSocket(
         clearTimeout(stableTimer);
         discardPending();
         if (unmounted) return;
+        if (event.code === SESSION_REVOKED_CLOSE) {
+          // Terminal before the redirect: the browser's leave prompt (an unsent draft) can cancel it, and the board must not say "reconnecting…" forever.
+          setSignedOut(true);
+          eventsRef.current?.halted?.();
+          leaveRevokedSession();
+          return;
+        }
         const accessProbe = accessProbeRef.current;
         const probe: AccessProbe = accessProbe.pending
           ? "pending"
@@ -537,6 +549,7 @@ export function useBoardSocket(
     accessState,
     connected,
     handshakeFailed,
+    signedOut,
     retry,
     sendMutation,
     subscribeMutation,

@@ -3,6 +3,8 @@ import { createMiddleware } from "hono/factory";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import { GITHUB_FETCH_TIMEOUT_MS } from "./github";
+import { boardClient } from "./board-client";
+import { REVOKE_SESSIONS_PATH, type SessionRevocation } from "./session-revocation";
 
 /** The signed-in user, as identified by the session cookie. */
 export type SessionUser = {
@@ -562,9 +564,172 @@ export async function startSession(
 export async function endSession(c: Context<AppEnv>): Promise<void> {
   const id = getCookie(c, SESSION_COOKIE);
   if (id) {
-    await c.env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(id).run();
+    const ended = await c.env.DB.prepare("DELETE FROM sessions WHERE id = ? RETURNING user_id AS userId").bind(id).first<{ userId: string }>();
+    // The row is gone, so the session's open sockets must go too (ADR 0082).
+    if (ended) revokeRealtimeSessions(c.env, c.executionCtx, ended.userId, { sessionHashes: [await sha256Hex(id)] });
   }
   deleteCookie(c, SESSION_COOKIE, { path: "/" });
+}
+
+/** The SHA-256 of the request's session id: how a socket names its session to a Durable Object without handing it the bearer secret (ADR 0082). Call after `requireAuth`. */
+export function requestSessionHash(c: Context<AppEnv>): Promise<string> {
+  return sha256Hex(getCookie(c, SESSION_COOKIE) ?? "");
+}
+
+/** How long one board (or the presence object) may take to close the sockets a revocation names. */
+const REVOKE_CALL_TIMEOUT_MS = 5_000;
+/** Revocation calls in flight at once. */
+const REVOKE_BATCH = 25;
+/**
+ * The most Durable Object calls one revocation makes, retries included. An assumption, not a measurement: a Worker
+ * invocation may make at least 1000 subrequests on the paid plan, the D1 reads count against the same budget, and
+ * 500 leaves that margin (ADR 0082). A board past the cap is logged by id, not skipped silently.
+ */
+const REVOKE_CALL_CAP = 500;
+/** How many ids a revocation's warning names; the count is always whole. */
+const REVOKE_LOGGED_IDS = 100;
+
+/** One Durable Object's answer to a revocation, a board's when `boardId` is set and the PresenceDO's when null: true only when it answered 2xx. */
+async function revokeOn(env: Env, boardId: string | null, body: SessionRevocation): Promise<boolean> {
+  try {
+    if (boardId !== null) return await boardClient(env, boardId).revokeSessions(body, REVOKE_CALL_TIMEOUT_MS);
+    const response = await env.PRESENCE_DO.get(env.PRESENCE_DO.idFromName("global")).fetch(`https://presence.internal${REVOKE_SESSIONS_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REVOKE_CALL_TIMEOUT_MS),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How long a revocation may keep issuing calls. Platform assumption, not measured: Workers `waitUntil` work is cut
+ * off about 30 s after the response, so 25 s leaves room to log what was not reached.
+ */
+const REVOKE_DEADLINE_MS = 25_000;
+
+/** What one fan-out has left to spend: calls (shared by every pass, retries included) and time. */
+type RevokeRun = { calls: number; deadline: number };
+
+/**
+ * Asks every target `REVOKE_BATCH` at a time, within `run.calls` and until `run.deadline`. Returns the ones that did
+ * not answer, the ones it never asked, and why it stopped asking (null: it asked them all).
+ */
+async function revokeBatched(env: Env, targets: Array<string | null>, body: SessionRevocation, run: RevokeRun) {
+  const unanswered: Array<string | null> = [];
+  let at = 0;
+  let stop: "cap" | "deadline" | null = null;
+  while (at < targets.length && !stop) {
+    if (run.calls <= 0) stop = "cap";
+    else if (Date.now() >= run.deadline) stop = "deadline";
+    else {
+      const batch = targets.slice(at, at + Math.min(REVOKE_BATCH, run.calls));
+      at += batch.length;
+      run.calls -= batch.length;
+      await Promise.all(
+        batch.map(async (target) => {
+          if (!(await revokeOn(env, target, body))) unanswered.push(target);
+        }),
+      );
+    }
+  }
+  return { unanswered, unasked: targets.slice(at), stop };
+}
+
+const named = (targets: Array<string | null>) => `${targets.length} (${targets.slice(0, REVOKE_LOGGED_IDS).map((id) => id ?? "presence").join(", ")})`;
+
+/** One read that is tried twice: D1 can fail a read once and answer the next. Null when both fail. */
+async function readTwice<T>(read: () => Promise<T>): Promise<T | null> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await read();
+    } catch {
+      // try once more, then give up
+    }
+  }
+  return null;
+}
+
+/**
+ * Sends `body` to the PresenceDO at once, then to every board `boardIdsOf` finds, in batches within
+ * `REVOKE_CALL_CAP` calls (every first call before any retry) and before `REVOKE_DEADLINE_MS` runs out. Each unanswered call
+ * is retried once. Boards that still have no answer, were past the cap or the deadline, are logged by id; when the
+ * board list cannot be read the fan-out to boards is skipped and says so. Never throws.
+ */
+async function revokeFanOut(env: Env, userId: string, body: SessionRevocation): Promise<void> {
+  const run: RevokeRun = { calls: REVOKE_CALL_CAP, deadline: Date.now() + REVOKE_DEADLINE_MS };
+  // Started before the D1 reads: the presence object needs nothing from them.
+  const presence = revokeBatched(env, [null], body, run);
+  const boardIds = await readTwice(async () => {
+    const user = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(userId).first<{ email: string }>();
+    const { results } = await env.DB.prepare(`SELECT b.id AS id FROM boards b WHERE ${boardOpenSql("b", "?1", "?2=1")}`)
+      .bind(userId, user && isAdminEmail(env, user.email) ? 1 : 0)
+      .all<{ id: string }>();
+    return results.map(({ id }) => id);
+  });
+  if (boardIds === null) console.warn(`[session] could not read the boards of user ${userId}: realtime revocation skipped the board fan-out for that user`);
+  // Boards start only once the presence call is done, so no more than `REVOKE_BATCH` calls are ever in flight.
+  const presenceUnanswered = (await presence).unanswered;
+  const first = await revokeBatched(env, boardIds ?? [], body, run);
+  const retried = await revokeBatched(env, [...presenceUnanswered, ...first.unanswered], body, run);
+  const failed = [...retried.unanswered, ...retried.unasked];
+  if (failed.length > 0) console.warn(`[session] realtime revocation got no answer from ${named(failed)}`);
+  if (first.unasked.length > 0) {
+    const why = first.stop === "cap" ? `over the ${REVOKE_CALL_CAP}-call cap` : `past the ${REVOKE_DEADLINE_MS / 1000} s deadline`;
+    console.warn(`[session] realtime revocation did not reach ${named(first.unasked)}: ${why}`);
+  }
+}
+
+/**
+ * Closes the open board and presence sockets that a revoked session of `userId` holds (ADR 0082), after its D1
+ * row is already gone: a socket is checked once at upgrade, so deleting the row does not reach it. Name the
+ * revoked sessions by their hash (`sessionHashes`: sign-out) or every session but the one that stays
+ * (`exceptSessionHash`: a password change). Runs in `ctx.waitUntil` so the response is not delayed, asks the
+ * PresenceDO first, finds the boards the user can open with `boardOpenSql` (every board, for an instance Admin),
+ * and asks each board's Durable Object, all within `REVOKE_DEADLINE_MS`. Failures are logged, never thrown.
+ */
+export function revokeRealtimeSessions(
+  env: Env,
+  ctx: Pick<ExecutionContext, "waitUntil">,
+  userId: string,
+  revocation: Omit<SessionRevocation, "userId">,
+): void {
+  ctx.waitUntil(
+    revokeFanOut(env, userId, { userId, ...revocation } as SessionRevocation).catch((error) =>
+      console.warn("[session] could not revoke realtime sessions:", error instanceof Error ? error.message : error),
+    ),
+  );
+}
+
+/**
+ * The upgrade race (ADR 0082): a socket upgrade that passed `requireAuth` before its session was deleted can
+ * reach `acceptWebSocket` after the revocation swept that Durable Object, and would stay open. So once the object
+ * has accepted (`recheckSessionAfterUpgrade`), the session row is read again, and a row that is gone gets the same
+ * revocation, for that session's hash, sent to that same object (a board's when `boardId` is set, the PresenceDO's
+ * when null), with one retry. Either the sweep saw the socket or this read sees the deleted row.
+ */
+export async function revokeIfSessionEnded(env: Env, sessionId: string, userId: string, boardId: string | null): Promise<void> {
+  const live = await env.DB.prepare("SELECT 1 AS live FROM sessions WHERE id = ? AND expires_at > ?").bind(sessionId, Date.now()).first();
+  if (live) return;
+  const body: SessionRevocation = { userId, sessionHashes: [await sha256Hex(sessionId)] };
+  if (!(await revokeOn(env, boardId, body)) && !(await revokeOn(env, boardId, body))) {
+    console.warn(`[session] a socket opened by an ended session was not closed on ${boardId ?? "presence"}`);
+  }
+}
+
+/** Passes a Durable Object's answer to a socket upgrade through, and when it is a 101 schedules `revokeIfSessionEnded` for it. Call after `requireAuth`. */
+export function recheckSessionAfterUpgrade(c: Context<AppEnv>, response: Response, boardId: string | null): Response {
+  if (response.status === 101) {
+    c.executionCtx.waitUntil(
+      revokeIfSessionEnded(c.env, getCookie(c, SESSION_COOKIE) ?? "", c.get("user").id, boardId).catch((error) =>
+        console.warn("[session] could not recheck the session of a new socket:", error instanceof Error ? error.message : error),
+      ),
+    );
+  }
+  return response;
 }
 
 /** Resolves the session cookie to a user, or answers 401. */

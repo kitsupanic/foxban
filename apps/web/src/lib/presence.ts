@@ -3,9 +3,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   PresenceServerMessageSchema,
   REALTIME_PROTOCOL_VERSION,
+  SESSION_REVOKED_CLOSE,
   type PresenceState,
 } from "@foxban/shared";
-import type { User } from "./auth";
+import { leaveRevokedSession, type User } from "./auth";
 import { requestAppUpdateCheck } from "./app-update";
 import { planBoardReconnect, STABLE_CONNECTION_MS } from "./access-attempt";
 import { invalidateWorkspaceContext } from "./workspaces";
@@ -122,9 +123,13 @@ export function usePresenceSocket(user: User | null | undefined): void {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         clearTimeout(stableTimer);
         if (unmounted) return;
+        if (event.code === SESSION_REVOKED_CLOSE) {
+          leaveRevokedSession();
+          return;
+        }
         // The same backoff and failure budget as the board socket (transport branch).
         const plan = planBoardReconnect({
           code: 1006,

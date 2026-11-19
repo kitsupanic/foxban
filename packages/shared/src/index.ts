@@ -44,6 +44,7 @@ export {
   PositionsRebalancedSchema,
   PrioritySchema,
   REALTIME_PROTOCOL_VERSION,
+  SESSION_REVOKED_CLOSE,
   TRANSFER_TERMINAL_CODE,
   type TransferTerminalCode,
   RelationKindSchema,

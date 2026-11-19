@@ -87,3 +87,6 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0077 — A live comment's timestamp must be near the board's clock](0077-comment-time-near-server-clock.md) (amends 0074)
 - [0078 — Comments load per card, not in the snapshot](0078-per-card-comment-loading.md) (amends 0069, 0073)
 - [0079 — Removing a workspace member revokes the workspace's live invite links](0079-removal-revokes-workspace-invites.md) (amends 0066)
+- [0080 — Demoting a workspace admin revokes the workspace's admin invite links](0080-demotion-revokes-admin-invite-links.md) (amends 0079)
+- [0081 — Linking GitHub needs the current password](0081-github-link-needs-current-password.md) (amends 0065)
+- [0082 — Revoking a session closes its open sockets](0082-session-revocation-closes-sockets.md) (amends 0011, 0026)

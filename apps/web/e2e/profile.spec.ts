@@ -51,10 +51,18 @@ function profileStatus(page: Page, text: string): Locator {
   return page.getByRole("status").filter({ hasText: text });
 }
 
+/** "Connect GitHub" asks for the current password first (ADR 0081); the signed-up account's is `PASSWORD`. */
+async function submitConnectGitHub(page: Page, password: string): Promise<void> {
+  const dialog = page.getByRole("dialog", { name: "Connect GitHub" });
+  await dialog.getByLabel("Current password").fill(password);
+  await dialog.getByRole("button", { name: "Connect GitHub" }).click();
+}
+
 async function connectGitHub(page: Page): Promise<void> {
   await ensureGitHubApp(page);
   await page.getByRole("link", { name: "Profile", exact: true }).click();
-  await page.getByRole("link", { name: "Connect GitHub" }).click();
+  await page.getByRole("button", { name: "Connect GitHub" }).click();
+  await submitConnectGitHub(page, PASSWORD);
   await page.waitForURL("**/profile");
   await expect(page.getByText("@octocat")).toBeVisible();
 }
@@ -106,8 +114,12 @@ test("connecting GitHub puts an avatar on the header, picker, card and comment",
   await expect(page.locator('img[src*="github.com"]')).toHaveCount(0);
 
   // A later owned action (clicking Connect GitHub) clears stale feedback
-  await githubSection.getByRole("link", { name: "Connect GitHub" }).click();
+  await githubSection.getByRole("button", { name: "Connect GitHub" }).click();
   await expect(githubSection.getByRole("status")).toHaveCount(0);
+  // A wrong password stays in the dialog and starts nothing.
+  await submitConnectGitHub(page, "not the password");
+  await expect(page.getByRole("dialog", { name: "Connect GitHub" }).getByRole("alert")).toHaveText("Current password is incorrect.");
+  await submitConnectGitHub(page, PASSWORD);
   await page.waitForURL("**/profile");
   await expect(page.getByText("@octocat")).toBeVisible();
 });
