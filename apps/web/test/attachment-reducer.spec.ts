@@ -1,4 +1,4 @@
-import { createBoardReconciler } from "../src/lib/reconciliation";
+import { createBoardReconciler } from "./reconciler-helpers";
 import { expect, test } from "@playwright/test";
 import type { ArchivedCard, Attachment, Card, ClientMessage } from "@foxban/shared";
 import {

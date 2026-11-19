@@ -108,6 +108,16 @@ describe("repository events", () => {
     expect(github.calls.filter((call) => call.includes("/repos/") || call.includes("access_tokens"))).toEqual([]);
   });
 
+  it("stores the new name when a connected repo was renamed", async () => {
+    await deliver("installation", { action: "created", installation: installation(), repositories: [repo(101, `${OWNER}/api`)] });
+    // A pull_request payload this bare is a 400 later in the handler; the name is stored before that, but push says it cleanly.
+    for (const [event, payload] of REPO_EVENTS.filter(([event]) => event !== "pull_request")) {
+      const response = await deliver(event, { ...payload, repository: repo(101, `${OWNER}/api-${event}`) });
+      expect(response.status).toBe(200);
+      expect(await connectedRepos(await adminSession())).toEqual([`${OWNER}/api-${event}`]);
+    }
+  });
+
   it("answers 2xx to events it has no use for", async () => {
     const response = await deliver("star", { action: "created", repository: repo(101, `${OWNER}/api`) });
     expect(response.status).toBe(200);

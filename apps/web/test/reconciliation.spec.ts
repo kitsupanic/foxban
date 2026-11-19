@@ -10,7 +10,7 @@ import type {
   ServerMessage,
 } from "@foxban/shared";
 import type { BoardState } from "../src/lib/apply-mutation";
-import { createBoardReconciler } from "../src/lib/reconciliation";
+import { createBoardReconciler } from "./reconciler-helpers";
 
 function createInitialState(): BoardState {
   const col1: Column = { id: "col-1", title: "Column 1", position: "a0" };

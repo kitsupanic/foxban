@@ -193,7 +193,8 @@ export const authRouter = new Hono<AppEnv>()
       }>();
     // An unknown email still pays for one PBKDF2 derivation, so the response time
     // does not reveal which accounts exist. Both failures answer the same 401.
-    const stored = row?.passwordHash ?? DUMMY_PASSWORD_HASH;
+    // A GitHub-only account has the marker, which verifies instantly; it pays for a derivation too.
+    const stored = row && row.passwordHash !== NO_PASSWORD_HASH ? row.passwordHash : DUMMY_PASSWORD_HASH;
     const ok = await verifyPassword(password, stored);
     if (!row || !ok) {
       return c.json({ error: "invalid credentials" }, 401);

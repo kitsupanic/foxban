@@ -697,6 +697,14 @@ const MIGRATIONS: MigrationStep[][] = [
      )`,
   ],
   [convertToIndependentSubtasks],
+  [
+    // Looked up by a scan until now: a card's comments (opening it, the cascade), a comment's replies
+    // (comment.delete), an attachment by its R2 key (cleanup, reconcile) and a card's attachments (the cascade).
+    `CREATE INDEX IF NOT EXISTS comments_card ON comments(card_id)`,
+    `CREATE INDEX IF NOT EXISTS comments_parent ON comments(parent_comment_id)`,
+    `CREATE INDEX IF NOT EXISTS attachments_object_key ON attachments(object_key)`,
+    `CREATE INDEX IF NOT EXISTS attachments_card ON attachments(card_id)`,
+  ],
 ];
 
 type MutationRequest =
@@ -805,14 +813,7 @@ export class BoardDO extends DurableObject<Env> {
           "SELECT MIN(expires_at) AS expireAt FROM card_transfer_locks",
         )
         .toArray()[0]?.expireAt;
-      const nextAttachment = sql
-        .exec<{ deleteAfter: number | null }>(
-          `SELECT MIN(delete_after) AS deleteAfter
-             FROM attachment_cleanup
-            WHERE deleted_at IS NULL
-               OR (deleted_at IS NOT NULL AND delete_after > 0)`,
-        )
-        .toArray()[0]?.deleteAfter;
+      const nextAttachment = this.nextAttachmentWake();
       const candidates: number[] = [];
       if (nextLock !== null && nextLock !== undefined) candidates.push(nextLock);
       if (nextAttachment !== null && nextAttachment !== undefined) candidates.push(nextAttachment);
@@ -1549,21 +1550,7 @@ export class BoardDO extends DurableObject<Env> {
 
       if (isOwned > 0) continue;
 
-      const isStaged = this.ctx.storage.sql
-        .exec<{ count: number }>(
-          `SELECT COUNT(*) AS count
-             FROM attachment_cleanup
-            WHERE object_key = ?
-              AND reason = 'staged'
-              AND delete_after > ?
-              AND claim_token IS NULL
-              AND deleted_at IS NULL`,
-          item.objectKey,
-          now,
-        )
-        .toArray()[0]?.count ?? 0;
-
-      if (isStaged > 0) continue;
+      if (this.isStagedLease(item.objectKey, now)) continue;
 
       const isTombstone = this.ctx.storage.sql
         .exec<{ count: number }>(
@@ -2011,37 +1998,11 @@ export class BoardDO extends DurableObject<Env> {
         const resolvedDestKeys = new Map<string, string>();
         for (const att of bundle.attachments) {
           const transferKey = attachmentTransferObjectKey(boardId, transferId, att.id);
-          const stagedTransfer = sql
-            .exec<{ count: number }>(
-              `SELECT COUNT(*) AS count
-                 FROM attachment_cleanup
-                WHERE object_key = ?
-                  AND reason = 'staged'
-                  AND delete_after > ?
-                  AND claim_token IS NULL
-                  AND deleted_at IS NULL`,
-              transferKey,
-              nowMs,
-            )
-            .toArray()[0]?.count ?? 0;
-          if (stagedTransfer > 0) {
+          if (this.isStagedLease(transferKey, nowMs)) {
             resolvedDestKeys.set(att.id, transferKey);
           } else {
             const legacyKey = attachmentObjectKey(boardId, att.id);
-            const stagedLegacy = sql
-              .exec<{ count: number }>(
-                `SELECT COUNT(*) AS count
-                   FROM attachment_cleanup
-                  WHERE object_key = ?
-                    AND reason = 'staged'
-                    AND delete_after > ?
-                    AND claim_token IS NULL
-                    AND deleted_at IS NULL`,
-                legacyKey,
-                nowMs,
-              )
-              .toArray()[0]?.count ?? 0;
-            if (stagedLegacy > 0) {
+            if (this.isStagedLease(legacyKey, nowMs)) {
               resolvedDestKeys.set(att.id, legacyKey);
             } else {
               throw new ImportConflictError(409, "attachment staging lease expired before import");
@@ -2209,7 +2170,8 @@ export class BoardDO extends DurableObject<Env> {
       // arrived in between and dropped it while the card was not here yet.
       this.ctx.waitUntil(this.settleDevelopmentRoutes({ pullRequests: bundle.developmentPullRequests, branches: bundle.developmentBranches }));
 
-      this.broadcast(this.snapshot());
+      // A replay changed nothing, so live sockets have nothing to learn: a snapshot would read to them as a reconnect.
+      if (!importOutcome.existingReceipt) this.broadcast(this.snapshot());
 
       return Response.json({ receipt: importOutcome.receipt, existingReceipt: importOutcome.existingReceipt });
     } catch (err) {
@@ -2304,7 +2266,9 @@ export class BoardDO extends DurableObject<Env> {
         );
       }
 
-      this.broadcast(this.snapshot());
+      // The card is gone for good: peers drop it, as for a purge. A snapshot would read to a live socket as a
+      // reconnect and mark everyone's pending mutations "could not verify". An already-absent card changed nothing.
+      if (!outcome.absent) this.broadcast({ type: "archive.purged", cardIds: [cardId] });
 
       this.ctx.waitUntil(this.drainAttachmentCleanup());
       return Response.json({ ok: true });
@@ -2326,18 +2290,7 @@ export class BoardDO extends DurableObject<Env> {
       )
       .toArray()[0];
 
-    if (!curLock) {
-      const op = this.ctx.storage.sql
-        .exec<{ state: string }>(
-          "SELECT state FROM card_transfer_operations WHERE transfer_id = ?",
-          transferId,
-        )
-        .toArray()[0];
-      if (op && (op.state === "aborted" || op.state === "finalized")) {
-        return Response.json({ ok: true });
-      }
-      return Response.json({ ok: true });
-    }
+    if (!curLock) return Response.json({ ok: true });
 
     if (curLock.transfer_id !== transferId) {
       return Response.json({ error: "transfer lock mismatch", code: TRANSFER_TERMINAL_CODE }, { status: 409 });
@@ -2495,16 +2448,7 @@ export class BoardDO extends DurableObject<Env> {
     const drained = await this.drainAttachmentCleanup();
     // A failed R2 delete already scheduled its own retry, and counting the rows still due behind it would spin
     // the alarm, so a lease only sets the next wake-up after a clean drain.
-    const nextAttachment = drained
-      ? this.ctx.storage.sql
-          .exec<{ deleteAfter: number | null }>(
-            `SELECT MIN(delete_after) AS deleteAfter
-               FROM attachment_cleanup
-              WHERE deleted_at IS NULL
-                 OR (deleted_at IS NOT NULL AND delete_after > 0)`,
-          )
-          .toArray()[0]?.deleteAfter
-      : null;
+    const nextAttachment = drained ? this.nextAttachmentWake() : null;
     const nextArchive = this.ctx.storage.sql
       .exec<{ expireAt: number | null }>(
         "SELECT MIN(archived_at + ?) AS expireAt FROM cards WHERE archived_at IS NOT NULL",
@@ -2658,7 +2602,7 @@ export class BoardDO extends DurableObject<Env> {
       finalize: async () => {
         const done = settleLock("finalized");
         if (done) {
-          if (broadcast) this.broadcast(this.snapshot());
+          if (broadcast) this.broadcast({ type: "archive.purged", cardIds: [cardId] });
           this.ctx.waitUntil(this.drainAttachmentCleanup());
         }
         return answer(done);
@@ -2691,13 +2635,9 @@ export class BoardDO extends DurableObject<Env> {
 
     const cardIds = due.map(({ id }) => id);
     this.ctx.storage.transactionSync(() => {
-      this.purgeArchivedCards(cardIds);
+      this.deleteCardAggregate(cardIds);
     });
     return cardIds;
-  }
-
-  private purgeArchivedCards(cardIds: readonly string[]): void {
-    this.deleteCardAggregate(cardIds);
   }
 
   private deleteCardAggregate(cardIds: readonly string[]): void {
@@ -2736,6 +2676,39 @@ export class BoardDO extends DurableObject<Env> {
     ]);
   }
 
+  /** True while `objectKey` holds a live staging lease: staged, unexpired, unclaimed and not tombstoned. */
+  private isStagedLease(objectKey: string, now: number): boolean {
+    return (
+      (this.ctx.storage.sql
+        .exec<{ count: number }>(
+          `SELECT COUNT(*) AS count
+             FROM attachment_cleanup
+            WHERE object_key = ?
+              AND reason = 'staged'
+              AND delete_after > ?
+              AND claim_token IS NULL
+              AND deleted_at IS NULL`,
+          objectKey,
+          now,
+        )
+        .toArray()[0]?.count ?? 0) > 0
+    );
+  }
+
+  /** When the attachment queue next needs the alarm: its earliest pending `delete_after`, or null when nothing is pending. */
+  private nextAttachmentWake(): number | null {
+    return (
+      this.ctx.storage.sql
+        .exec<{ deleteAfter: number | null }>(
+          `SELECT MIN(delete_after) AS deleteAfter
+             FROM attachment_cleanup
+            WHERE deleted_at IS NULL
+               OR (deleted_at IS NOT NULL AND delete_after > 0)`,
+        )
+        .toArray()[0]?.deleteAfter ?? null
+    );
+  }
+
   private async drainAttachmentCleanup(): Promise<boolean> {
     const now = Date.now();
     // Metadata whose card row is gone owns nothing; deleting it enqueues each object
@@ -2767,21 +2740,7 @@ export class BoardDO extends DurableObject<Env> {
           )
           .toArray()[0]?.count ?? 0;
 
-        const isStaged = this.ctx.storage.sql
-          .exec<{ count: number }>(
-            `SELECT COUNT(*) AS count
-               FROM attachment_cleanup
-              WHERE object_key = ?
-                AND reason = 'staged'
-                AND delete_after > ?
-                AND claim_token IS NULL
-                AND deleted_at IS NULL`,
-            objectKey,
-            now,
-          )
-          .toArray()[0]?.count ?? 0;
-
-        if (deletedAt === null && (isOwned > 0 || isStaged > 0)) {
+        if (deletedAt === null && (isOwned > 0 || this.isStagedLease(objectKey, now))) {
           obsoleteCleanup.push({ objectKey, claimToken });
         } else if (claimToken !== null) {
           // Previously claimed row (abandoned claim, retry, or tombstone redelete): keep exact claimToken and retry idempotent R2 delete
@@ -2884,15 +2843,8 @@ export class BoardDO extends DurableObject<Env> {
       }
     }
 
-    const next = this.ctx.storage.sql
-      .exec<{ deleteAfter: number | null }>(
-        `SELECT MIN(delete_after) AS deleteAfter
-           FROM attachment_cleanup
-          WHERE deleted_at IS NULL
-             OR (deleted_at IS NOT NULL AND delete_after > 0)`,
-      )
-      .toArray()[0]?.deleteAfter;
-    if (next !== null && next !== undefined) {
+    const next = this.nextAttachmentWake();
+    if (next !== null) {
       await this.scheduleAlarmAt(Math.max(Date.now(), next));
     }
     return true;

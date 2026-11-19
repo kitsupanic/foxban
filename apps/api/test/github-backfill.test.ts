@@ -3,7 +3,7 @@ import { firstWorkspaceId } from "./first-workspace";
 import { REALTIME_PROTOCOL_VERSION, type ServerMessage } from "@foxban/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { drainBackfill } from "../src/github-backfill";
-import { connectRepos, enqueueBackfill } from "../src/github-repos";
+import { connectRepos, disconnectRepos, enqueueBackfill } from "../src/github-repos";
 import { API, ORIGIN, OWNER, adminSession, deliver, github, installApp, installation, repo, useFakeGitHub } from "./github-test-kit";
 
 /**
@@ -399,6 +399,23 @@ describe("a repo whose backfill keeps failing", () => {
   });
 });
 
+describe("a repo queued again", () => {
+  const row = async () => (await env.DB.prepare("SELECT run_after AS at, attempts FROM github_backfill_queue").all()).results;
+  it("keeps its hold-off while connected, and starts over after a disconnect", async () => {
+    await env.DB.exec("DELETE FROM github_backfill_queue");
+    await connectRepos(env, 7, [{ id: REPO_ID, fullName: REPO_NAME, private: false }]);
+    const held = Date.now() + 3_600_000;
+    await env.DB.exec(`INSERT INTO github_backfill_queue(repo_id, queued_at, run_after, attempts) VALUES (${REPO_ID}, 1, ${held}, 4)`);
+    await enqueueBackfill(env, [REPO_ID]);
+    expect(await row()).toEqual([{ at: held, attempts: 4 }]);
+    await disconnectRepos(env, 7, [REPO_ID]);
+    expect(await row()).toEqual([]);
+    await connectRepos(env, 7, [{ id: REPO_ID, fullName: REPO_NAME, private: false }]);
+    await enqueueBackfill(env, [REPO_ID]);
+    expect(await row()).toEqual([{ at: 0, attempts: 0 }]);
+  });
+});
+
 describe("a repo too big for one drain's subrequests", () => {
   const queue = async () => (await env.DB.prepare("SELECT repo_id AS id, attempts, run_after AS at FROM github_backfill_queue ORDER BY repo_id").all<{ id: number; attempts: number; at: number }>()).results;
 
@@ -432,5 +449,21 @@ describe("a repo too big for one drain's subrequests", () => {
     await env.DB.exec("UPDATE github_backfill_queue SET run_after = 0");
     await drainBackfill(env, 6);
     expect(await queue()).toEqual([]);
+  });
+
+  it("does not count an attempt against a repo that ran out of budget behind another repo", async () => {
+    fake.pulls = Array.from({ length: 650 }, (_, index): FakePull => ({ number: index + 1, title: "open", state: "open", updated: daysAgo(100 + index / 100), repo: REPO_NAME }));
+    const SMALL_ID = 102;
+    await env.DB.exec("DELETE FROM github_backfill_queue");
+    await connectRepos(env, 7, [
+      { id: REPO_ID, fullName: REPO_NAME, private: false },
+      { id: SMALL_ID, fullName: `${OWNER}/small`, private: false },
+    ]);
+    await enqueueBackfill(env, [REPO_ID, SMALL_ID]);
+    // The small repo goes first and uses five of the six subrequests; the big one then runs out through no fault of its own.
+    await env.DB.exec(`UPDATE github_backfill_queue SET queued_at = 1 WHERE repo_id = ${SMALL_ID}`);
+
+    await drainBackfill(env, 6);
+    expect(await queue()).toEqual([expect.objectContaining({ id: REPO_ID, attempts: 0 })]);
   });
 });

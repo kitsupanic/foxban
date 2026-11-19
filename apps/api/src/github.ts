@@ -2,6 +2,7 @@
  * GitHub App JWT signing and REST API helpers using WebCrypto (no Node APIs).
  */
 import type { DevelopmentPullRequest } from "@foxban/shared";
+import { base64Url } from "./base64url";
 
 export interface GitHubRepositoryRef {
   id: number;
@@ -22,9 +23,6 @@ export interface GitHubPullRequestRef {
   number: number;
   url: string;
   state: DevelopmentPullRequest["state"];
-  merged: boolean;
-  draft: boolean;
-  htmlUrl: string;
 }
 
 export class GitHubApiError extends Error {
@@ -46,16 +44,8 @@ export class GitHubApiError extends Error {
   }
 }
 
-function base64UrlEncode(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
 function base64UrlEncodeString(str: string): string {
-  return base64UrlEncode(new TextEncoder().encode(str));
+  return base64Url(new TextEncoder().encode(str));
 }
 
 function pemToArrayBuffer(pem: string): ArrayBuffer {
@@ -139,7 +129,7 @@ export async function createGitHubAppJwt(appId: string, privateKeyPem: string): 
     new TextEncoder().encode(message),
   );
 
-  return `${message}.${base64UrlEncode(new Uint8Array(signature))}`;
+  return `${message}.${base64Url(new Uint8Array(signature))}`;
 }
 
 /**
@@ -555,10 +545,7 @@ function parsePullRequestPayload(
   return {
     number,
     url,
-    htmlUrl: url,
     state: pullRequestState({ state, draft: draft === true, merged_at: merged ? mergedAt : null }),
-    merged,
-    draft: draft === true,
   };
 }
 

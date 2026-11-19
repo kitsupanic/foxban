@@ -90,3 +90,4 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0080 — Demoting a workspace admin revokes the workspace's admin invite links](0080-demotion-revokes-admin-invite-links.md) (amends 0079)
 - [0081 — Linking GitHub needs the current password](0081-github-link-needs-current-password.md) (amends 0065)
 - [0082 — Revoking a session closes its open sockets](0082-session-revocation-closes-sockets.md) (amends 0011, 0026)
+- [0083 — Browser writes and socket upgrades carry a checked origin](0083-csrf-origin-check.md)

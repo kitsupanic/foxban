@@ -5,7 +5,7 @@ import { GitHubApiError, getAppOwnerLogin } from "./github";
 import { drainBackfill } from "./github-backfill";
 import { handleBranchEvent } from "./github-branches";
 import { handlePullRequestEvent } from "./github-development";
-import { connectRepos, disconnectInstallation, disconnectRepos, enqueueBackfill, isConnectedRepo } from "./github-repos";
+import { connectRepos, disconnectInstallation, disconnectRepos, enqueueBackfill, isConnectedRepo, renameRepo } from "./github-repos";
 
 type InstanceApp = NonNullable<Awaited<ReturnType<typeof loadInstanceGitHubApp>>>;
 
@@ -73,8 +73,9 @@ async function handleInstallation(
  * the boards that hold them.
  */
 async function handleRepositoryEvent(env: Env, app: InstanceApp, event: string, payload: unknown): Promise<WebhookResult> {
-  const { repository } = z.object({ repository: z.object({ id: z.number().int() }) }).parse(payload);
+  const { repository } = z.object({ repository: z.object({ id: z.number().int(), full_name: z.string().min(1) }) }).parse(payload);
   if (!(await isConnectedRepo(env, repository.id))) return "dropped";
+  await renameRepo(env, repository.id, repository.full_name);
   if (event === "pull_request") return (await handlePullRequestEvent(env, payload)) ? "applied" : "dropped";
   return (await handleBranchEvent(env, app, event, payload)) ? "applied" : "dropped";
 }

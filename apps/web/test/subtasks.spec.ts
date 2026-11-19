@@ -1,4 +1,4 @@
-import { createBoardReconciler } from "../src/lib/reconciliation";
+import { createBoardReconciler } from "./reconciler-helpers";
 import { expect, test } from "@playwright/test";
 import { buildSubtaskHierarchy, type Card, type CardRelation } from "@foxban/shared";
 import { buildSubtaskNodes, directSubtaskCounts } from "../src/lib/subtask-nodes";

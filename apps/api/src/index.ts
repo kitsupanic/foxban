@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { getCookie } from "hono/cookie";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import {
@@ -27,6 +28,8 @@ import {
   BOARD_SELECT_COLS,
   recheckSessionAfterUpgrade,
   requestSessionHash,
+  revokeRealtimeSessions,
+  SESSION_COOKIE,
   boardManageSql,
   boardMemberIdsSql,
   boardOpenSql,
@@ -69,6 +72,7 @@ import {
   type GitHubPullRequestRef,
 } from "./github";
 import { agentCredentialsRouter, handleMcpRequest } from "./mcp";
+import { readBoundedBody } from "./agent-credentials";
 import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, accessChangesRouter, recoverAccessChanges, resolveAccessChangeAttempt, runAccessChange, AccessChangeConflict } from "./access-changes";
 import { workspacesRouter } from "./workspaces";
 import { adminRouter } from "./admin-routes";
@@ -422,7 +426,19 @@ function githubWriteFailure(c: Context<AppEnv>, err: unknown) {
 }
 
 
+// A browser write or socket upgrade from another origin is refused (ADR 0083). Every browser states its origin
+// on those (`Sec-Fetch-Site` or `Origin`); the webhook, MCP and other non-browser callers state neither, so they pass.
+// Whatever the content type: a form, `text/plain` or an `<a ping>` POST all go out without a preflight.
+function isCrossOriginBrowserRequest(c: Context<AppEnv>): boolean {
+  const site = c.req.header("sec-fetch-site");
+  const origin = c.req.header("origin");
+  if (!site && !origin) return false;
+  if (site === "same-origin") return false;
+  return !(origin && (origin === new URL(c.req.url).origin || origin === appOrigin(c.env, c.req.url)));
+}
+const CROSS_ORIGIN_REFUSED = { error: "cross-origin request refused" } as const;
 const app = new Hono<AppEnv>()
+  .use((c, next) => (c.req.method !== "GET" && c.req.method !== "HEAD" && c.req.method !== "OPTIONS" && isCrossOriginBrowserRequest(c) ? Promise.resolve(c.json(CROSS_ORIGIN_REFUSED, 403)) : next()))
   .get("/", (c) => c.json({ ok: true, app: APP_NAME }))
   .route("/workspaces", workspacesRouter)
   .route("/access-changes", accessChangesRouter)
@@ -452,11 +468,19 @@ const app = new Hono<AppEnv>()
       bindings.push(timezone);
     }
 
+    const statements: D1PreparedStatement[] = [];
     if (updates.length > 0) {
       bindings.push(user.id);
-      await c.env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`)
-        .bind(...bindings)
-        .run();
+      statements.push(c.env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).bind(...bindings));
+    }
+    // A linked GitHub id is a sign-in credential (ADR 0065): dropping it ends the other sessions, as a password
+    // change does, in the same batch so an unlinked account never keeps them.
+    if (githubLogin !== undefined) {
+      statements.push(c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND id != ?").bind(user.id, getCookie(c, SESSION_COOKIE) ?? ""));
+    }
+    if (statements.length > 0) await c.env.DB.batch(statements);
+    if (githubLogin !== undefined) {
+      revokeRealtimeSessions(c.env, c.executionCtx, user.id, { exceptSessionHash: await requestSessionHash(c) });
     }
 
     const updatedUser: SessionUser = {
@@ -472,12 +496,8 @@ const app = new Hono<AppEnv>()
     if (!isPreviewableImageContentType(contentType)) {
       return c.json({ error: "unsupported image type" } as const, 415);
     }
-    // Refuse before buffering when the declared length already exceeds the limit; `byteLength` below stays authoritative.
-    if (Number(c.req.header("content-length")) > 10 * 1024 * 1024) {
-      return c.json({ error: "file exceeds maximum size of 10 MB" } as const, 413);
-    }
-    const body = await c.req.arrayBuffer();
-    if (body.byteLength > 10 * 1024 * 1024) {
+    const body = await readBoundedBody(c.req.raw, 10 * 1024 * 1024);
+    if (body === null) {
       return c.json({ error: "file exceeds maximum size of 10 MB" } as const, 413);
     }
     if (body.byteLength === 0) {
@@ -894,7 +914,6 @@ const app = new Hono<AppEnv>()
       try{
         const resumed=await resolveAccessChangeAttempt(c.env,actor,attemptId,"board-member-add",{boardId:board.id,userId});
         if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?404:403):c.json({ok:true} as const);}
-        if(!board.capabilities.canManageMembers)return c.json({error:"forbidden"} as const,403);
         const invitee=await c.env.DB.prepare("SELECT id FROM users WHERE id=?").bind(userId).first<{id:string}>();
         if(!invitee)return c.json({error:"user not found"} as const,404);
         const result=await runAccessChange(c.env,actor,{operationId:attemptId,kind:"board-member-add",payload:{boardId:board.id,userId},workspaceIds:[board.workspaceId],boards:[{boardId:board.id,workspaceId:board.workspaceId}]});
@@ -913,7 +932,6 @@ const app = new Hono<AppEnv>()
     try{
       const resumed=await resolveAccessChangeAttempt(c.env,actor,operationId,"board-member-remove",{boardId:board.id,userId:targetUserId});
       if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,resumed.result===ACCESS_CHANGE_ABORT.forbidden?403:404):c.json({ok:true} as const);}
-      if(!board.capabilities.canManageMembers)return c.json({error:"forbidden"} as const,403);
       if(targetUserId===board.ownerId)return c.json({error:"board owner cannot be removed"} as const,403);
       if(targetUserId===actor.id)return c.json({error:"cannot remove self from board"} as const,403);
       // A board manager is removed only by someone who manages the board (the reservation and the commit assert it again).
@@ -939,11 +957,11 @@ const app = new Hono<AppEnv>()
           SELECT board_members.user_id
             FROM board_members
            WHERE board_members.board_id = b.id
-        ) AND ${email === undefined ? "users.id IN (SELECT workspace_members.user_id FROM workspace_members WHERE workspace_members.workspace_id = b.workspace_id)" : "users.email = ?"}
+        ) AND ${email === undefined ? "users.id IN (SELECT workspace_members.user_id FROM workspace_members WHERE workspace_members.workspace_id = b.workspace_id) AND EXISTS (SELECT 1 FROM workspace_members v WHERE v.workspace_id = b.workspace_id AND v.user_id = ?)" : "users.email = ?"}
         WHERE b.id=? AND ${boardOpenSql("b", "?", "?=1")}
         ORDER BY users.name, users.email`,
     )
-      .bind(...(email === undefined ? [] : [email]), board.id, isAdminEmail(c.env, user.email) ? 1 : 0, user.id, user.id, user.id)
+      .bind(email === undefined ? user.id : email, board.id, isAdminEmail(c.env, user.email) ? 1 : 0, user.id, user.id, user.id)
       .all<{
         pendingAccessOperationId: string | null;
         id: string | null;
@@ -986,12 +1004,9 @@ const app = new Hono<AppEnv>()
   .post("/boards/:id/attachments", requireAuth, requireMember, async (c) => {
     const contentType = normalizeAttachmentContentType(c.req.header("content-type"));
     const maxBytes = attachmentMaxBytes(contentType);
-    // At most 50 MB, so buffering is fine; `byteLength` is authoritative and a
-    // lying content-length header cannot get around the declared-type limit.
-    if (Number(c.req.header("content-length")) > maxBytes) return c.json({ error: "too large" } as const, 413);
-    const body = await c.req.arrayBuffer();
+    const body = await readBoundedBody(c.req.raw, maxBytes);
+    if (body === null) return c.json({ error: "too large" } as const, 413);
     if (body.byteLength === 0) return c.json({ error: "empty body" } as const, 400);
-    if (body.byteLength > maxBytes) return c.json({ error: "too large" } as const, 413);
     const id = crypto.randomUUID();
     const boardId = c.get("board").id;
     const objectKey = attachmentObjectKey(boardId, id);
@@ -1135,6 +1150,7 @@ const app = new Hono<AppEnv>()
   // Realtime protocol version is verified after auth and membership but before DO
   // stub access to prevent stale/incompatible clients from scanning DO SQLite rows.
   .get("/boards/:id/ws", requireAuth, requireMember, async (c) => {
+    if (isCrossOriginBrowserRequest(c)) return c.json(CROSS_ORIGIN_REFUSED, 403);
     if (c.req.query("realtimeVersion") !== REALTIME_PROTOCOL_VERSION) {
       return c.json({ error: "realtime client update required" }, 409);
     }
@@ -1143,6 +1159,7 @@ const app = new Hono<AppEnv>()
     return recheckSessionAfterUpgrade(c, response, board.id);
   })
   .get("/presence/ws", requireAuth, async (c) => {
+    if (isCrossOriginBrowserRequest(c)) return c.json(CROSS_ORIGIN_REFUSED, 403);
     if (c.req.query("realtimeVersion") !== REALTIME_PROTOCOL_VERSION) {
       return c.json({ error: "realtime client update required" }, 409);
     }

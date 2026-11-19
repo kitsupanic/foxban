@@ -120,12 +120,28 @@ describe("mutation pipeline", () => {
         expect(sql.exec<{ id: string }>("SELECT id FROM columns WHERE completed = 1").one().id).toBe("done");
       }));
 
-    it("sends no frame when the list is empty: a move of a card that is gone writes nothing", () =>
+    it("sends no frame when the card or column moved is gone: a stale move writes nothing, even into a non-empty list", () =>
       onBoard((sql, run) => {
         expect(run({ type: "card.move", mutationId: "m", id: "missing", columnId: "todo", position: longKey() }).rebalanced).toBeNull();
         expect(order(sql, "todo")).toEqual([]);
+
+        place(sql, "c1", "todo", "a0");
+        place(sql, "c2", "todo", "a1");
+        expect(run({ type: "card.move", mutationId: "m2", id: "missing", columnId: "todo", position: longKey() }).rebalanced).toBeNull();
+        expect(order(sql, "todo")).toEqual([{ id: "c1", position: "a0" }, { id: "c2", position: "a1" }]);
+
+        expect(run({ type: "column.move", mutationId: "m3", id: "gone", position: longKey() }).rebalanced).toBeNull();
+        expect(sql.exec<{ id: string; position: string }>("SELECT id, position FROM columns ORDER BY position, id").toArray()).toEqual([
+          { id: "todo", position: "a" }, { id: "done", position: "b" },
+        ]);
       }));
   });
+
+  it("indexes what the card, comment and attachment paths look up by", () =>
+    onBoard((sql) => {
+      const indexed = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'").toArray().map((row) => row.name);
+      expect(indexed).toEqual(expect.arrayContaining(["comments_card", "comments_parent", "attachments_object_key", "attachments_card"]));
+    }));
 
   it("writes nothing when the gate refuses", () =>
     onBoard((sql, run) => {

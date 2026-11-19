@@ -50,19 +50,11 @@ export function extractBoardState(
 export class BoardReconciler {
   readonly boardId: string;
   private baseState: BoardState | null = null;
-  private pending = new Map<string, PendingMutation>();
+  protected pending = new Map<string, PendingMutation>();
 
-  constructor(
-    boardIdOrInitial: string | BoardState,
-    initialOrBoardId?: BoardState | string | null,
-  ) {
-    if (typeof boardIdOrInitial === "string") {
-      this.boardId = boardIdOrInitial;
-      this.baseState = (initialOrBoardId as BoardState | null | undefined) ?? null;
-    } else {
-      this.boardId = typeof initialOrBoardId === "string" ? initialOrBoardId : "board-test";
-      this.baseState = extractBoardState(boardIdOrInitial);
-    }
+  constructor(boardId: string, initial: BoardState | null = null) {
+    this.boardId = boardId;
+    this.baseState = initial;
   }
 
   /**
@@ -107,17 +99,6 @@ export class BoardReconciler {
     this.pending.set(msg.mutationId, { msg });
     const cacheState = this.getCacheState()!;
     return { cacheState };
-  }
-
-  /**
-   * Parity method with ClientSession for tests.
-   */
-  sendOptimistic(msg: ClientMessage): BoardState {
-    const outcome = this.enqueueOptimistic(msg);
-    if (!outcome) {
-      throw new Error("Cannot send optimistic mutation before snapshot is loaded");
-    }
-    return outcome.cacheState;
   }
 
   /**
@@ -225,13 +206,6 @@ export class BoardReconciler {
   }
 
   /**
-   * Parity method with ClientSession for tests.
-   */
-  receiveServerMessage(msg: ServerMessage): BoardState | null {
-    return this.applyServerMessage(msg).cacheState;
-  }
-
-  /**
    * Rolls back a pending optimistic mutation (e.g. on timeout or rejection).
    * Recomputes cache state by rebasing remaining pending mutations on authoritative base.
    */
@@ -280,14 +254,6 @@ export class BoardReconciler {
    */
   getBaseState(): BoardState | null {
     return this.baseState;
-  }
-
-  hasPending(mutationId: string): boolean {
-    return this.pending.has(mutationId);
-  }
-
-  getPendingMutations(): readonly ClientMessage[] {
-    return Array.from(this.pending.values(), (entry) => entry.msg);
   }
 }
 export function isMutationPresentInBoardState(state: BoardState, msg: ClientMessage): boolean {
@@ -357,12 +323,4 @@ export function isMutationPresentInBoardState(state: BoardState, msg: ClientMess
     default:
       return false;
   }
-}
-
-
-export function createBoardReconciler(
-  boardIdOrInitial: string | BoardState,
-  initialOrBoardId?: BoardState | string | null,
-): BoardReconciler {
-  return new BoardReconciler(boardIdOrInitial, initialOrBoardId);
 }

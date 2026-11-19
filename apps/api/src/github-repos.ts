@@ -30,17 +30,27 @@ export async function isConnectedRepo(env: Env, repoId: number): Promise<boolean
   return (await env.DB.prepare("SELECT 1 FROM github_repos WHERE repo_id = ?").bind(repoId).first()) !== null;
 }
 
+/** Keeps a connected repo's stored name current: a rename sends no installation event, only a name on its next webhook. */
+export async function renameRepo(env: Env, repoId: number, fullName: string): Promise<void> {
+  await env.DB.prepare("UPDATE github_repos SET full_name = ?2 WHERE repo_id = ?1 AND full_name <> ?2").bind(repoId, fullName).run();
+}
+
 /** Drops every repo of an installation (it was uninstalled or suspended). */
 export async function disconnectInstallation(env: Env, installationId: number): Promise<void> {
-  await env.DB.prepare("DELETE FROM github_repos WHERE installation_id = ?").bind(installationId).run();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM github_backfill_queue WHERE repo_id IN (SELECT repo_id FROM github_repos WHERE installation_id = ?)").bind(installationId),
+    env.DB.prepare("DELETE FROM github_repos WHERE installation_id = ?").bind(installationId),
+  ]);
 }
 
 /** Drops the named repos, but only ones this installation connected. */
 export async function disconnectRepos(env: Env, installationId: number, repoIds: number[]): Promise<void> {
   if (repoIds.length === 0) return;
-  await env.DB.prepare("DELETE FROM github_repos WHERE installation_id = ?1 AND repo_id IN (SELECT value FROM json_each(?2))")
-    .bind(installationId, JSON.stringify(repoIds))
-    .run();
+  const ids = JSON.stringify(repoIds);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM github_backfill_queue WHERE repo_id IN (SELECT repo_id FROM github_repos WHERE installation_id = ?1 AND repo_id IN (SELECT value FROM json_each(?2)))").bind(installationId, ids),
+    env.DB.prepare("DELETE FROM github_repos WHERE installation_id = ?1 AND repo_id IN (SELECT value FROM json_each(?2))").bind(installationId, ids),
+  ]);
 }
 
 /** Adds the repos, or refreshes the ones already connected (a repo can move between installations). */
@@ -59,7 +69,7 @@ export async function connectRepos(env: Env, installationId: number, repos: Conn
 
 /**
  * Queues repos for backfill (ADR 0064): the backfill drain loads their existing PRs and
- * branches onto cards. A repo already queued keeps its place and its hold-off. Lives here,
+ * branches onto cards. A repo already queued keeps its place and its hold-off; disconnecting a repo drops its row, so a reconnect starts over. Lives here,
  * next to `connectRepos`, which every caller pairs it with.
  */
 export async function enqueueBackfill(env: Env, repoIds: number[]): Promise<void> {
@@ -98,7 +108,10 @@ export async function refreshConnectedRepos(env: Env): Promise<{ owner: string; 
       await enqueueBackfill(env, repos.filter((repo) => !known.has(repo.id)).map((repo) => repo.id));
       kept.push(...repos.map((repo) => repo.id));
     }
-    await env.DB.prepare("DELETE FROM github_repos WHERE repo_id NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(kept)).run();
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM github_backfill_queue WHERE repo_id NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(kept)),
+      env.DB.prepare("DELETE FROM github_repos WHERE repo_id NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(kept)),
+    ]);
     return { owner, ownerIsOrganization: appOwner.isOrganization, ignoredAccounts };
   } catch (error) {
     console.warn("[github-repos] re-read failed:", error instanceof Error ? error.message : error);

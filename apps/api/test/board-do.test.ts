@@ -310,6 +310,16 @@ async function awaitMatching<T extends ServerMessage>(
   }
 }
 
+/** Every frame up to and including the one `predicate` matches, so a test can assert what came before it. */
+async function framesThrough(client: Client, predicate: (message: ServerMessage) => boolean): Promise<ServerMessage[]> {
+  const frames: ServerMessage[] = [];
+  for (;;) {
+    const { message } = await client.next();
+    frames.push(message);
+    if (predicate(message)) return frames;
+  }
+}
+
 /** Waits for a specific verbatim client-mutation broadcast, skipping other server frames. */
 async function awaitBroadcast(client: Client, mutationId: string): Promise<ClientMessage> {
   return awaitMatching(
@@ -3058,7 +3068,7 @@ describe("BoardDO activity edge cases", () => {
         .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'schema_version'")
           .toArray()[0]?.value,
     );
-    expect(version).toBe(29);
+    expect(version).toBe(30);
   });
 });
 
@@ -6547,7 +6557,7 @@ describe("BoardDO card details", () => {
         .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'schema_version'")
         .toArray()[0]?.value,
     );
-    expect(version).toBe(29);
+    expect(version).toBe(30);
 
     // The restarted instance still writes: the tables survived intact.
     b.send({
@@ -6641,7 +6651,7 @@ describe("BoardDO card details", () => {
         },
       );
 
-      expect(version).toBe(29);
+      expect(version).toBe(30);
       expect(columnNames).toContain("archived_at");
       expect(columnNames).toContain("archived_column_title");
       expect(columnNames).toContain("subtask_done");
@@ -7741,16 +7751,9 @@ describe("BoardDO internal card transfer endpoints", () => {
     });
     expect(finRes.status).toBe(200);
 
-    // Socket receives snapshot without the card
-    let snapAfterFin: Extract<ServerMessage, { type: "snapshot" }> | undefined;
-    while (!snapAfterFin) {
-      const frame = await client.next();
-      if (frame.message.type === "snapshot") {
-        snapAfterFin = frame.message;
-      }
-    }
-    expect(snapAfterFin.cards.find((c) => c.id === "card-fin")).toBeUndefined();
-    expect(snapAfterFin.attachments.find((a) => a.id === attachmentId)).toBeUndefined();
+    // A live socket is told the card is gone with archive.purged: a snapshot would read to it as a reconnect.
+    const afterFin = await framesThrough(client, (m) => m.type === "archive.purged" || m.type === "snapshot");
+    expect(afterFin.at(-1)).toEqual({ type: "archive.purged", cardIds: ["card-fin"] });
 
     // Attachment cleanup drains source R2 object
     const sourceObjectKey = attachmentObjectKey(sourceBoard, attachmentId);
@@ -7765,6 +7768,11 @@ describe("BoardDO internal card transfer endpoints", () => {
       body: JSON.stringify({ transferId, cardId: "card-fin" }),
     });
     expect(finRetryRes.status).toBe(200);
+    // The replay found the card already gone, so it sent nothing: the next frame is the next mutation's.
+    client.send({ type: "column.create", mutationId: "fin-after", id: "col-after", title: "After", position: "a1" });
+    const afterReplay = await framesThrough(client, (m) => "mutationId" in m && m.mutationId === "fin-after");
+    expect(afterReplay.map((m) => m.type)).not.toContain("archive.purged");
+    expect(afterReplay.map((m) => m.type)).not.toContain("snapshot");
   });
   it("end-to-end card transfer preserves non-default taskType from source prepare through destination import", async () => {
     const sourceBoard = "board-xfer-e2e-source";
@@ -8618,6 +8626,8 @@ describe("F2/F7: card transfer lock and receipt lifecycle regression", () => {
       body: JSON.stringify(importPayload),
     });
     expect(importRes1.status).toBe(200);
+    // A first import tells the destination's live sockets with a snapshot.
+    await framesThrough(dstClient, (m) => m.type === "snapshot");
 
     // Retry import with same transferId
     const importRes2 = await dstStub.fetch(`https://board.internal${CARD_TRANSFER_IMPORT_PATH}`, {
@@ -8628,6 +8638,10 @@ describe("F2/F7: card transfer lock and receipt lifecycle regression", () => {
     expect(importRes2.status).toBe(200);
     const importBody2 = await importRes2.json<{ existingReceipt?: boolean }>();
     expect(importBody2.existingReceipt).toBe(true);
+    // The replay changed nothing, so it sent nothing: the next frame is the next mutation's.
+    dstClient.send({ type: "column.create", mutationId: "dr-after", id: "drc-2", title: "After", position: "a1" });
+    const afterImportReplay = await framesThrough(dstClient, (m) => "mutationId" in m && m.mutationId === "dr-after");
+    expect(afterImportReplay.map((m) => m.type)).not.toContain("snapshot");
 
     // Finalize on source
     const finRes1 = await srcStub.fetch(`https://board.internal${CARD_TRANSFER_FINALIZE_PATH}`, {
@@ -10797,6 +10811,25 @@ describe("transfer settlement on the source board", () => {
     expect((await answer("x-local", "settle-local-dst", "finalize")).status).toBe(200);
     expect(await s.facts()).toEqual({ card: false, lock: false, op: "finalized" });
     expect((await answer("x-local", null, "release")).status).toBe(409);
+    s.client.close();
+  });
+
+  it("local source finalize tells live sockets the card is gone, without a snapshot, and a stale one tells nothing", async () => {
+    const s = await lockedCard("settle-local-frame", "x-frame", "settle-local-frame-dst");
+    const finalize = () =>
+      runInDurableObject(s.stub, (instance) =>
+        (instance as unknown as WithLocalSource).localTransferSource(s.cardId, "x-frame", "settle-local-frame-dst", true).finalize(),
+      );
+    expect((await finalize()).status).toBe(200);
+    const told = await framesThrough(s.client, (m) => m.type === "archive.purged" || m.type === "snapshot");
+    expect(told.at(-1)).toEqual({ type: "archive.purged", cardIds: [s.cardId] });
+
+    // The lock is gone, so this one acts on nothing and sends nothing: the next frame is the next mutation's.
+    expect((await finalize()).status).toBe(409);
+    s.client.send({ type: "column.create", mutationId: "frame-after", id: "frame-after-col", title: "After", position: "a1" });
+    const after = await framesThrough(s.client, (m) => "mutationId" in m && m.mutationId === "frame-after");
+    expect(after.map((m) => m.type)).not.toContain("archive.purged");
+    expect(after.map((m) => m.type)).not.toContain("snapshot");
     s.client.close();
   });
 });

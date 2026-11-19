@@ -8,6 +8,7 @@ import {
   descriptionByteLength,
 } from "@foxban/shared";
 import { z } from "zod";
+import { base64Url } from "./base64url";
 
 export const AgentScopeSchema = z.enum(["boards:read", "tasks:write", "comments:write"]);
 export type AgentScope = z.infer<typeof AgentScopeSchema>;
@@ -352,10 +353,7 @@ export type CursorPayload = {
   after: unknown;
 };
 export function encodeCursor(value: CursorPayload): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return base64Url(new TextEncoder().encode(JSON.stringify(value)));
 }
 export function decodeCursor(value: string): CursorPayload | null {
   if (value.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;

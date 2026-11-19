@@ -1,7 +1,7 @@
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/server/validators/cf-worker";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { appOrigin, mcpOrigin, isAdminEmail, boardMemberIdsSql, boardOpenSql, findAccessibleBoard, findAccessibleBoardByKey, toBoardRow, type BoardRow } from "./auth";
+import { appOrigin, mcpOrigin, isAdminEmail, sha256Hex, boardMemberIdsSql, boardOpenSql, findAccessibleBoard, findAccessibleBoardByKey, toBoardRow, type BoardRow } from "./auth";
 import {
   agentCredentialsRouter,
   authenticateAgentCredential,
@@ -140,11 +140,6 @@ function toolResponse(result: McpToolResult) {
     structuredContent: bounded,
     ...(bounded.ok ? {} : { isError: true }),
   };
-}
-
-async function hashInput(value: unknown): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stableStringify(value))));
-  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function failure(error: unknown): McpToolResult {
@@ -299,7 +294,7 @@ function createServer(env: Env, authorization: string, base: string): McpServer 
       const normalized = { boardId: board.id, ...command };
       return await callBoardDo(env, principal, board, "mcpCommand", {
         credentialId: principal.credentialId,
-        inputHash: await hashInput(normalized), board: boardIdentity(board, base), command,
+        inputHash: await sha256Hex(stableStringify(normalized)), board: boardIdentity(board, base), command,
       });
     } catch (error) { return failure(error); }
   };

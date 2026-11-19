@@ -10,7 +10,7 @@ Accepted — 2026-11-18.
 - The board list holds only members of the board's workspace who hold no `board_members` row on it.
 - To add a Guest from outside the workspace, the person types a full email address: `GET /boards/:id/membership-candidates?email=<address>` returns at most the one account with exactly that address (trimmed, lower case), unless it already holds a grant. A partial address finds nothing.
 - The workspace route has no list at all: `GET /workspaces/:id/membership-candidates?email=<address>` returns at most the one account with exactly that address, unless it already holds a membership there; without an address it returns nothing.
-- The Add member dialogs ask only when the typed text is a full email address. The board dialog also lists the workspace's people; the workspace dialog shows only what the lookup found.
+- The Add member dialogs ask only when the typed text is a full email address. The board dialog also lists the workspace's people, but only to a member of that workspace (amended: a Guest, an instance Admin outside the workspace included, sees only the exact-email lookup); the workspace dialog shows only what the lookup found.
 - An exact-email lookup is limited per signed-in user (10 a minute, the `AUTH_RATE_LIMITER` binding keyed `lookup:<userId>`, both routes sharing it), so it cannot be run down a list of guesses. Requests with no client address, such as local development and tests, are not limited, as for the auth routes.
 - Who may add members does not change: anyone who can open the board, and a workspace's admins. Adding is still `POST` with a user id.
 
