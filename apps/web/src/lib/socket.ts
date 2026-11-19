@@ -19,23 +19,7 @@ import {
   type AccessProbe,
 } from "./access-attempt";
 import type { BoardState } from "./apply-mutation";
-import {
-  BoardReconciler,
-  createBoardReconciler,
-  extractBoardState,
-  isMutationPresentInBoardState,
-  type PendingMutation,
-  type ServerMessageOutcome,
-} from "./reconciliation";
-
-export {
-  BoardReconciler,
-  createBoardReconciler,
-  extractBoardState,
-  isMutationPresentInBoardState,
-  type PendingMutation,
-  type ServerMessageOutcome,
-};
+import { BoardReconciler, isMutationPresentInBoardState } from "./reconciliation";
 
 /** An optimistic mutation is rolled back if neither its echo nor an error arrives in time. */
 const PENDING_TIMEOUT_MS = 5_000;
@@ -475,6 +459,9 @@ export function useBoardSocket(
         if (plan.mode === "stopped" || plan.delayMs === null) {
           console.warn("board socket: stopped reconnecting after unsynchronized failures");
           stopped = true;
+          // Nothing will resend or resync mutations dropped by this or an earlier close: show only confirmed state. Not on a quick reconnect, whose snapshot replaces the cache anyway.
+          const confirmed = reconcilerRef.current.getCacheState();
+          if (confirmed) queryClient.setQueryData<BoardState>(boardQueryKey(boardId), confirmed);
           setHandshakeFailed(true);
           eventsRef.current?.halted?.();
           return;

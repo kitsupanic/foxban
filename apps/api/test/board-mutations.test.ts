@@ -142,6 +142,35 @@ describe("mutation pipeline", () => {
       expect(sql.exec<{ column_id: string; position: string }>("SELECT column_id, position FROM cards WHERE id = 'c1'").one()).toEqual({ column_id: "todo", position: "a" });
     }));
 
+  it("refuses a position key with characters outside the library's digits", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "c1", 1);
+      // fractional-indexing does not check characters after the first two, so "a0~" would sort after the keys generated beside it.
+      for (const position of ["a0~", "a0ü"]) {
+        expect(() => run({ type: "card.move", mutationId: "m", id: "c1", columnId: "done", position })).toThrow("invalid position key");
+      }
+      expect(sql.exec<{ position: string }>("SELECT position FROM cards WHERE id = 'c1'").one().position).toBe("a");
+    }));
+
+  it("lets an active child be unlinked from an archived parent, still fenced by a transfer lock", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "p", 1);
+      run({ type: "subtask.create", mutationId: "m1", id: "kid", parentCardId: "p", relationId: "r", title: "Kid", position: "a1" });
+      sql.exec("UPDATE cards SET archived_at = 1 WHERE id = 'p'");
+      const unlink = { type: "relation.delete", mutationId: "m2", id: "r" };
+      // A lock on either end still refuses it.
+      for (const locked of ["p", "kid"]) {
+        sql.exec("INSERT INTO card_transfer_locks(card_id, transfer_id, destination_board_id, phase, expires_at) VALUES (?, 't', 'dest', 'prepared', 9999999999999)", locked);
+        expect(() => run(unlink)).toThrow("card transfer in progress");
+        sql.exec("DELETE FROM card_transfer_locks");
+      }
+      run(unlink);
+      expect(count(sql, "card_relations")).toBe(0);
+      expect(sql.exec<{ task_type: string }>("SELECT task_type FROM cards WHERE id = 'kid'").one().task_type).toBe("task");
+      // The archived parent itself stays read-only.
+      expect(() => run({ type: "card.update", mutationId: "m3", id: "p", title: "Edit" })).toThrow("archived cards are read-only");
+    }));
+
   it("returns the numbered card with the next task number", () =>
     onBoard((sql, run) => {
       seedCard(sql, "old", 4);

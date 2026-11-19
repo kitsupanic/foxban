@@ -84,9 +84,6 @@ export class BoardReconciler {
     return { cacheState: this.baseState, settledPending };
   }
 
-  resetSnapshot(snapshot: BoardState | (ServerMessage & { type: "snapshot" })): BoardState {
-    return this.applySnapshot(snapshot).cacheState;
-  }
   /**
    * Replaces one card's cached comments with a fresh read (ADR 0078) and returns the
    * cache state; counts are untouched, they come from the snapshot and frames only.
@@ -129,15 +126,6 @@ export class BoardReconciler {
    * and rebases remaining pending mutations over it.
    */
   applyServerMessage(msg: ServerMessage): ServerMessageOutcome {
-    if (msg.type === "snapshot") {
-      this.pending.clear();
-      this.baseState = extractBoardState(msg, this.baseState?.comments);
-      return {
-        cacheState: this.baseState,
-        ackedMutationIds: [],
-      };
-    }
-
     if (msg.type === "error") {
       let rolledBackMutationId: string | undefined;
       if (msg.mutationId && this.pending.has(msg.mutationId)) {
@@ -298,16 +286,8 @@ export class BoardReconciler {
     return this.pending.has(mutationId);
   }
 
-  getPending(mutationId: string): PendingMutation | undefined {
-    return this.pending.get(mutationId);
-  }
-
   getPendingMutations(): readonly ClientMessage[] {
     return Array.from(this.pending.values(), (entry) => entry.msg);
-  }
-
-  getPendingCount(): number {
-    return this.pending.size;
   }
 }
 export function isMutationPresentInBoardState(state: BoardState, msg: ClientMessage): boolean {

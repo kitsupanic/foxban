@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { BoardAccessModeSchema, type BoardAccessMode, type WorkspaceRole } from "@foxban/shared";
 
-import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, AccessChangeConflict, INVITER_IS_ADMIN, resolveAccessChangeAttempt, runAccessChange, sendPresenceInvalidate } from "./access-changes";
+import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, AccessChangeConflict, INVITER_IS_ADMIN, type AccessChangeResult, resolveAccessChangeAttempt, runAccessChange, sendPresenceInvalidate } from "./access-changes";
 import { boardOpenSql, createInviteToken, isAdminEmail, rateLimitLookup, requireAdmin, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
 
 const WorkspaceNameSchema = z.string().trim().min(1).max(40);
@@ -16,6 +16,10 @@ const InviteCreateSchema = z.strictObject({ role: z.enum(["member","admin"]).def
 const InviteTokenSchema = z.strictObject({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), operationId: OperationIdSchema.optional() });
 const INVITE_UNAVAILABLE = { code:"workspace_invite_unavailable", error:"This workspace invitation is unavailable." } as const;
 const DAY_MS = 86_400_000;
+// A membership that is already there changes nothing, so it runs no access change: that would close every socket of every board for a no-op.
+const alreadyMember=(operationId:string,result:unknown):AccessChangeResult=>({operationId,state:"completed",outcome:"committed",result});
+// A member already, and no access change holds the workspace: one in flight (a removal, say) may still change that, so it goes through runAccessChange and its conflict.
+const isSettledMember=async(env:Env,workspaceId:string,userId:string)=>!!await env.DB.prepare(`SELECT 1 AS present FROM workspace_members WHERE workspace_id=? AND user_id=? AND NOT EXISTS(SELECT 1 FROM access_change_scopes WHERE workspace_id=?)`).bind(workspaceId,userId,workspaceId).first();
 
 type WorkspaceRecord = { id:string;name:string;defaultBoardAccess:BoardAccessMode;role:WorkspaceRole|null;createdAt:number;updatedAt:number };
 type InviteRecord = { id:string;workspaceId:string;role:"member"|"admin";invitedBy:string;createdAt:number;expiresAt:number;revokedAt:number|null };
@@ -176,6 +180,7 @@ export const workspacesRouter = new Hono<AppEnv>()
       // this while the workspace lock is held, so a name that vanished in between
       // cannot be granted a membership.
       if(!await c.env.DB.prepare(`SELECT 1 AS present FROM users WHERE id=?`).bind(parsed.data.userId).first())return c.json({error:"user not found"} as const,404);
+      if(await isSettledMember(c.env,id,parsed.data.userId))return c.json(alreadyMember(parsed.data.operationId,{workspaceId:id,userId:parsed.data.userId}));
       // Every board of this workspace is fenced: the new member reaches the Workspace
       // boards (and, as an admin, the Private ones) the moment the membership commits.
       const result=await runAccessChange(c.env,actor,{operationId:parsed.data.operationId,kind:"workspace-member-add",payload:{workspaceId:id,userId:parsed.data.userId,role},workspaceIds:[id],inheritWorkspaceBoards:true});
@@ -269,6 +274,7 @@ export const workspacesRouter = new Hono<AppEnv>()
      const resumed=await resolveAccessChangeAttempt(c.env,actor,parsed.data.operationId,"workspace-invite-accept",{workspaceId:id,inviteHash:hash});
      if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json(INVITE_UNAVAILABLE,400):c.json(resumed);}
      const invite=await c.env.DB.prepare(`SELECT wi.id,wi.workspace_id AS workspaceId,wi.role,wi.invited_by AS invitedBy,wi.created_at AS createdAt,wi.expires_at AS expiresAt,wi.revoked_at AS revokedAt FROM workspace_invites wi WHERE wi.workspace_id=? AND wi.token_hash=? AND wi.revoked_at IS NULL AND wi.expires_at>? AND ${INVITER_IS_ADMIN}`).bind(id,hash,Date.now()).first<InviteRecord>();if(!invite)return c.json(INVITE_UNAVAILABLE,400);
+     if(await isSettledMember(c.env,id,actor.id))return c.json(alreadyMember(parsed.data.operationId,{workspaceId:id}));
      const result=await runAccessChange(c.env,actor,{operationId:parsed.data.operationId,kind:"workspace-invite-accept",payload:{workspaceId:id,inviteId:invite.id,inviteHash:hash},workspaceIds:[id],inheritWorkspaceBoards:true});
      if(result.state!=="completed")return c.json(result,202);
      if(result.outcome==="aborted")return result.result===ACCESS_CHANGE_ABORT.forbidden?c.json({error:"forbidden"} as const,403):c.json(INVITE_UNAVAILABLE,400);

@@ -702,6 +702,8 @@ function commitStatements(
       return [
         preparedAck,
         env.DB.prepare("DELETE FROM board_members WHERE board_id=?").bind(boardId),
+        env.DB.prepare("DELETE FROM github_pr_routes WHERE board_id=?").bind(boardId),
+        env.DB.prepare("DELETE FROM github_branch_routes WHERE board_id=?").bind(boardId),
         env.DB.prepare("DELETE FROM boards WHERE id=? AND pending_access_operation_id=?").bind(
           boardId,
           op.id,
@@ -787,6 +789,11 @@ function commitStatements(
           workspaceId,
           userId,
         ),
+        // A removal (not a self-leave) retires the workspace's invite links (ADR 0079): they are
+        // multi-use, so the removed member could rejoin with the one they already used.
+        ...(op.actorId !== userId
+          ? [env.DB.prepare(`UPDATE workspace_invites SET revoked_at=? WHERE workspace_id=? AND revoked_at IS NULL`).bind(now, workspaceId)]
+          : []),
         versionBump,
         env.DB.prepare(
           `UPDATE access_change_operations SET phase='committed',outcome='committed',result_json=?,updated_at=?
@@ -1676,6 +1683,20 @@ export async function pruneAccessChanges(env: Env, now = Date.now()): Promise<vo
 }
 
 /**
+ * Deletes workspace invites that expired or were revoked more than the retention window ago.
+ * Nothing reads them: the list, inspect and accept all want a live invite.
+ */
+export async function pruneWorkspaceInvites(env: Env, now = Date.now()): Promise<void> {
+  const cutoff = now - SETTLED_RETENTION_MS;
+  await env.DB.prepare(
+    `DELETE FROM workspace_invites WHERE id IN
+       (SELECT id FROM workspace_invites WHERE expires_at<? OR revoked_at<? LIMIT ${PRUNE_BATCH})`,
+  )
+    .bind(cutoff, cutoff)
+    .run();
+}
+
+/**
  * Cron recovery: resumes preparing attempts through commit/abort, releases and
  * completes them, and retries notifications that were lost after completion.
  * Every step is idempotent, so simultaneous passes and restarts converge.
@@ -1695,25 +1716,32 @@ export async function recoverAccessChanges(env: Env): Promise<void> {
     .all<OperationRow>();
   if (results.length > 0) {
     const deadline = Date.now() + RECOVERY_PASS_BUDGET_MS;
+    // A dependency failure (a throw) or a row that is still not completed (a participant that
+    // did not answer) leaves it for the next pass; time never unlocks. Bumping `updated_at`
+    // sends it to the back of the oldest-first queue, so a few rows that keep failing cannot
+    // hold every slot of the pass and starve newer operations.
+    const deferOperation = async (id: string) => {
+      try {
+        await env.DB.prepare("UPDATE access_change_operations SET updated_at=? WHERE id=?").bind(Date.now(), id).run();
+      } catch {
+        // Best effort: the row is simply retried first next pass.
+      }
+    };
     await mapChunks(results, RECOVERY_CONCURRENCY, async (operation) => {
       try {
         await driveOperation(env, operation, Budget.until(deadline));
       } catch (error) {
-        // A dependency failure leaves the row for the next pass; time never unlocks. Bumping
-        // `updated_at` sends it to the back of the oldest-first queue, so a few rows that keep
-        // failing cannot hold every slot of the pass and starve newer operations.
         console.warn(`[access-changes] recovery of operation ${operation.id} failed:`, error instanceof Error ? error.message : error);
-        try {
-          await env.DB.prepare("UPDATE access_change_operations SET updated_at=? WHERE id=?").bind(Date.now(), operation.id).run();
-        } catch {
-          // Best effort: the row is simply retried first next pass.
-        }
       }
+      // Every visited row goes to the back, completed ones too: a notification that keeps failing is
+      // swallowed inside driveOperation, so "completed" does not mean the row left the queue.
+      await deferOperation(operation.id);
     });
   }
   // Housekeeping goes last: a database error here must never keep stuck operations from being recovered.
   try {
     await pruneAccessChanges(env);
+    await pruneWorkspaceInvites(env);
   } catch (error) {
     console.warn("[access-changes] prune failed:", error instanceof Error ? error.message : error);
   }

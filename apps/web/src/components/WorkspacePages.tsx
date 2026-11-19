@@ -84,6 +84,8 @@ export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ["workspace", workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["workspace-members", workspaceId] }),
+      // A removal revokes every live invite link (ADR 0079).
+      queryClient.invalidateQueries({ queryKey: ["workspace-invites", workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["workspace-membership-candidates", workspaceId] }),
       queryClient.invalidateQueries({ queryKey: ["boards", workspaceId] }),
     ]);

@@ -58,6 +58,16 @@ function createInitialState(): BoardState {
 }
 
 test.describe("F3: realtime last-write-wins convergence and mutation interleaving", () => {
+  test("clearing pending on a gave-up socket leaves the cache at confirmed state", () => {
+    const session = createBoardReconciler(createInitialState(), "board-test");
+    session.sendOptimistic({ type: "card.move", mutationId: "mut-lost", id: "card-1", columnId: "col-2", position: "a1" });
+    expect(session.getCacheState().cards[0]?.columnId).toBe("col-2");
+
+    expect(session.clearPending()).toHaveLength(1);
+    expect(session.getCacheState()).toBe(session.getBaseState());
+    expect(session.getCacheState().cards[0]?.columnId).toBe("col-1");
+  });
+
   test("peer-before-own interleaving converges client cache to authoritative DO order", () => {
     const session = createBoardReconciler(createInitialState(), "board-test");
 

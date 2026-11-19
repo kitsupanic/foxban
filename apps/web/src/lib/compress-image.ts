@@ -53,7 +53,8 @@ export async function compressImage(
     });
     // A tiny or already-optimal image can encode larger than it started; keep
     // whichever is smaller so compression never costs bytes, unless forceWebp is set.
-    if (encoded === null) return original;
+    // Safari ignores the requested type and hands back PNG: that is not WebP, so keep the original.
+    if (encoded === null || encoded.type !== "image/webp") return original;
     if (!options?.forceWebp && encoded.size >= file.size) return original;
     return {
       blob: encoded,

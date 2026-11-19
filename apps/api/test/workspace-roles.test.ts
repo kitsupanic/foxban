@@ -569,3 +569,79 @@ describe("an invitation is only as good as the admin who issued it", () => {
     );
   }, 120_000);
 });
+
+describe("an invite link outlives nobody's removal", () => {
+  const UNAVAILABLE = { code: "workspace_invite_unavailable", error: "This workspace invitation is unavailable." };
+  const invite = async (by: Person, workspaceId: string, role: "admin" | "member" = "member") => {
+    const response = await post(`/workspaces/${workspaceId}/invites`, { role }, by.cookie);
+    expect(response.status).toBe(201);
+    return (await response.json<{ token: string }>()).token;
+  };
+  const accept = (by: Person, workspaceId: string, token: string, operationId = crypto.randomUUID()) =>
+    post(`/workspaces/${workspaceId}/invites/accept`, { token, operationId }, by.cookie);
+  const liveInvites = async (workspaceId: string) =>
+    (await env.DB.prepare(`SELECT COUNT(*) AS n FROM workspace_invites WHERE workspace_id=? AND revoked_at IS NULL`).bind(workspaceId).first<{ n: number }>())!.n;
+
+  it("revokes every live invite when an admin removes a member, so the link they used no longer lets them back in", async () => {
+    const admin = await person();
+    const member = await person();
+    const workspace = await createWorkspace(admin);
+    const used = await invite(admin, workspace);
+    await invite(admin, workspace, "admin");
+    expect((await accept(member, workspace, used)).status).toBe(200);
+    expect(await liveInvites(workspace)).toBe(2);
+
+    expect((await removeMember(admin, workspace, member)).status).toBe(200);
+
+    expect(await liveInvites(workspace)).toBe(0);
+    const again = await accept(member, workspace, used);
+    expect(again.status).toBe(400);
+    expect(await again.json()).toEqual(UNAVAILABLE);
+    expect(await roleOf(workspace, member)).toBeNull();
+    // An admin issues a fresh link for anyone who should still join.
+    expect((await accept(member, workspace, await invite(admin, workspace))).status).toBe(200);
+  });
+
+  it("revokes nothing when a member leaves", async () => {
+    const admin = await person();
+    const leaver = await person();
+    const workspace = await createWorkspace(admin);
+    const token = await invite(admin, workspace);
+    expect((await accept(leaver, workspace, token)).status).toBe(200);
+
+    expect((await removeMember(leaver, workspace, leaver)).status).toBe(200);
+
+    expect(await liveInvites(workspace)).toBe(1);
+    expect((await accept(leaver, workspace, token)).status).toBe(200);
+    expect(await roleOf(workspace, leaver)).toBe("member");
+  });
+
+  it("answers success without an access change, and closes no socket, when the member is already in", async () => {
+    const admin = await person();
+    const member = await person();
+    const workspace = await createWorkspace(admin);
+    const board = await createBoard(admin, workspace, "workspace");
+    const token = await invite(admin, workspace);
+    expect((await accept(member, workspace, token)).status).toBe(200);
+    const open = await SELF.fetch(`${ORIGIN}/boards/${board.id}/ws?realtimeVersion=${REALTIME_PROTOCOL_VERSION}`, { headers: { Upgrade: "websocket", cookie: member.cookie } });
+    expect(open.status).toBe(101);
+    const socket = open.webSocket!;
+    socket.accept();
+    const closed = new Promise<number>((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
+    const journal = async () => (await env.DB.prepare(`SELECT COUNT(*) AS n FROM access_change_operations`).first<{ n: number }>())!.n;
+    const before = await journal();
+
+    const operationId = crypto.randomUUID();
+    const repeated = await accept(member, workspace, token, operationId);
+    expect(repeated.status).toBe(200);
+    expect(await repeated.json()).toEqual({ operationId, state: "completed", outcome: "committed", result: { workspaceId: workspace } });
+    const added = await post(`/workspaces/${workspace}/members`, { userId: member.id, role: "admin", operationId: crypto.randomUUID() }, admin.cookie);
+    expect(added.status).toBe(200);
+    expect(await added.json()).toMatchObject({ state: "completed", outcome: "committed", result: { workspaceId: workspace, userId: member.id } });
+
+    expect(await journal()).toBe(before);
+    expect(await roleOf(workspace, member)).toBe("member");
+    expect(await Promise.race([closed, scheduler.wait(500).then(() => "still open" as const)])).toBe("still open");
+    socket.close();
+  });
+});

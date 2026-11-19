@@ -93,11 +93,12 @@ export function canOpenBoard(f: BoardAccessFacts): boolean {
 
 /**
  * Manage rights (ADR 0066), in TS. `boardManageSql` is the same rule in SQL. The creator
- * manages only while still a member of the board's workspace (`workspaceRole`): one who was
- * removed or left keeps the open right (`canOpenBoard`) but not the manage right.
+ * and an explicit board manager manage only while still a member of the board's workspace
+ * (`workspaceRole`): one who was removed or left keeps the open right (`canOpenBoard`) but
+ * not the manage right.
  */
 export function canManageBoard(f: BoardAccessFacts): boolean {
-  return f.operator || (f.owner && f.workspaceRole != null) || f.explicitRole === "manager" || f.workspaceRole === "admin";
+  return f.operator || ((f.owner || f.explicitRole === "manager") && f.workspaceRole != null) || f.workspaceRole === "admin";
 }
 
 /**
@@ -118,13 +119,13 @@ export function boardOpenSql(board: string, viewer: string, operator?: string): 
 }
 
 /**
- * Manage rights (ADR 0066) as one SQL condition: an explicit board manager, or a member
- * of the board's workspace who administers it or created the board (`canManageBoard`).
- * Arguments and binds as in `boardOpenSql`.
+ * Manage rights (ADR 0066) as one SQL condition: a member of the board's workspace who
+ * administers it, created the board or is an explicit board manager (`canManageBoard`).
+ * Arguments and binds as in `boardOpenSql`; `viewer` appears 3 times.
  */
 export function boardManageSql(board: string, viewer: string, operator?: string): string {
-  return `(${operator ? `${operator} OR ` : ""}EXISTS(SELECT 1 FROM board_members manage_bm WHERE manage_bm.board_id=${board}.id AND manage_bm.user_id=${viewer} AND manage_bm.role='manager')
-    OR EXISTS(SELECT 1 FROM workspace_members manage_wm WHERE manage_wm.workspace_id=${board}.workspace_id AND manage_wm.user_id=${viewer} AND (manage_wm.role='admin' OR ${board}.owner_id=${viewer})))`;
+  return `(${operator ? `${operator} OR ` : ""}EXISTS(SELECT 1 FROM workspace_members manage_wm WHERE manage_wm.workspace_id=${board}.workspace_id AND manage_wm.user_id=${viewer}
+      AND (manage_wm.role='admin' OR ${board}.owner_id=${viewer} OR EXISTS(SELECT 1 FROM board_members manage_bm WHERE manage_bm.board_id=${board}.id AND manage_bm.user_id=${viewer} AND manage_bm.role='manager'))))`;
 }
 
 /**

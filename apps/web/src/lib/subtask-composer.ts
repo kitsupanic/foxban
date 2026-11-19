@@ -50,8 +50,8 @@ export type SubtaskComposerEnv = {
   cardId(): string;
   /** A subtask card cannot have children, so it cannot convert. */
   isSubtask(): boolean;
-  /** A new subtask's key in the column it lands in: the starting column, or this card's own on a board without roles. */
-  placeTail(): string;
+  /** A new subtask's key in the column it lands in: the completed column for a done checklist item, else the starting one, or this card's own on a board without roles. */
+  placeTail(done: boolean): string;
 };
 
 const copy = (rejected: string, unverified: string) => ({
@@ -176,7 +176,7 @@ export function createSubtaskComposer(scope: AuthoredScope, env: SubtaskComposer
       composerRetried = false;
       acceptGeneration = ++generation;
       // Stable per submitted draft: this click's ids are the creation's identity.
-      composerOp.start({ entityId: crypto.randomUUID(), relationId: crypto.randomUUID(), position: env.placeTail(), rawDraft: draft });
+      composerOp.start({ entityId: crypto.randomUUID(), relationId: crypto.randomUUID(), position: env.placeTail(false), rawDraft: draft });
     },
     retry() {
       const { composer } = state;
@@ -212,7 +212,7 @@ export function createSubtaskComposer(scope: AuthoredScope, env: SubtaskComposer
       conversionOp.start({
         entityId: crypto.randomUUID(),
         relationId: crypto.randomUUID(),
-        position: env.placeTail(),
+        position: env.placeTail(item.done),
         rawDraft: item.text,
         checklistItemId: item.id,
       });
@@ -230,7 +230,7 @@ export function createSubtaskComposer(scope: AuthoredScope, env: SubtaskComposer
 
 export type SubtaskComposerCore = ReturnType<typeof createSubtaskComposer>;
 
-export function useSubtaskComposer(scope: AuthoredScope, live: { cardId: string; isSubtask: boolean; placeTail: () => string }) {
+export function useSubtaskComposer(scope: AuthoredScope, live: { cardId: string; isSubtask: boolean; placeTail: (done: boolean) => string }) {
   const latest = useRef(live);
   latest.current = live;
   const core = useMemo(
@@ -238,7 +238,7 @@ export function useSubtaskComposer(scope: AuthoredScope, live: { cardId: string;
       createSubtaskComposer(scope, {
         cardId: () => latest.current.cardId,
         isSubtask: () => latest.current.isSubtask,
-        placeTail: () => latest.current.placeTail(),
+        placeTail: (done) => latest.current.placeTail(done),
       }),
     [scope],
   );

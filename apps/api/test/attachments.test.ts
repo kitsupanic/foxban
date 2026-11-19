@@ -674,7 +674,7 @@ describe("card transfer route and R2 lifecycle", () => {
     expect(snapshot.cards[0]).toMatchObject({ id: "card-inherit", assigneeId: mover.id });
   });
 
-  it("GET /boards/:id/transfer-options returns accessible boards with columns in order, excluding source board", async () => {
+  it("GET /boards/:id/transfer-options lists accessible boards without columns, excluding source board; the per-destination route returns columns", async () => {
     const userCookie = await signup("opt-user@foxban.test");
     const sourceBoard = await createBoard(userCookie, "Source Board", "SRCOPT");
     const destBoard1 = await createBoard(userCookie, "Dest Board 1", "DSTOPT1");
@@ -708,15 +708,24 @@ describe("card transfer route and R2 lifecycle", () => {
     socket1.close(1000);
     const res = await get(`/boards/${sourceBoard}/transfer-options`, userCookie);
     expect(res.status).toBe(200);
-    const body = await res.json<{
-      boards: Array<{ id: string; name: string; key: string; columns: Array<{ id: string; title: string }> }>;
-    }>();
+    const body = await res.json<{ boards: Array<{ id: string; name: string; key: string }> }>();
 
     // Excludes source board
     expect(body.boards.some((b) => b.id === sourceBoard)).toBe(false);
     // Includes destBoard1 and destBoard2
     expect(body.boards.some((b) => b.id === destBoard1)).toBe(true);
     expect(body.boards.some((b) => b.id === destBoard2)).toBe(true);
+    expect(body.boards.every((b) => !("columns" in b))).toBe(true);
+
+    const columns = await get(`/boards/${sourceBoard}/transfer-options/${destBoard1}`, userCookie);
+    expect(columns.status).toBe(200);
+    expect(await columns.json()).toEqual({ columns: [{ id: "col-dst-1", title: "Todo", position: "a0" }] });
+
+    // The source itself and a board the caller cannot open are refused.
+    const strangerCookie = await signup("opt-stranger@foxban.test");
+    const strangerBoard = await createBoard(strangerCookie, "Stranger Board", "STROPT");
+    expect((await get(`/boards/${sourceBoard}/transfer-options/${sourceBoard}`, userCookie)).status).toBe(403);
+    expect((await get(`/boards/${sourceBoard}/transfer-options/${strangerBoard}`, userCookie)).status).toBe(403);
   });
 
   it("POST /boards/:id/cards/:cardId/transfer orchestrates dual-board auth, R2 copy, column check, compensation, and retry", async () => {

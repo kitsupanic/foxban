@@ -86,3 +86,4 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0076 — Long position keys are rebalanced by the board](0076-position-key-rebalance.md) (amends 0006, 0010)
 - [0077 — A live comment's timestamp must be near the board's clock](0077-comment-time-near-server-clock.md) (amends 0074)
 - [0078 — Comments load per card, not in the snapshot](0078-per-card-comment-loading.md) (amends 0069, 0073)
+- [0079 — Removing a workspace member revokes the workspace's live invite links](0079-removal-revokes-workspace-invites.md) (amends 0066)

@@ -1044,28 +1044,38 @@ const app = new Hono<AppEnv>()
   })
   .get("/boards/:id/transfer-options", requireAuth, requireMember, async (c) => {
     const user = c.get("user");
-    const currentBoardId = c.get("board").id;
-
-    const { results: destinationBoardsRaw } = await c.env.DB.prepare(
-      `SELECT ${BOARD_SELECT_COLS}
+    // A board mid access change would refuse a transfer, so it is not offered.
+    const { results } = await c.env.DB.prepare(
+      `SELECT boards.id AS id, boards.name AS name, boards.board_key AS key
          FROM boards
         WHERE boards.id != ?
+          AND boards.pending_access_operation_id IS NULL
           AND ${boardOpenSql("boards", "?")}
         ORDER BY boards.created_at`,
     )
-      .bind(currentBoardId, user.id, user.id, user.id)
-      .all<RawBoardRecord>();
-    const destinationBoards = destinationBoardsRaw.map(toBoardRow);
-    // A board that refuses (mid access change, say) is left out, not a failure of the whole list.
-    const settled = await Promise.allSettled(
-      destinationBoards.map(async (board) => ({
-        id: board.id,
-        name: board.name,
-        key: board.key,
-        columns: await boardClient(c.env, board.id).transferOptions(),
-      })),
-    );
-    return c.json({ boards: settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])) });
+      .bind(c.get("board").id, user.id, user.id, user.id)
+      .all<{ id: string; name: string; key: string }>();
+    return c.json({ boards: results });
+  })
+  // Columns are read per destination, when the dialog selects one, so listing never wakes every board's DO.
+  .get("/boards/:id/transfer-options/:destinationBoardId", requireAuth, requireMember, async (c) => {
+    const user = c.get("user");
+    const destinationBoardId = c.req.param("destinationBoardId");
+    const destination = await c.env.DB.prepare(
+      `SELECT boards.id AS id
+         FROM boards
+        WHERE boards.id = ? AND boards.id != ?
+          AND ${boardOpenSql("boards", "?")}`,
+    )
+      .bind(destinationBoardId, c.get("board").id, user.id, user.id, user.id)
+      .first<{ id: string }>();
+    if (!destination) return c.json({ error: "forbidden" } as const, 403);
+    try {
+      return c.json({ columns: await boardClient(c.env, destination.id).transferOptions() });
+    } catch {
+      c.header("Retry-After", "2");
+      return c.json({ error: "could not read the destination board; please retry" } as const, 503);
+    }
   })
 
   .post(
