@@ -4,7 +4,7 @@ import { createBoard, getBoardUuid, columnByTitle, dragCardTo } from "./helpers"
 const body = (page: Page, id: string) => page.locator(`[data-card-body="${id}"]`);
 async function send(page: Page, boardId: string, commands: Record<string, unknown>[]) {
   await page.evaluate(async ({boardId, commands}) => {
-    const ws=new WebSocket(`${location.origin.replace("http","ws")}/boards/${boardId}/ws?realtimeVersion=12`);
+    const ws=new WebSocket(`${location.origin.replace("http","ws")}/boards/${boardId}/ws?realtimeVersion=13`);
     await new Promise<void>(resolve=>ws.addEventListener("message",function ready(event){if(JSON.parse(event.data).type==="snapshot"){ws.removeEventListener("message",ready);resolve();}}));
     for (const command of commands) {
       const mutationId=crypto.randomUUID();

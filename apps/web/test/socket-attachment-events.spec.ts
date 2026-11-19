@@ -72,7 +72,7 @@ function snapshot(extra: Record<string, unknown> = {}): ServerMessage {
     archivedCards: [],
     checklistItems: [],
     attachments: [{ id: attachmentId, cardId, fileName: "shot.png", contentType: "image/png", size: 10 }],
-    comments: [],
+    commentCounts: {},
     relations: [],
     labels: [],
     cardLabels: [],

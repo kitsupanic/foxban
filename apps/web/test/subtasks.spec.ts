@@ -47,7 +47,7 @@ function state(cards: Card[], relations: CardRelation[] = []): BoardState {
     archivedCards: [],
     checklistItems: [],
     attachments: [],
-    comments: [],
+    comments: [], commentCounts: {},
     relations,
     labels: [],
     cardLabels: [],

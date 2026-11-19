@@ -37,11 +37,11 @@ describe("mutation pipeline", () => {
       expect(() => run({ type: "comment.create", mutationId: "m1", id: "fake", cardId: "c1", authorId: "alice", parentCommentId: null, body: "Ship it", createdAt: 1 }, bob)).toThrow(MutationRefusal);
       run({ type: "comment.create", mutationId: "m2", id: "note", cardId: "c1", authorId: "alice", parentCommentId: null, body: "Hold", createdAt: 1 }, { ...bob, actorId: "alice" });
       // Another member may neither edit nor delete it; an instance Admin may delete it but not edit it.
-      expect(() => run({ type: "comment.update", mutationId: "m3", id: "note", body: "Ship it", updatedAt: 2 }, bob)).toThrow(MutationRefusal);
-      expect(() => run({ type: "comment.delete", mutationId: "m4", id: "note" }, bob)).toThrow(MutationRefusal);
-      expect(() => run({ type: "comment.update", mutationId: "m5", id: "note", body: "Ship it", updatedAt: 2 }, { ...bob, isAdmin: true })).toThrow(MutationRefusal);
+      expect(() => run({ type: "comment.update", mutationId: "m3", id: "note", cardId: "c1", body: "Ship it", updatedAt: 2 }, bob)).toThrow(MutationRefusal);
+      expect(() => run({ type: "comment.delete", mutationId: "m4", id: "note", cardId: "c1" }, bob)).toThrow(MutationRefusal);
+      expect(() => run({ type: "comment.update", mutationId: "m5", id: "note", cardId: "c1", body: "Ship it", updatedAt: 2 }, { ...bob, isAdmin: true })).toThrow(MutationRefusal);
       expect(sql.exec<{ body: string }>("SELECT body FROM comments WHERE id = 'note'").one().body).toBe("Hold");
-      run({ type: "comment.delete", mutationId: "m6", id: "note" }, { ...bob, isAdmin: true });
+      run({ type: "comment.delete", mutationId: "m6", id: "note", cardId: "c1" }, { ...bob, isAdmin: true });
       expect(count(sql, "comments")).toBe(0);
     }));
 
@@ -61,8 +61,8 @@ describe("mutation pipeline", () => {
       }
       expect(count(sql, "comments")).toBe(3);
       // An edit is held to the same clock.
-      expect(() => run({ type: "comment.update", mutationId: "m-u", id: "now", body: "later", updatedAt: 0 }, undefined, now)).toThrow(MutationRefusal);
-      run({ type: "comment.update", mutationId: "m-u2", id: "now", body: "later", updatedAt: now }, undefined, now);
+      expect(() => run({ type: "comment.update", mutationId: "m-u", id: "now", cardId: "c1", body: "later", updatedAt: 0 }, undefined, now)).toThrow(MutationRefusal);
+      run({ type: "comment.update", mutationId: "m-u2", id: "now", cardId: "c1", body: "later", updatedAt: now }, undefined, now);
       expect(sql.exec<{ body: string }>("SELECT body FROM comments WHERE id = 'now'").one().body).toBe("later");
     }));
 
@@ -165,7 +165,7 @@ describe("mutation pipeline", () => {
       expect(["checklist_items", "comments", "card_labels", "card_relations", "activities"].map((table) => count(sql, table))).toEqual([0, 0, 0, 0, 0]);
     }));
 
-  it("logs no history for an edit or a delete that finds the comment already deleted", () =>
+  it("logs no history for an edit of a deleted comment, and refuses a second delete", () =>
     onBoard((sql, run) => {
       seedCard(sql, "p", 1);
       const comment = (id: string, parentCommentId: string | null) =>
@@ -173,12 +173,13 @@ describe("mutation pipeline", () => {
       run(comment("root", null));
       run(comment("reply", "root"));
       // A root with a reply is kept as a tombstone, so later messages for it still find a row.
-      expect(run({ type: "comment.delete", mutationId: "d1", id: "root" }).activities.map(({ detail }) => detail)).toEqual([{ type: "comment.deleted" }]);
-      expect(run({ type: "comment.update", mutationId: "e1", id: "root", body: "late edit", updatedAt: 2 }).activities).toEqual([]);
-      expect(run({ type: "comment.delete", mutationId: "d2", id: "root" }).activities).toEqual([]);
+      expect(run({ type: "comment.delete", mutationId: "d1", id: "root", cardId: "p" }).activities.map(({ detail }) => detail)).toEqual([{ type: "comment.deleted" }]);
+      expect(run({ type: "comment.update", mutationId: "e1", id: "root", cardId: "p", body: "late edit", updatedAt: 2 }).activities).toEqual([]);
+      // A second delete is refused, not a silent no-op, so peers can count broadcast deletes (ADR 0078).
+      expect(() => run({ type: "comment.delete", mutationId: "d2", id: "root", cardId: "p" })).toThrow("Comment is already deleted.");
       expect(sql.exec<{ body: string }>("SELECT body FROM comments WHERE id = 'root'").one().body).toBe("");
       // A live comment's edit is still history.
-      expect(run({ type: "comment.update", mutationId: "e2", id: "reply", body: "edit", updatedAt: 2 }).activities.map(({ detail }) => detail)).toEqual([{ type: "comment.edited" }]);
+      expect(run({ type: "comment.update", mutationId: "e2", id: "reply", cardId: "p", body: "edit", updatedAt: 2 }).activities.map(({ detail }) => detail)).toEqual([{ type: "comment.edited" }]);
     }));
 
   it("records no activities when an idempotent replay writes nothing", () =>

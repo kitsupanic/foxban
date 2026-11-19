@@ -8,6 +8,7 @@ import {
   ServerMessageSchema,
   type Activity,
   type Card,
+  type Comment,
   type ClientMessage,
   type ServerMessage,
 } from "@foxban/shared";
@@ -282,6 +283,16 @@ async function snapshotOf(client: Client) {
       .map(({ detailJson, ...row }): Activity => ({ ...row, detail: JSON.parse(detailJson) })),
   );
   return { ...frame.message, activities };
+}
+
+/** One card's comments, oldest first with tombstones: the snapshot carries only counts (ADR 0078), so this reads them through the DO's own route. */
+async function commentsOf(board: string, cardId: string) {
+  const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
+  const response = await stub.fetch(`https://board.internal${routePath("cardComments", { cardId })}`, {
+    headers: { [INTERNAL_BOARD_ID_HEADER]: board },
+  });
+  expect(response.status).toBe(200);
+  return (await response.json<{ comments: Comment[] }>()).comments;
 }
 
 async function awaitMatching<T extends ServerMessage>(
@@ -1180,7 +1191,7 @@ describe("BoardDO", () => {
     expect(snapshot.archivedCards.map((card) => card.id).sort()).toEqual(["card-a1", "card-a2"]);
     expect(snapshot.checklistItems.map((item) => item.id)).toEqual(["item-a1"]);
     expect(snapshot.attachments.map((att) => att.id)).toEqual([cascadeAttId]);
-    expect(snapshot.comments.map((comment) => comment.id)).toEqual(["cmt-a1"]);
+    expect((await commentsOf("board-cascade", "card-a1")).map((comment) => comment.id)).toEqual(["cmt-a1"]);
     expect(snapshot.cardLabels.map((join) => join.id)).toEqual(["join-a1"]);
     expect(snapshot.relations.map((relation) => relation.id)).toEqual(["rel-a1-b1"]);
 
@@ -1249,7 +1260,7 @@ describe("BoardDO", () => {
     expect(snapshot.archivedCards.map((card) => card.id)).toEqual(["card-a2"]);
     expect(snapshot.checklistItems.map((item) => item.id)).toEqual(["item-a1"]);
     expect(snapshot.attachments.map((att) => att.id)).toEqual([cascadeAttId]);
-    expect(snapshot.comments.map((comment) => comment.id)).toEqual(["cmt-a1"]);
+    expect((await commentsOf("board-cascade", "card-a1")).map((comment) => comment.id)).toEqual(["cmt-a1"]);
     expect(snapshot.cardLabels.map((join) => join.id)).toEqual(["join-a1"]);
     expect(snapshot.relations.map((relation) => relation.id)).toEqual(["rel-a1-b1"]);
 
@@ -1266,7 +1277,7 @@ describe("BoardDO", () => {
     expect(restartSnapshot.archivedCards.map((card) => card.id)).toEqual(["card-a2"]);
     expect(restartSnapshot.checklistItems.map((item) => item.id)).toEqual(["item-a1"]);
     expect(restartSnapshot.attachments.map((att) => att.id)).toEqual([cascadeAttId]);
-    expect(restartSnapshot.comments.map((comment) => comment.id)).toEqual(["cmt-a1"]);
+    expect((await commentsOf("board-cascade", "card-a1")).map((comment) => comment.id)).toEqual(["cmt-a1"]);
     expect(restartSnapshot.cardLabels.map((join) => join.id)).toEqual(["join-a1"]);
     expect(restartSnapshot.relations.map((relation) => relation.id)).toEqual(["rel-a1-b1"]);
   });
@@ -1420,7 +1431,7 @@ describe("BoardDO", () => {
     expect(snapshot.archivedCards.map((card) => card.id)).toEqual(["card-populated"]);
     expect(snapshot.checklistItems.map((item) => item.id)).toEqual(["item-populated"]);
     expect(snapshot.attachments.map((attachment) => attachment.id)).toEqual([popAttId]);
-    expect(snapshot.comments.map((comment) => comment.id)).toEqual(["comment-populated"]);
+    expect((await commentsOf(board, "card-populated")).map((comment) => comment.id)).toEqual(["comment-populated"]);
     expect(snapshot.cardLabels.map((join) => join.id)).toEqual(["join-populated"]);
     expect(snapshot.relations.map((relation) => relation.id)).toEqual(["relation-populated"]);
     expect(
@@ -1486,7 +1497,7 @@ describe("BoardDO", () => {
     expect(snapshot.archivedCards).toEqual([]);
     expect(snapshot.checklistItems.map((item) => item.id)).toEqual(["item-populated"]);
     expect(snapshot.attachments.map((attachment) => attachment.id)).toEqual([popAttId]);
-    expect(snapshot.comments.map((comment) => comment.id)).toEqual(["comment-populated"]);
+    expect((await commentsOf(board, "card-populated")).map((comment) => comment.id)).toEqual(["comment-populated"]);
     expect(snapshot.cardLabels.map((join) => join.id)).toEqual(["join-populated"]);
     expect(snapshot.relations.map((relation) => relation.id)).toEqual(["relation-populated"]);
 
@@ -1500,7 +1511,7 @@ describe("BoardDO", () => {
     );
     expect(restartSnapshot.checklistItems.map((item) => item.id)).toEqual(["item-populated"]);
     expect(restartSnapshot.attachments.map((attachment) => attachment.id)).toEqual([popAttId]);
-    expect(restartSnapshot.comments.map((comment) => comment.id)).toEqual([
+    expect((await commentsOf(board, "card-populated")).map((comment) => comment.id)).toEqual([
       "comment-populated",
     ]);
     expect(restartSnapshot.cardLabels.map((join) => join.id)).toEqual(["join-populated"]);
@@ -1687,7 +1698,8 @@ describe("BoardDO", () => {
     expect(snapshot.archivedCards).toEqual([]);
     expect(snapshot.checklistItems).toEqual([]);
     expect(snapshot.attachments).toEqual([]);
-    expect(snapshot.comments).toEqual([]);
+    expect(snapshot.commentCounts).toEqual({});
+    expect(await commentsOf(board, "card-1")).toEqual([]);
     expect(snapshot.activities.some((activity) => activity.cardId === "card-1")).toBe(false);
     expect(snapshot.relations).toEqual([]);
     expect(snapshot.cardLabels).toEqual([]);
@@ -1865,7 +1877,7 @@ describe("BoardDO", () => {
       { type: "checklist.update", mutationId: "ro-chk-u", id: "item-ro", text: "nope" },
       { type: "checklist.delete", mutationId: "ro-chk-d", id: "item-ro" },
       { type: "attachment.delete", mutationId: "ro-att-d", id: roAttId },
-      { type: "comment.update", mutationId: "ro-cmt-u", id: "note-ro", body: "nope", updatedAt: T0 },
+      { type: "comment.update", mutationId: "ro-cmt-u", id: "note-ro", cardId: "card-archived", body: "nope", updatedAt: T0 },
       { type: "label.unassign", mutationId: "ro-la-d", id: "join-ro" },
 
       // 4. Relation endpoints / create / delete
@@ -1913,7 +1925,8 @@ describe("BoardDO", () => {
     });
     expect(preDeleteSnapshot.checklistItems.map((i) => i.id)).toEqual(["item-ro"]);
     expect(preDeleteSnapshot.attachments.map((at) => at.id)).toEqual([roAttId]);
-    expect(preDeleteSnapshot.comments.map((c) => c.id)).toEqual(["note-ro"]);
+    expect((await commentsOf(board, "card-archived")).map((c) => c.id)).toEqual(["note-ro"]);
+    expect(preDeleteSnapshot.commentCounts).toEqual({ "card-archived": 1 });
     expect(preDeleteSnapshot.relations.map((r) => r.id)).toEqual(["rel-ro"]);
 
     // label.delete remains allowed and removes the definition and join even on archived cards.
@@ -2522,6 +2535,7 @@ describe("BoardDO activity", () => {
           type: "comment.update",
           mutationId: "activity-comment-update",
           id: "comment-1",
+          cardId: "card-1",
           body: "Edited",
           updatedAt: T0 + 1,
         })
@@ -2533,6 +2547,7 @@ describe("BoardDO activity", () => {
           type: "comment.delete",
           mutationId: "activity-comment-delete",
           id: "comment-1",
+          cardId: "card-1",
         })
       )[0]?.detail,
     ).toEqual({ type: "comment.deleted" });
@@ -2841,13 +2856,9 @@ describe("BoardDO activity edge cases", () => {
         type: "comment.update",
         mutationId: "missing-comment-update",
         id: "missing-comment",
+        cardId: "card-1",
         body: "Missing",
         updatedAt: T0,
-      },
-      {
-        type: "comment.delete",
-        mutationId: "missing-comment-delete",
-        id: "other-missing-comment",
       },
       {
         type: "column.create",
@@ -2905,6 +2916,10 @@ describe("BoardDO activity edge cases", () => {
       a.send(message);
       await awaitBroadcast(a, message.mutationId);
     }
+
+    // Deleting a comment that is not there is refused, not broadcast (ADR 0078); it still logs nothing.
+    a.send({ type: "comment.delete", mutationId: "missing-comment-delete", id: "other-missing-comment", cardId: "card-1" });
+    expect((await awaitError(a, "missing-comment-delete")).message).toBe("Comment is already deleted.");
 
     // A child row for a card that is gone is refused outright, never accepted as an orphan.
     const orphans: ClientMessage[] = [
@@ -3191,7 +3206,7 @@ describe("BoardDO card details", () => {
       expect((await awaitError(a, message.mutationId)).message).toBe("card is unavailable");
     }
     const snapshot = await snapshotOf(await connect(board));
-    expect([snapshot.checklistItems, snapshot.comments, snapshot.cardLabels, snapshot.relations]).toEqual([[], [], [], []]);
+    expect([snapshot.checklistItems, await commentsOf(board, "card-1"), snapshot.cardLabels, snapshot.relations]).toEqual([[], [], [], []]);
   });
 
   it("records the board id and backfills legacy attachment keys once", async () => {
@@ -5615,7 +5630,8 @@ describe("BoardDO card details", () => {
 
     // A fresh comment is unedited: both timestamp columns take `createdAt`.
     const snapshot = await snapshotOf(await connect("board-comment"));
-    expect(snapshot.comments).toEqual([
+    expect(snapshot.commentCounts).toEqual({ "card-1": 1 });
+    expect(await commentsOf("board-comment", "card-1")).toEqual([
       {
         id: "note-1",
         cardId: "card-1",
@@ -5649,9 +5665,9 @@ describe("BoardDO card details", () => {
     a.send(create("cc-ok", nearly));
     expect(await awaitBroadcast(a, "cc-ok")).toMatchObject({ createdAt: nearly });
 
-    a.send({ type: "comment.update", mutationId: "cc-edit-old", id: "cc-ok", body: "backdated", updatedAt: 0 });
+    a.send({ type: "comment.update", mutationId: "cc-edit-old", id: "cc-ok", cardId: "card-1", body: "backdated", updatedAt: 0 });
     expect((await awaitError(a, "cc-edit-old")).message).toMatch(/Comment time is out of range/);
-    a.send({ type: "comment.update", mutationId: "cc-edit", id: "cc-ok", body: "edited", updatedAt: Date.now() });
+    a.send({ type: "comment.update", mutationId: "cc-edit", id: "cc-ok", cardId: "card-1", body: "edited", updatedAt: Date.now() });
     await awaitBroadcast(a, "cc-edit");
     expect(await countDurableRows("board-comment-clock", "SELECT COUNT(*) AS n FROM comments WHERE body = 'edited'")).toBe(1);
   });
@@ -5675,13 +5691,14 @@ describe("BoardDO card details", () => {
       type: "comment.update",
       mutationId: "cu-2",
       id: "note-1",
+      cardId: "card-1",
       body: "revised",
       updatedAt: T0 + 60_000,
     });
     await awaitBroadcast(a, "cu-2");
 
     const snapshot = await snapshotOf(await connect("board-comment-update"));
-    expect(snapshot.comments).toEqual([
+    expect(await commentsOf("board-comment-update", "card-1")).toEqual([
       {
         id: "note-1",
         cardId: "card-1",
@@ -5710,11 +5727,12 @@ describe("BoardDO card details", () => {
       body: "gone soon",
       createdAt: T0,
     });
-    a.send({ type: "comment.delete", mutationId: "cd-2", id: "note-1" });
+    a.send({ type: "comment.delete", mutationId: "cd-2", id: "note-1", cardId: "card-1" });
     await awaitBroadcast(a, "cd-2");
 
     const snapshot = await snapshotOf(await connect("board-comment-delete"));
-    expect(snapshot.comments).toEqual([]);
+    expect(snapshot.commentCounts).toEqual({});
+    expect(await commentsOf("board-comment-delete", "card-1")).toEqual([]);
   });
 
   it("preserves a card's comments when the card is archived", async () => {
@@ -5755,7 +5773,9 @@ describe("BoardDO card details", () => {
 
     const snapshot = await snapshotOf(await connect("board-comment-card-cascade"));
     expect(snapshot.archivedCards.map((card) => card.id)).toEqual(["card-1"]);
-    expect(snapshot.comments.map((comment) => comment.id)).toEqual(["note-1", "note-2"]);
+    expect(snapshot.commentCounts).toEqual({ "card-1": 1, "card-2": 1 });
+    expect((await commentsOf("board-comment-card-cascade", "card-1")).map((comment) => comment.id)).toEqual(["note-1"]);
+    expect((await commentsOf("board-comment-card-cascade", "card-2")).map((comment) => comment.id)).toEqual(["note-2"]);
   });
 
   it("preserves comments of archived cards when their column is deleted", async () => {
@@ -5798,7 +5818,9 @@ describe("BoardDO card details", () => {
     const snapshot = await snapshotOf(await connect("board-comment-column-cascade"));
     expect(snapshot.cards.map((card) => card.id)).toEqual(["card-2"]);
     expect(snapshot.archivedCards.map((card) => card.id)).toEqual(["card-1"]);
-    expect(snapshot.comments.map((comment) => comment.id)).toEqual(["note-1", "note-2"]);
+    expect(snapshot.commentCounts).toEqual({ "card-1": 1, "card-2": 1 });
+    expect((await commentsOf("board-comment-column-cascade", "card-1")).map((comment) => comment.id)).toEqual(["note-1"]);
+    expect((await commentsOf("board-comment-column-cascade", "card-2")).map((comment) => comment.id)).toEqual(["note-2"]);
   });
   it("handles one-level reply threads, tombstoning, pruning, and update prevention", async () => {
     const a = await connect("board-comment-replies");
@@ -5897,11 +5919,11 @@ describe("BoardDO card details", () => {
     });
 
     // 6. Delete root when replies exist -> tombstones root
-    a.send({ type: "comment.delete", mutationId: "cr-del-root", id: "root-1" });
+    a.send({ type: "comment.delete", mutationId: "cr-del-root", id: "root-1", cardId: "card-1" });
     await awaitBroadcast(a, "cr-del-root");
 
-    let snapshot = await snapshotOf(await connect("board-comment-replies"));
-    const tombstone = snapshot.comments.find((c) => c.id === "root-1");
+    let comments = await commentsOf("board-comment-replies", "card-1");
+    const tombstone = comments.find((c) => c.id === "root-1");
     expect(tombstone).toEqual({
       id: "root-1",
       cardId: "card-1",
@@ -5912,7 +5934,7 @@ describe("BoardDO card details", () => {
       createdAt: T0,
       updatedAt: T0,
     });
-    const replyAfterTombstone = snapshot.comments.find((c) => c.id === "reply-1");
+    const replyAfterTombstone = comments.find((c) => c.id === "reply-1");
     expect(replyAfterTombstone?.deleted).toBe(false);
 
     // 7. Tombstone cannot be updated
@@ -5920,12 +5942,13 @@ describe("BoardDO card details", () => {
       type: "comment.update",
       mutationId: "cr-upd-tombstone",
       id: "root-1",
+      cardId: "card-1",
       body: "Reviving tombstone",
       updatedAt: T0 + 10_000,
     });
     await awaitBroadcast(a, "cr-upd-tombstone");
-    snapshot = await snapshotOf(await connect("board-comment-replies"));
-    expect(snapshot.comments.find((c) => c.id === "root-1")?.body).toBe("");
+    comments = await commentsOf("board-comment-replies", "card-1");
+    expect(comments.find((c) => c.id === "root-1")?.body).toBe("");
 
     // 8. New reply to tombstoned root is allowed
     a.send({
@@ -5941,20 +5964,95 @@ describe("BoardDO card details", () => {
     await awaitBroadcast(a, "cr-reply-2");
 
     // 9. Delete reply-1 -> root remains tombstoned because reply-2 exists
-    a.send({ type: "comment.delete", mutationId: "cr-del-r1", id: "reply-1" });
+    a.send({ type: "comment.delete", mutationId: "cr-del-r1", id: "reply-1", cardId: "card-1" });
     await awaitBroadcast(a, "cr-del-r1");
-    snapshot = await snapshotOf(await connect("board-comment-replies"));
-    expect(snapshot.comments.some((c) => c.id === "reply-1")).toBe(false);
-    expect(snapshot.comments.some((c) => c.id === "root-1")).toBe(true);
+    comments = await commentsOf("board-comment-replies", "card-1");
+    expect(comments.some((c) => c.id === "reply-1")).toBe(false);
+    expect(comments.some((c) => c.id === "root-1")).toBe(true);
 
     // 10. Delete final reply-2 -> prunes empty tombstoned root
-    a.send({ type: "comment.delete", mutationId: "cr-del-r2", id: "reply-2" });
+    a.send({ type: "comment.delete", mutationId: "cr-del-r2", id: "reply-2", cardId: "card-1" });
     await awaitBroadcast(a, "cr-del-r2");
-    snapshot = await snapshotOf(await connect("board-comment-replies"));
-    expect(snapshot.comments.some((c) => c.id === "reply-2")).toBe(false);
-    expect(snapshot.comments.some((c) => c.id === "root-1")).toBe(false);
-    expect(snapshot.comments).toHaveLength(0);
+    comments = await commentsOf("board-comment-replies", "card-1");
+    expect(comments.some((c) => c.id === "reply-2")).toBe(false);
+    expect(comments.some((c) => c.id === "root-1")).toBe(false);
+    expect(comments).toHaveLength(0);
   });
+  /** card-1: two roots and a reply to the second, plus a root with a reply that is then deleted into a tombstone; card-2: none. */
+  async function seedCommentThreads(board: string, prefix: string): Promise<Client> {
+    const a = await connect(board);
+    await snapshotOf(a);
+    await seedCard(a, prefix);
+    a.send({ type: "card.create", mutationId: `${prefix}-card2`, id: "card-2", columnId: "col-1", title: "Quiet", position: "a1" });
+    await awaitBroadcast(a, `${prefix}-card2`);
+    const create = (id: string, parentCommentId: string | null, createdAt: number) =>
+      a.send({ type: "comment.create", mutationId: `${prefix}-${id}`, id, cardId: "card-1", authorId: "test-user", parentCommentId, body: id, createdAt });
+    create("c1", null, T0 + 0);
+    create("c2", null, T0 + 1);
+    create("c2-reply", "c2", T0 + 2);
+    create("gone", null, T0 + 3);
+    create("gone-reply", "gone", T0 + 4);
+    a.send({ type: "comment.delete", mutationId: `${prefix}-del-gone`, id: "gone", cardId: "card-1" });
+    await awaitBroadcast(a, `${prefix}-del-gone`);
+    return a;
+  }
+
+  it("counts active comments per card in the snapshot, which carries no comments", async () => {
+    const board = "board-comment-counts";
+    await seedCommentThreads(board, "cc");
+    const snapshot = await snapshotOf(await connect(board));
+    expect(snapshot).not.toHaveProperty("comments");
+    // c1, c2, c2-reply and gone-reply; the tombstone is not counted and card-2 is absent.
+    expect(snapshot.commentCounts).toEqual({ "card-1": 4 });
+  });
+
+  it("serves one card's comments oldest first, tombstones included, through its own route", async () => {
+    const board = "board-comment-route";
+    await seedCommentThreads(board, "cr");
+    const comments = await commentsOf(board, "card-1");
+    expect(comments.map(({ id }) => id)).toEqual(["c1", "c2", "c2-reply", "gone", "gone-reply"]);
+    expect(comments.find(({ id }) => id === "gone")).toMatchObject({ deleted: true, body: "" });
+    expect(await commentsOf(board, "card-2")).toEqual([]);
+  });
+
+  it("refuses comment.update and comment.delete that name another card, and changes nothing", async () => {
+    const board = "board-comment-wrong-card";
+    const a = await seedCommentThreads(board, "cw");
+    const b = await connect(board);
+    await snapshotOf(b);
+    const before = await commentsOf(board, "card-1");
+    for (const message of [
+      { type: "comment.update", mutationId: "cw-bad-update", id: "c1", cardId: "card-2", body: "moved", updatedAt: T0 + 100_000 },
+      { type: "comment.delete", mutationId: "cw-bad-delete", id: "c1", cardId: "card-2" },
+    ]) {
+      a.send(message);
+      expect(await awaitError(a, message.mutationId)).toEqual({ type: "error", mutationId: message.mutationId, message: "Comment is not on that card." });
+    }
+    expect(await commentsOf(board, "card-1")).toEqual(before);
+    expect(await commentsOf(board, "card-2")).toEqual([]);
+    // The refusals were never broadcast: the peer's next frame is the later valid edit.
+    a.send({ type: "comment.update", mutationId: "cw-ok", id: "c1", cardId: "card-1", body: "edited", updatedAt: T0 + 100_001 });
+    expect((await b.next()).message).toMatchObject({ type: "comment.update", mutationId: "cw-ok" });
+  });
+
+  it("refuses to delete a comment that is already deleted or missing, without logging history", async () => {
+    const board = "board-comment-delete-twice";
+    const a = await seedCommentThreads(board, "cx");
+    const b = await connect(board);
+    await snapshotOf(b);
+    const before = await snapshotOf(await connect(board));
+    for (const [mutationId, id] of [["cx-twice", "gone"], ["cx-missing", "never-existed"]] as const) {
+      a.send({ type: "comment.delete", mutationId, id, cardId: "card-1" });
+      expect(await awaitError(a, mutationId)).toEqual({ type: "error", mutationId, message: "Comment is already deleted." });
+    }
+    const after = await snapshotOf(await connect(board));
+    expect(after.commentCounts).toEqual(before.commentCounts);
+    expect(after.activities).toEqual(before.activities);
+    expect(await commentsOf(board, "card-1")).toHaveLength(5);
+    a.send({ type: "comment.delete", mutationId: "cx-ok", id: "c1", cardId: "card-1" });
+    expect((await b.next()).message).toMatchObject({ type: "comment.delete", mutationId: "cx-ok" });
+  });
+
   it("enforces bidirectional body and deleted invariants in CommentSchema", () => {
     const validLive = CommentSchema.safeParse({
       id: "cmt-valid-live",
@@ -6407,7 +6505,7 @@ describe("BoardDO card details", () => {
     expect(snapshot.checklistItems).toEqual([
       { id: "item-1", cardId: "card-1", text: "survives", done: false, position: "a0" },
     ]);
-    expect(snapshot.comments).toEqual([
+    expect(await commentsOf("board-restart", "card-1")).toEqual([
       {
         id: "note-1",
         cardId: "card-1",
@@ -7078,6 +7176,7 @@ describe("BoardDO internal card transfer endpoints", () => {
       type: "comment.delete",
       mutationId: "prep-cmt-del-root",
       id: "cmt-root-1",
+      cardId: "card-1",
     });
     await awaitBroadcast(client, "prep-cmt-del-root");
     client.send({
@@ -7482,8 +7581,8 @@ describe("BoardDO internal card transfer endpoints", () => {
     expect(backendLabel?.id).not.toBe("src-lbl-2");
 
     // Verify imported comments: root tombstone and replies preserved exactly with correct relationships and order
-    const cardComments = receivedSnapshot.comments
-      .filter((c) => c.cardId === "transferred-card-uuid")
+    expect(receivedSnapshot).not.toHaveProperty("comments");
+    const cardComments = (await commentsOf(destBoard, "transferred-card-uuid"))
       .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
     expect(cardComments).toHaveLength(3);
     expect(cardComments).toEqual([

@@ -21,7 +21,13 @@ export type BoardState = {
   archivedCards: ArchivedCard[];
   checklistItems: ChecklistItem[];
   attachments: Attachment[];
+  /**
+   * Comments of the cards whose comments were read (ADR 0078), plus any created
+   * live since: a cache for the card modal, not the board's full set.
+   */
   comments: Comment[];
+  /** Active comments per card, from the snapshot and kept live by comment frames; the card faces count from it. */
+  commentCounts: Record<string, number>;
   relations: CardRelation[];
   labels: Label[];
   cardLabels: CardLabel[];
@@ -177,11 +183,6 @@ export function cardComments(state: BoardState, cardId: string): Comment[] {
     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 }
 
-/** Active (non-tombstoned) comments for badge and count displays. */
-export function activeCardComments(state: BoardState, cardId: string): Comment[] {
-  return cardComments(state, cardId).filter((comment) => !comment.deleted);
-}
-
 /** Both sides: a card owns the relations that name it as source OR as target. */
 export function cardRelations(
   state: BoardState,
@@ -265,8 +266,8 @@ export const cardFace = (index: BoardIndex, cardId: string): CardFaceData =>
  * One pass over the board for everything a card face and the column layout look
  * up per card, so a render is O(board) instead of O(cards x board). Build it
  * once per board state; per card it answers what `cardChecklist`,
- * `cardAttachments`, `activeCardComments`, `cardRelations` and `cardLabelViews`
- * answer.
+ * `cardAttachments`, `cardRelations` and `cardLabelViews` answer, and the
+ * snapshot's comment counts.
  */
 export function buildBoardIndex(state: BoardState): BoardIndex {
   const cardsById = new Map(state.cards.map((card) => [card.id, card]));
@@ -285,7 +286,7 @@ export function buildBoardIndex(state: BoardState): BoardIndex {
     if (item.done) data.checklistDone += 1;
   }
   for (const attachment of state.attachments) face(attachment.cardId).attachmentCount += 1;
-  for (const comment of state.comments) if (!comment.deleted) face(comment.cardId).commentCount += 1;
+  for (const [cardId, count] of Object.entries(state.commentCounts)) face(cardId).commentCount = count;
   for (const relation of state.relations) {
     if (!cardsById.has(relation.sourceCardId) || !cardsById.has(relation.targetCardId)) continue;
     face(relation.sourceCardId).relations.push(relation);
@@ -583,7 +584,9 @@ export function applyMutation(
       return { ...state, attachments: [...state.attachments, attachment] };
     }
     case "comment.create": {
-      if (state.comments.some((comment) => comment.id === msg.id)) return state;
+      // The count moves even when a read already cached the row: counts come from the snapshot and frames only.
+      const commentCounts = { ...state.commentCounts, [msg.cardId]: (state.commentCounts[msg.cardId] ?? 0) + 1 };
+      if (state.comments.some((comment) => comment.id === msg.id)) return { ...state, commentCounts };
       const comment: Comment = {
         id: msg.id,
         cardId: msg.cardId,
@@ -594,7 +597,7 @@ export function applyMutation(
         createdAt: msg.createdAt,
         updatedAt: msg.createdAt,
       };
-      return { ...state, comments: [...state.comments, comment] };
+      return { ...state, comments: [...state.comments, comment], commentCounts };
     }
     case "comment.update":
       return {
@@ -606,6 +609,9 @@ export function applyMutation(
         ),
       };
     case "comment.delete": {
+      // The server refuses a delete of a missing or tombstoned comment, so each delete frame is one active comment fewer.
+      const { [msg.cardId]: count = 0, ...others } = state.commentCounts;
+      state = { ...state, commentCounts: count > 1 ? { ...others, [msg.cardId]: count - 1 } : others };
       const target = state.comments.find((comment) => comment.id === msg.id);
       if (!target) return state;
 
@@ -839,6 +845,7 @@ export function purgeArchivedCards(
     checklistItems: state.checklistItems.filter((item) => !purged.has(item.cardId)),
     attachments: state.attachments.filter((attachment) => !purged.has(attachment.cardId)),
     comments: state.comments.filter((comment) => !purged.has(comment.cardId)),
+    commentCounts: Object.fromEntries(Object.entries(state.commentCounts).filter(([cardId]) => !purged.has(cardId))),
     relations: state.relations.filter(
       (relation) => !purged.has(relation.sourceCardId) && !purged.has(relation.targetCardId),
     ),

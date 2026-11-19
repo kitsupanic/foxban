@@ -1169,6 +1169,10 @@ const app = new Hono<AppEnv>()
   .get("/boards/:id/cards/:cardId/activity", requireAuth, requireMember, async (c) =>
     c.json({ activities: await boardClient(c.env, c.get("board").id).cardActivity(c.req.param("cardId")) }),
   )
+  // One card's comments (ADR 0078): the snapshot carries only per-card counts, so the card modal reads them here.
+  .get("/boards/:id/cards/:cardId/comments", requireAuth, requireMember, async (c) =>
+    c.json({ comments: await boardClient(c.env, c.get("board").id).cardComments(c.req.param("cardId")) }),
+  )
   // The repos a card may create its branch or pull request in (ADR 0064): the instance's, read from D1 with no GitHub call.
   .get("/boards/:id/connected-repos", requireAuth, requireMember, async (c) => c.json({ repos: await listConnectedRepos(c.env) }))
   // Manual link (ADR 0064): a PR that names no task key, by number plus a connected repo, or by URL.

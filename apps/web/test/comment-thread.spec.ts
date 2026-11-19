@@ -575,7 +575,7 @@ test("saving an edit sends the trimmed text, and acceptance closes the editor on
   thread.setEditDraft("  Edited ");
   expect(thread.getState()).toMatchObject({ editHasWork: true, hasWork: true, keepsCardOpen: true });
   thread.saveCommentEdit();
-  expect(fake.sends).toEqual([{ type: "comment.update", mutationId: last(), id: "c1", body: "Edited", updatedAt: expect.any(Number) }]);
+  expect(fake.sends).toEqual([{ type: "comment.update", mutationId: last(), id: "c1", cardId: "card-1", body: "Edited", updatedAt: expect.any(Number) }]);
   expect(thread.getState().edit).toEqual({ pendingId: "c1", uncertain: false, error: null });
 
   // A late acceptance must not close an editor the user kept typing in.

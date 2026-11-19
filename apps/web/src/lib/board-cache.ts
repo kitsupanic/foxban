@@ -25,6 +25,8 @@ export function boardPrivateCacheKeys(identity: { boardId?: string; boardKey?: s
       ["board-transfer-options", identity.boardId],
       ["card-development", identity.boardId],
       ["card-activity", identity.boardId],
+      // Its read installs comments into the board cache: cancelling it keeps a late answer from reinstalling them (ADR 0078).
+      ["card-comments", identity.boardId],
       ["board-development", identity.boardId],
       ["connected-repos", identity.boardId],
     );

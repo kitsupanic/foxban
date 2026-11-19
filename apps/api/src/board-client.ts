@@ -1,4 +1,4 @@
-import { ActivitySchema, BoardDevelopmentSchema, CardDevelopmentSchema, type Activity, type BoardDevelopment, type CardDevelopment, type Column, type DevelopmentPullRequest } from "@foxban/shared";
+import { ActivitySchema, BoardDevelopmentSchema, CardDevelopmentSchema, CommentSchema, type Activity, type Comment, type BoardDevelopment, type CardDevelopment, type Column, type DevelopmentPullRequest } from "@foxban/shared";
 import { z } from "zod";
 import {
   WriteBackCardSchema,
@@ -129,6 +129,13 @@ export function boardClient(env: Env, boardId: string) {
       const response = await call("cardActivity", { params: { cardId } });
       if (!response.ok) throw new Error(`board ${boardId} could not read card activity: ${response.status}`);
       return z.object({ activities: z.array(ActivitySchema) }).parse(await response.json()).activities;
+    },
+
+    /** A card's comments, tombstones included (empty for an unknown card). Throws when the board cannot answer. */
+    async cardComments(cardId: string): Promise<Comment[]> {
+      const response = await call("cardComments", { params: { cardId } });
+      if (!response.ok) throw new Error(`board ${boardId} could not read card comments: ${response.status}`);
+      return z.object({ comments: z.array(CommentSchema) }).parse(await response.json()).comments;
     },
 
     async boardDevelopment(): Promise<BoardDevelopment> {

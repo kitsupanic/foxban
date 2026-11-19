@@ -1,0 +1,18 @@
+# 0078 — Comments load per card, not in the snapshot
+
+## Status
+Accepted — 2026-11-19; amends 0073's "Comments stay in it" and the snapshot clause of 0069's settlement.
+
+## Context
+After ADR 0073 the snapshot still carried every comment of the board, bodies included (up to 10,000 characters each), on every connect, reconnect, import, transfer and finalize. A board with 10,000 comments of about 1 KB sent about 10 MB to every tab on every reconnect. Three things on the web side leaned on that full set: the card faces' comment counts, live comment frames applied to it, and settlement of an authored comment write (ADR 0069), which looked for the comment in the reconnect snapshot.
+
+## Decision
+- The snapshot carries no `comments`. It carries `commentCounts`: active (non-tombstoned) comments per card id, a card with none absent.
+- The BoardDO answers one card's comments, tombstones included and oldest first, on an `open` internal route, `GET /internal/cards/:cardId/comments`. The Worker serves it as `GET /boards/:id/cards/:cardId/comments` behind `requireAuth` and `requireMember`. Card transfer reads the same rows (`readCardComments`).
+- `comment.update` and `comment.delete` name their `cardId`, and the DO refuses one whose comment sits on another card, so a peer that has not read that card can still route the broadcast. A delete of a missing or tombstoned comment is now refused instead of a silent no-op, so every broadcast delete is exactly one active comment fewer.
+- The web keeps comments in board state as a cache of the cards read, next to `commentCounts`. Counts change only by the snapshot and by comment frames (create +1, delete −1, purge drops the card); a read never touches them. Comments stay in the reconciler's base state, so optimistic comment writes rebase as before.
+- The open card reads its comments with TanStack Query (`['card-comments', boardId, cardId]`, owned by `useBoardSocket`); the read installs them into the reconciler's base, replacing that card's cached comments. A comment frame for that card, or a snapshot, landing while a read is in flight makes the read run again, so a read cannot overwrite a frame it may not include. A reconnect snapshot keeps the cached comments (an open thread does not blank out) and invalidates the reads, so the open card reads again; a confirmed access denial cancels them with the board's other private caches.
+- Settlement: after a reconnect snapshot, a subscribed comment write still tracked as sent is checked against a fresh read of its card, not the snapshot, and settles `accepted` or `verified-retry` from that. A card that cannot be read settles `verified-retry` ("could not verify"): the user decides whether to retry, nothing is resent on its own.
+
+## Consequences
+The snapshot no longer grows with comment bodies; per comment it costs nothing, per card with comments a few bytes. Opening a card costs one small read, and its thread appears when that lands; until then it shows what this tab already cached. A peer who deletes a comment that another peer just deleted now gets a refusal rather than a silent success; the comment is gone either way. MCP reads comments with its own SQL and never used the snapshot. A client that expects `comments` in the snapshot cannot parse the new one, so `REALTIME_PROTOCOL_VERSION` is bumped from 12 to 13 (ADR 0045). Rejected: per-comment metadata (id, card, deleted, updated-at) in the snapshot, which still grows with every comment and cannot verify an edit's body; and moving comments out of board state into a per-card query cache, which would have needed a second optimistic layer beside the reconciler.

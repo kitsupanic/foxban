@@ -11,6 +11,7 @@ import {
   type Card,
   type ClientMessage,
   type PositionsRebalanced,
+  type Comment,
 } from "@foxban/shared";
 import { activityDrafts, insertActivities } from "./activity";
 import { attachmentObjectKey } from "./attachment-lifecycle";
@@ -132,6 +133,34 @@ export function runMutation(
 }
 
 /** True for the mutations that may enqueue cleanup keys or create an archive deadline, so the caller schedules the lifecycle alarm before the write. */
+/** One card's comments, tombstones included, oldest first: the card modal's read (ADR 0078) and the transfer bundle's. */
+export function readCardComments(sql: SqlStorage, cardId: string): Comment[] {
+  return sql
+    .exec<Omit<Comment, "deleted"> & { deleted: number }>(
+      `SELECT id, card_id AS cardId, author_id AS authorId,
+              parent_comment_id AS parentCommentId, deleted, body,
+              created_at AS createdAt, updated_at AS updatedAt
+         FROM comments
+        WHERE card_id = ?
+        ORDER BY created_at, id`,
+      cardId,
+    )
+    .toArray()
+    .map((c) => ({ ...c, deleted: c.deleted === 1 }));
+}
+
+/** The comment `update` / `delete` names must be on the card the frame names: peers route the broadcast by it (ADR 0078). */
+function requireCommentOnCard(sql: SqlStorage, id: string, cardId: string): { parent_comment_id: string | null; deleted: number } | undefined {
+  const row = sql
+    .exec<{ card_id: string; parent_comment_id: string | null; deleted: number }>(
+      "SELECT card_id, parent_comment_id, deleted FROM comments WHERE id = ?",
+      id,
+    )
+    .toArray()[0];
+  if (row && row.card_id !== cardId) throw new Error("Comment is not on that card.");
+  return row;
+}
+
 export function createsLifecycleWork(message: ClientMessage): boolean {
   return (
     message.type === "attachment.delete" ||
@@ -680,6 +709,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       return NO_LIFECYCLE_CHANGES;
     }
     case "comment.update":
+      requireCommentOnCard(sql, message.id, message.cardId);
       sql.exec(
         "UPDATE comments SET body = ?, updated_at = ? WHERE id = ? AND deleted = 0",
         message.body,
@@ -688,13 +718,10 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       );
       return NO_LIFECYCLE_CHANGES;
     case "comment.delete": {
-      const target = sql
-        .exec<{ id: string; parent_comment_id: string | null }>(
-          "SELECT id, parent_comment_id FROM comments WHERE id = ?",
-          message.id,
-        )
-        .toArray()[0];
-      if (!target) return NO_LIFECYCLE_CHANGES;
+      const row = requireCommentOnCard(sql, message.id, message.cardId);
+      // Refused, not a no-op, so every broadcast delete removes exactly one active comment and peers can count by it (ADR 0078).
+      if (!row || row.deleted === 1) throw new Error("Comment is already deleted.");
+      const target = { id: message.id, parent_comment_id: row.parent_comment_id };
 
       if (target.parent_comment_id === null) {
         // Root comment

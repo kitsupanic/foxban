@@ -45,8 +45,10 @@ export const DESCRIPTION_MAX_BYTES = 100_000;
  * `subtask.complete` is gone, and the snapshot says whether the workflow roles
  * are explicit. Version 11 drops `activities` from the snapshot (ADR 0073).
  * Version 12 adds the `positions.rebalanced` frame (ADR 0076).
+ * Version 13 swaps the snapshot's `comments` for per-card `commentCounts` and
+ * makes `comment.update` / `comment.delete` name their card (ADR 0078).
  */
-export const REALTIME_PROTOCOL_VERSION = "12";
+export const REALTIME_PROTOCOL_VERSION = "13";
 export const TRANSFER_TERMINAL_CODE = "transfer_terminal" as const;
 export type TransferTerminalCode = typeof TRANSFER_TERMINAL_CODE;
 
@@ -530,6 +532,8 @@ const clientMessages = [
     type: z.literal("comment.update"),
     mutationId: Identifier,
     id: Identifier,
+    /** Must name the comment's own card: a peer without the card's comments loaded routes the frame by it (ADR 0078). */
+    cardId: Identifier,
     body: CommentBody,
     updatedAt: z.number(),
   }),
@@ -537,6 +541,8 @@ const clientMessages = [
     type: z.literal("comment.delete"),
     mutationId: Identifier,
     id: Identifier,
+    /** Must name the comment's own card; peers decrement that card's comment count by it (ADR 0078). */
+    cardId: Identifier,
   }),
   z.strictObject({
     type: z.literal("relation.create"),
@@ -586,7 +592,7 @@ const clientMessages = [
 
 export const ClientMessageSchema = z.discriminatedUnion("type", clientMessages);
 
-/** Full board state, sent to a socket immediately after accept. Unordered: clients sort by `position`. Card activity is not in it: clients read one card's history on demand (ADR 0073). */
+/** Full board state, sent to a socket immediately after accept. Unordered: clients sort by `position`. Card activity and comments are not in it: clients read one card's history (ADR 0073) and comments (ADR 0078) on demand. */
 export const SnapshotSchema = z.object({
   type: z.literal("snapshot"),
   /**
@@ -599,7 +605,8 @@ export const SnapshotSchema = z.object({
   archivedCards: z.array(ArchivedCardSchema),
   checklistItems: z.array(ChecklistItemSchema),
   attachments: z.array(AttachmentSchema),
-  comments: z.array(CommentSchema),
+  /** Active (non-tombstoned) comments per card id; a card with none is absent. */
+  commentCounts: z.record(Identifier, z.number().int().positive()),
   relations: z.array(CardRelationSchema),
   labels: z.array(LabelSchema),
   cardLabels: z.array(CardLabelSchema),

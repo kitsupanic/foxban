@@ -20,7 +20,7 @@ function board(description = original): BoardState {
   const attachment: Attachment = { id: "att-1", cardId: card.id, fileName: "shot.png", contentType: "image/png", size: 10 };
   return {
     workflowRolesExplicit: false, columns: [{ id: "col-1", title: "Tasks", position: "a0" }], cards: [card], archivedCards: [],
-    checklistItems: [], attachments: [attachment], comments: [], relations: [], labels: [], cardLabels: [],
+    checklistItems: [], attachments: [attachment], comments: [], commentCounts: {}, relations: [], labels: [], cardLabels: [],
   } as BoardState;
 }
 const snapshot = (attachments: Attachment[]) => ({ type: "snapshot", attachments }) as unknown as Extract<ServerMessage, { type: "snapshot" }>;

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   REALTIME_PROTOCOL_VERSION,
   ServerMessageSchema,
   type ClientMessage,
+  type Comment,
   type ServerMessage,
 } from "@foxban/shared";
+import { api } from "./api";
 import { requestAppUpdateCheck } from "./app-update";
 import { boardQueryKey, clearBoardAccessCaches } from "./board-cache";
 import { invalidateCardActivity, recordActivities } from "./activity";
@@ -75,6 +77,10 @@ export type BoardEventObserver = {
   halted?(): void;
 };
 
+type CommentMessage = Extract<ClientMessage, { type: "comment.create" | "comment.update" | "comment.delete" }>;
+const isCommentMessage = (msg: ClientMessage | ServerMessage): msg is CommentMessage =>
+  msg.type === "comment.create" || msg.type === "comment.update" || msg.type === "comment.delete";
+
 export type MutationSettledStatus = "accepted" | "rejected" | "timeout" | "uncertain" | "verified-retry";
 export type MutationSettledCallback = (outcome: {
   mutationId: string;
@@ -111,6 +117,10 @@ export function useBoardSocket(
   sendMutation: SendMutation;
   subscribeMutation: (mutationId: string, callback: MutationSettledCallback) => () => void;
   retireTrackedMutation: (mutationId: string) => void;
+  cardCommentsQuery: (cardId: string) => {
+    queryKey: readonly unknown[];
+    queryFn: (context: { signal: AbortSignal }) => Promise<true>;
+  };
 } {
   const queryClient = useQueryClient();
   const accessProbeRef = useRef({ pending: false, checkedAt: 0 });
@@ -130,6 +140,37 @@ export function useBoardSocket(
   const pendingTimersRef = useRef(new Map<string, number>());
   const mutationSubscribersRef = useRef(new Map<string, Set<MutationSettledCallback>>());
   const pendingSentMutationsRef = useRef(new Map<string, ClientMessage>());
+  // Bumped by every comment frame for a card and by every snapshot: a comment read that saw either land mid-flight is retried.
+  const commentReadsRef = useRef({ snapshots: 0, byCard: new Map<string, number>() });
+
+  /**
+   * One card's comments (ADR 0078): the snapshot has only counts, so the open card
+   * reads them and installs them into the reconciler's base. The query's data is
+   * just "loaded"; the comments themselves live in the board state like any entity.
+   */
+  const cardCommentsQuery = useCallback(
+    (cardId: string) => ({
+      queryKey: ["card-comments", boardId, cardId] as const,
+      queryFn: async ({ signal }: { signal: AbortSignal }): Promise<true> => {
+        const reads = commentReadsRef.current;
+        const generation = () => `${reads.snapshots}:${reads.byCard.get(cardId) ?? 0}`;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const before = generation();
+          const response = await api.boards[":id"].cards[":cardId"].comments.$get({ param: { id: boardId, cardId } }, { init: { signal } });
+          if (!response.ok) throw new Error("Could not load the card's comments.");
+          const { comments } = (await response.json()) as { comments: Comment[] };
+          // A frame or snapshot that landed mid-read may or may not be in it: read again.
+          if (generation() !== before) continue;
+          const cacheState = reconcilerRef.current.installCardComments(cardId, comments);
+          if (!cacheState) throw new Error("The board is not loaded yet.");
+          queryClient.setQueryData<BoardState>(boardQueryKey(boardId), cacheState);
+          return true;
+        }
+        throw new Error("The card's comments kept changing while loading.");
+      },
+    }),
+    [boardId, queryClient],
+  );
 
   const subscribeMutation = useCallback((mutationId: string, callback: MutationSettledCallback) => {
     let subs = mutationSubscribersRef.current.get(mutationId);
@@ -229,6 +270,28 @@ export function useBoardSocket(
       }
     };
 
+    /**
+     * The snapshot carries no comments (ADR 0078), so a comment write left uncertain is
+     * settled by a fresh read of its card. An unreadable card leaves it unverified, and
+     * the user decides whether to retry.
+     */
+    const verifyComment = async (mutationId: string, msg: CommentMessage) => {
+      let present = false;
+      try {
+        // A transient failure must not settle it: "not verified" invites a resend the server then refuses as a duplicate.
+        await queryClient.fetchQuery({ ...cardCommentsQuery(msg.cardId), staleTime: 0, retry: 2 });
+        const base = reconcilerRef.current.getBaseState();
+        present = base !== null && isMutationPresentInBoardState(base, msg);
+      } catch (error) {
+        // Cancelled by a later snapshot (which verifies it again) or an access loss: stay uncertain.
+        if (isCancelledError(error)) return;
+        present = false;
+      }
+      // Settled meanwhile: retired, or answered by a later snapshot's read.
+      if (unmounted || !pendingSentMutationsRef.current.has(mutationId)) return;
+      notifyMutation(mutationId, present ? "accepted" : "verified-retry");
+    };
+
     const handleMessage = (ws: WebSocket, raw: string) => {
       let json: unknown;
       try {
@@ -259,6 +322,10 @@ export function useBoardSocket(
         invalidateDevelopmentQueries(queryClient, boardId);
       }
       if (msg.type === "activity.recorded") recordActivities(queryClient, boardId, msg.activities);
+      if (isCommentMessage(msg)) {
+        const { byCard } = commentReadsRef.current;
+        byCard.set(msg.cardId, (byCard.get(msg.cardId) ?? 0) + 1);
+      }
       if (msg.type === "snapshot") {
         setAccessState("ready");
         inTransition = false;
@@ -266,6 +333,8 @@ export function useBoardSocket(
         // while this socket was down arrives here as a fresh read, not a replay.
         invalidateDevelopmentQueries(queryClient, boardId);
         invalidateCardActivity(queryClient, boardId);
+        commentReadsRef.current.snapshots += 1;
+        void queryClient.invalidateQueries({ queryKey: ["card-comments", boardId] });
         void queryClient.invalidateQueries({ queryKey: ["board-meta-by-key"] });
         clearTimeout(stableTimer);
         stableTimer = window.setTimeout(() => {
@@ -278,6 +347,8 @@ export function useBoardSocket(
         const { cacheState: snapshotState, settledPending } = reconcilerRef.current.applySnapshot(msg);
         queryClient.setQueryData<BoardState>(boardQueryKey(boardId), snapshotState);
         for (const { entry, presentInSnapshot } of settledPending) {
+          // A subscribed comment write is also tracked as sent: it is verified below, against its card's read.
+          if (isCommentMessage(entry.msg) && mutationSubscribersRef.current.has(entry.msg.mutationId)) continue;
           if (presentInSnapshot) {
             notifyMutation(entry.msg.mutationId, "accepted");
           } else {
@@ -286,6 +357,10 @@ export function useBoardSocket(
         }
         // Check any remaining tracked mutations from disconnects/timeouts
         for (const [mutationId, sentMsg] of Array.from(pendingSentMutationsRef.current.entries())) {
+          if (isCommentMessage(sentMsg) && mutationSubscribersRef.current.has(mutationId)) {
+            void verifyComment(mutationId, sentMsg);
+            continue;
+          }
           const present = isMutationPresentInBoardState(snapshotState, sentMsg);
           if (present) {
             notifyMutation(mutationId, "accepted");
@@ -440,7 +515,7 @@ export function useBoardSocket(
         ws.close();
       }
     };
-  }, [attemptEpoch, boardId, queryClient, rollback, retry]);
+  }, [attemptEpoch, boardId, queryClient, rollback, retry, cardCommentsQuery, notifyMutation]);
 
   const sendMutation = useCallback<SendMutation>(
     (msg) => {
@@ -479,6 +554,7 @@ export function useBoardSocket(
     sendMutation,
     subscribeMutation,
     retireTrackedMutation,
+    cardCommentsQuery,
   };
 }
 

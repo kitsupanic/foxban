@@ -77,6 +77,7 @@ const CARD_PATH = "/internal/cards/:cardId";
 const WRITE_BACK_PATH = `${CARD_PATH}/write-back`;
 const CARD_DEVELOPMENT_PATH = `${CARD_PATH}/development`;
 const CARD_ACTIVITY_PATH = `${CARD_PATH}/activity`;
+const CARD_COMMENTS_PATH = `${CARD_PATH}/comments`;
 const CARD_PULL_REQUESTS_PATH = `${CARD_DEVELOPMENT_PATH}/pull-requests`;
 const CARD_BRANCHES_PATH = `${CARD_DEVELOPMENT_PATH}/branches`;
 const ATTACHMENT_KEY_PATH = "/internal/attachments/key/:attachmentId";
@@ -287,6 +288,7 @@ export const boardRoutes = {
   boardDevelopment: route({ path: BOARD_DEVELOPMENT_PATH, methods: ["GET"], gate: "open", stamp: false }),
   cardDevelopment: route({ path: CARD_DEVELOPMENT_PATH, methods: ["GET"], gate: "open", stamp: false }),
   cardActivity: route({ path: CARD_ACTIVITY_PATH, methods: ["GET"], gate: "open", stamp: false }),
+  cardComments: route({ path: CARD_COMMENTS_PATH, methods: ["GET"], gate: "open", stamp: false }),
   pullRequestWrite: bodyRoute({
     path: PULL_REQUEST_WRITE_PATH, methods: ["POST"], gate: "open", stamp: false,
     input: PullRequestWriteSchema, invalid: invalidText("invalid pull request write"),

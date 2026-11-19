@@ -164,7 +164,7 @@ export function createCommentThread(scope: AuthoredScope, env: CommentThreadEnv)
     copy: copy("reply"),
   });
   const editOp = scope.operation<EditSent>({
-    build: (mutationId, { id, body }): ClientMessage => ({ type: "comment.update", mutationId, id, body, updatedAt: Date.now() }),
+    build: (mutationId, { id, body }): ClientMessage => ({ type: "comment.update", mutationId, id, cardId: env.cardId(), body, updatedAt: Date.now() }),
     // Socket settlement can precede React rendering the peer's deletion.
     confirm: (board, { id }) => !!board?.comments.some((comment) => comment.id === id && !comment.deleted),
     // A late acceptance of an earlier attempt must not close an editor the user has kept typing in.

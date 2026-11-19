@@ -41,7 +41,7 @@ export function boardCommands(send: SendMutation, readBoard: () => BoardState | 
   };
   const cardField = <K extends "assigneeId" | "priority" | "dueDate" | "taskType">(state: BoardState, id: string, key: K) => state.cards.find(card => card.id === id)?.[key];
 
-  const empty: BoardState = { workflowRolesExplicit: false, columns: [], cards: [], archivedCards: [], checklistItems: [], attachments: [], comments: [], relations: [], labels: [], cardLabels: [] };
+  const empty: BoardState = { workflowRolesExplicit: false, columns: [], cards: [], archivedCards: [], checklistItems: [], attachments: [], comments: [], commentCounts: {}, relations: [], labels: [], cardLabels: [] };
 
   return {
     // Keys for authored creations, read from the latest unfiltered cache: a filter hides rows, it never reorders.
@@ -134,7 +134,7 @@ export function boardCommands(send: SendMutation, readBoard: () => BoardState | 
     setChecklistDone: (id: string, done: boolean): Sent => emit({ type: "checklist.update", id, done }),
     deleteChecklistItem: (id: string): Sent => emit({ type: "checklist.delete", id }),
     deleteAttachment: (id: string): Sent => emit({ type: "attachment.delete", id }),
-    deleteComment: (id: string): Sent => emit({ type: "comment.delete", id }),
+    deleteComment: (id: string, cardId: string): Sent => emit({ type: "comment.delete", id, cardId }),
   };
 }
 export type BoardCommands = ReturnType<typeof boardCommands>;

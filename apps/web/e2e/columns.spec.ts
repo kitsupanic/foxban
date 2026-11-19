@@ -21,7 +21,7 @@ test.describe("column editing and drag placement", () => {
     }));
     await page.goto(`/board/${key}`);
     await page.evaluate(async (id) => {
-      const socket = new WebSocket(`${location.origin.replace("http", "ws")}/boards/${id}/ws?realtimeVersion=12`);
+      const socket = new WebSocket(`${location.origin.replace("http", "ws")}/boards/${id}/ws?realtimeVersion=13`);
       await new Promise<void>(resolve => socket.addEventListener("message", function ready(event) {
         if (JSON.parse(event.data).type === "snapshot") { socket.removeEventListener("message", ready); resolve(); }
       }));

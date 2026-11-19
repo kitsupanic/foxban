@@ -68,6 +68,7 @@ function initialState(description = originalDescription): BoardState {
         updatedAt: 1000,
       },
     ],
+    commentCounts: { [owner.id]: 1 },
     checklistItems: [],
     relations: [],
     labels: [],
