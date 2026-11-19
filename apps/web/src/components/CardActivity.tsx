@@ -13,6 +13,21 @@ import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 
 export type ActivityView = "all" | "comments" | "history";
+
+/** The card's comments read (ADR 0078): the live count, and whether `comments` is this card's whole thread yet. */
+export type CommentsRead = { count: number; status: "pending" | "error" | "success"; retry: () => void };
+
+/**
+ * What the panel says about the comments read, outside the history tab: "loading" in place
+ * of the empty copy until it lands, and an error with Retry (never the empty copy) if it failed.
+ */
+export function commentsReadNotice(
+  status: CommentsRead["status"],
+  view: ActivityView,
+): { error: boolean; empty: "loading" | "nothing" | "copy" } {
+  if (view === "history" || status === "success") return { error: false, empty: "copy" };
+  return status === "pending" ? { error: false, empty: "loading" } : { error: true, empty: "nothing" };
+}
 export type ActivitySortOrder = "asc" | "desc";
 
 export const ACTIVITY_TABS: readonly { view: ActivityView; label: string }[] = [
@@ -30,6 +45,7 @@ export const ACTIVITY_TABS: readonly { view: ActivityView; label: string }[] = [
 export function CardActivity({
   commentThread,
   comments,
+  commentsRead,
   activities,
   members,
   me,
@@ -46,6 +62,7 @@ export function CardActivity({
   commentThread: CommentThread;
   /** This card's comments, oldest first; the live cache, not a draft. */
   comments: Comment[];
+  commentsRead: CommentsRead;
   /** This card's immutable history in server sequence order. */
   activities: Activity[];
   members: Member[];
@@ -121,15 +138,14 @@ export function CardActivity({
     }
     return oldestFirst;
   }, [activityView, comments, activities, activitySortOrder]);
-  const activeCommentCount = useMemo(
-    () => comments.filter((comment) => !comment.deleted).length,
-    [comments],
-  );
+  // The board's live count, not the cache's: the thread may still be loading.
+  const activeCommentCount = commentsRead.count;
   const activityCounts: Record<ActivityView, number> = {
     all: activeCommentCount + activities.length,
     comments: activeCommentCount,
     history: activities.length,
   };
+  const notice = commentsReadNotice(commentsRead.status, activityView);
   const emptyActivityCopy =
     activityView === "all"
       ? "No activity yet."
@@ -252,8 +268,18 @@ export function CardActivity({
         aria-labelledby={`card-activity-${activityView}-tab`}
         className="flex min-w-0 flex-col gap-2"
       >
+        {notice.error && (
+          <div role="alert" className="flex items-center justify-between gap-2 text-sm text-destructive">
+            <span>Could not load comments.</span>
+            <Button type="button" variant="outline" size="xs" onClick={commentsRead.retry}>Retry</Button>
+          </div>
+        )}
         {activityRows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{emptyActivityCopy}</p>
+          notice.empty === "loading" ? (
+            <p role="status" className="text-sm text-muted-foreground">Loading comments…</p>
+          ) : notice.empty === "copy" ? (
+            <p className="text-sm text-muted-foreground">{emptyActivityCopy}</p>
+          ) : null
         ) : (
           <div className="flex min-w-0 flex-col gap-2">
             <ul className="flex min-w-0 flex-col gap-2">

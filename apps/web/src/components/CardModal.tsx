@@ -53,7 +53,7 @@ import { CardChecklist } from "./CardChecklist";
 import { CardSubtasks } from "./CardSubtasks";
 import { CardRelations, useCardRelations } from "./CardRelations";
 import { CardLabels, useCardLabels } from "./CardLabels";
-import { CardActivity, ACTIVITY_TABS, type ActivitySortOrder, type ActivityView } from "./CardActivity";
+import { CardActivity, ACTIVITY_TABS, type ActivitySortOrder, type ActivityView, type CommentsRead } from "./CardActivity";
 import { cardDevelopmentQueryOptions, connectedReposQueryOptions, usePullRequestLink } from "../lib/card-development";
 import { TASK_TYPE_META } from "../lib/task-type";
 import { restoreFocusSoon } from "../lib/focus";
@@ -114,6 +114,7 @@ export function CardModal({
   items,
   attachments,
   comments,
+  commentsRead,
   boardAttachments,
   uploadScope,
   relations,
@@ -158,6 +159,7 @@ export function CardModal({
   uploadScope: AuthoredScope;
   /** This card's comments, oldest first; the live cache, not a draft. */
   comments: Comment[];
+  commentsRead: CommentsRead;
   /** Every relation naming this card on either side; the live cache, not a draft. */
   relations: CardRelation[];
   /**
@@ -1085,6 +1087,7 @@ export function CardModal({
     <CardActivity
       commentThread={commentThread}
       comments={comments}
+      commentsRead={commentsRead}
       activities={activities}
       members={members}
       me={me}

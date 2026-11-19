@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { isCancelledError, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   REALTIME_PROTOCOL_VERSION,
   ServerMessageSchema,
@@ -278,10 +278,13 @@ export function useBoardSocket(
     const verifyComment = async (mutationId: string, msg: CommentMessage) => {
       let present = false;
       try {
-        await queryClient.fetchQuery({ ...cardCommentsQuery(msg.cardId), staleTime: 0 });
+        // A transient failure must not settle it: "not verified" invites a resend the server then refuses as a duplicate.
+        await queryClient.fetchQuery({ ...cardCommentsQuery(msg.cardId), staleTime: 0, retry: 2 });
         const base = reconcilerRef.current.getBaseState();
         present = base !== null && isMutationPresentInBoardState(base, msg);
-      } catch {
+      } catch (error) {
+        // Cancelled by a later snapshot (which verifies it again) or an access loss: stay uncertain.
+        if (isCancelledError(error)) return;
         present = false;
       }
       // Settled meanwhile: retired, or answered by a later snapshot's read.

@@ -373,7 +373,7 @@ export function BoardView({
       ? cardForTaskKey(state.cards, meta.key, cardParam)
       : undefined;
   // The open card's comments are read on open (ADR 0078); a reconnect snapshot invalidates and rereads them.
-  useQuery({ ...cardCommentsQuery(openCard?.id ?? ""), enabled: openCard !== undefined });
+  const commentsQuery = useQuery({ ...cardCommentsQuery(openCard?.id ?? ""), enabled: openCard !== undefined });
   const columnToDelete =
     canManageColumns && columnDeleteId !== null && state
       ? state.columns.find((candidate) => candidate.id === columnDeleteId)
@@ -2024,6 +2024,11 @@ export function BoardView({
           boardAttachments={boardAttachments}
           uploadScope={authored}
           comments={cardComments(state, openCard.id)}
+          commentsRead={{
+            count: state.commentCounts[openCard.id] ?? 0,
+            status: commentsQuery.status,
+            retry: () => void commentsQuery.refetch(),
+          }}
           relations={cardRelations(state, openCard.id, activeCardIds)}
           hierarchy={hierarchy}
           labels={state.labels}

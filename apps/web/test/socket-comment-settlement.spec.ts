@@ -43,7 +43,8 @@ function fakeContainer() {
 }
 
 /** What the stubbed comments route answers next; each read is logged by card id. */
-const server = { comments: [] as Comment[], reads: [] as string[], fail: false, onRead: null as (() => void) | null };
+/** `failures`: how many reads answer 503 before the rest succeed. `gate`: held reads wait on it. */
+const server = { comments: [] as Comment[], reads: [] as string[], failures: 0, gate: null as Promise<void> | null, onRead: null as (() => void) | null };
 
 const g = globalThis as Record<string, unknown>;
 const realFetch = globalThis.fetch;
@@ -64,7 +65,11 @@ test.beforeAll(() => {
     server.reads.push(match[1]);
     const comments = server.comments;
     server.onRead?.();
-    if (server.fail) return new Response("{}", { status: 503 });
+    if (server.gate) await server.gate;
+    if (server.failures > 0) {
+      server.failures -= 1;
+      return new Response("{}", { status: 503 });
+    }
     return Response.json({ comments });
   };
 });
@@ -73,7 +78,7 @@ test.afterAll(() => {
   g.fetch = realFetch;
 });
 test.beforeEach(() => {
-  Object.assign(server, { comments: [], reads: [], fail: false, onRead: null });
+  Object.assign(server, { comments: [], reads: [], failures: 0, gate: null, onRead: null });
 });
 
 const boardId = crypto.randomUUID();
@@ -168,13 +173,44 @@ test("an uncertain edit is verified against the body the read returns", async ()
   await unmount();
 });
 
-test("a card that cannot be read leaves the write unverified rather than guessing", async () => {
+test("a read that fails once is retried, so a stored comment still settles accepted", async () => {
   const { sendSubscribed, resync, unmount } = await mount();
   const outcomes = await sendSubscribed(create());
-  server.fail = true;
+  server.failures = 1;
   server.comments = [stored];
   await resync({ [cardId]: 1 });
-  expect(outcomes).toEqual(["uncertain", "verified-retry"]);
+  await expect.poll(() => outcomes, { timeout: 5_000 }).toEqual(["uncertain", "accepted"]);
+  expect(server.reads).toEqual([cardId, cardId]);
+  await unmount();
+});
+
+test("a card that keeps failing to read leaves the write unverified rather than guessing", async () => {
+  const { sendSubscribed, resync, unmount } = await mount();
+  const outcomes = await sendSubscribed(create());
+  server.failures = Infinity;
+  server.comments = [stored];
+  await resync({ [cardId]: 1 });
+  await expect.poll(() => outcomes, { timeout: 8_000 }).toEqual(["uncertain", "verified-retry"]);
+  expect(server.reads).toHaveLength(3);
+  await unmount();
+});
+
+test("a cancelled verification read leaves the write uncertain for the next snapshot to settle", async () => {
+  const { queryClient, sendSubscribed, resync, unmount } = await mount();
+  const outcomes = await sendSubscribed(create());
+  let release!: () => void;
+  server.gate = new Promise((resolve) => (release = resolve));
+  server.comments = [stored];
+  await resync({ [cardId]: 1 });
+  expect(server.reads).toEqual([cardId]);
+  await act(() => queryClient.cancelQueries({ queryKey: ["card-comments", boardId] }));
+  server.gate = null;
+  release();
+  await wait(20);
+  expect(outcomes).toEqual(["uncertain"]);
+  // The next snapshot reads the card again and settles it.
+  await resync({ [cardId]: 1 });
+  expect(outcomes).toEqual(["uncertain", "accepted"]);
   await unmount();
 });
 
