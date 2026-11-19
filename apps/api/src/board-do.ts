@@ -86,6 +86,7 @@ import {
 import { syncBranchRoute } from "./github-branch-routes";
 import { syncPullRequestRoute } from "./github-pr-routes";
 import { boardMemberSql, canManageBoard, canOpenBoard, isAdminEmail } from "./auth";
+import { closeRevokedSockets, sessionHashOf } from "./session-revocation";
 import { generateKeyBetween } from "fractional-indexing";
 import {
   AddCommentOutputSchema,
@@ -1016,6 +1017,7 @@ export class BoardDO extends DurableObject<Env> {
     accessPrepare: ({ boardId }, input) => this.changeAccess("prepare", boardId, input),
     accessRelease: ({ boardId }, input) => this.changeAccess("release", boardId, input),
     boardDelete: ({ boardId }) => this.deleteBoard(boardId),
+    sessionRevoke: (_, input) => Response.json({ closed: closeRevokedSockets(this.ctx.getWebSockets(), input) }),
     transferReceipt: (_, input) => this.readTransferReceipt(input),
     transferAbort: (_, input) => this.abortTransfer(input),
     transferFinalize: (_, input) => this.finalizeTransfer(input),
@@ -2473,7 +2475,7 @@ export class BoardDO extends DurableObject<Env> {
       request.headers.get(INTERNAL_CAN_MANAGE_COLUMNS_HEADER) === "true";
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ userId, boardId, canManageColumns, isAdmin: access.operator, generation: after.generation, protocolVersion: REALTIME_PROTOCOL_VERSION });
+    server.serializeAttachment({ userId, boardId, canManageColumns, isAdmin: access.operator, generation: after.generation, protocolVersion: REALTIME_PROTOCOL_VERSION, sessionHash: sessionHashOf(request.headers) });
     this.send(server, this.snapshot());
     return new Response(null, { status: 101, webSocket: client });
   }

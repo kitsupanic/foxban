@@ -761,6 +761,19 @@ function commitStatements(
            AND EXISTS(SELECT 1 FROM workspace_members t WHERE t.workspace_id=? AND t.user_id=?)`,
           [workspaceId, op.actorId, workspaceId, userId],
         ),
+        // A demotion retires the workspace's admin links (ADR 0080): otherwise the demoted
+        // admin could leave and rejoin as admin through one they already hold. It runs before
+        // the role change so it can see the target is still an admin: setting a member to
+        // member is no demotion and revokes nothing.
+        ...(role === "member"
+          ? [
+              env.DB.prepare(
+                `UPDATE workspace_invites SET revoked_at=?
+                  WHERE workspace_id=? AND role='admin' AND revoked_at IS NULL
+                    AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=? AND role='admin')`,
+              ).bind(now, workspaceId, workspaceId, userId),
+            ]
+          : []),
         // The database refuses to leave the workspace without an admin even if the
         // checks above were somehow bypassed: this statement then fails the batch.
         env.DB.prepare(

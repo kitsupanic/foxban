@@ -14,7 +14,9 @@ import type { BranchWrite, PullRequestWrite } from "./development-info";
 import {
   INTERNAL_BOARD_ID_HEADER,
   INTERNAL_CAN_MANAGE_COLUMNS_HEADER,
+  INTERNAL_SESSION_HASH_HEADER,
   INTERNAL_USER_ID_HEADER,
+  upgradeHeaders,
 } from "./internal-headers";
 import { McpToolResultSchema, type McpToolResult } from "./mcp-contract";
 
@@ -91,6 +93,8 @@ export function boardClient(env: Env, boardId: string) {
     releaseAccess: (op: RouteInput<"accessRelease">, timeoutMs: number) => fence("accessRelease", { body: op, timeoutMs }),
     /** The terminal deletion of the board's content; retried after a lost response. */
     deleteBoard: (timeoutMs: number) => fence("boardDelete", { timeoutMs }),
+    /** Closes the open sockets a session revocation names (ADR 0082); true when the board answered 2xx. */
+    revokeSessions: (revocation: RouteInput<"sessionRevoke">, timeoutMs: number) => fence("sessionRevoke", { body: revocation, timeoutMs }),
 
     /** One MCP tool call, answered in the contract's shape whatever the board did. */
     async mcp(route: McpRoute, actor: { userId: string; canManageColumns: boolean }, body: unknown): Promise<McpToolResult> {
@@ -218,12 +222,14 @@ export function boardClient(env: Env, boardId: string) {
         reply<ErrorBody & { receipt?: CardTransferReceipt }>(call("transferImport", { userId, body })),
     },
 
-    /** The realtime socket: the browser's own upgrade request, passed through with the identity the Worker decided on. */
-    connect(request: Request, userId: string, canManageColumns: boolean): Promise<Response> {
-      const headers = new Headers(request.headers);
+    /** The realtime socket: the browser's own upgrade request, passed through with the identity the Worker decided on. `sessionHash` is the SHA-256 of the session id it was authenticated with (ADR 0082). */
+    connect(request: Request, userId: string, canManageColumns: boolean, sessionHash: string): Promise<Response> {
+      // No `x-foxban-*` of the browser's and no cookie: the Worker's own headers are the only identity the board gets.
+      const headers = upgradeHeaders(request);
       headers.set(INTERNAL_BOARD_ID_HEADER, boardId);
       headers.set(INTERNAL_USER_ID_HEADER, userId);
       headers.set(INTERNAL_CAN_MANAGE_COLUMNS_HEADER, canManageColumns ? "true" : "false");
+      headers.set(INTERNAL_SESSION_HASH_HEADER, sessionHash);
       return stub().fetch(new Request(request, { headers }));
     },
   };

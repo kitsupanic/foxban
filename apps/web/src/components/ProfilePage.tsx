@@ -15,7 +15,7 @@ import { Avatar } from "./Avatar";
 import { Field } from "./AuthShell";
 import { compressImage } from "../lib/compress-image";
 import { restoreFocusSoon } from "../lib/focus";
-import { Button, buttonVariants } from "./ui/button";
+import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 const profileRouteApi = getRouteApi("/profile");
 
@@ -29,9 +29,10 @@ export function ProfilePage() {
   const { github } = profileRouteApi.useSearch();
   const [emailOpen, setEmailOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
+  const [githubOpen, setGithubOpen] = useState(false);
 
   return (
-    <AppShell breadcrumb="Profile" overlayOpen={emailOpen || passwordOpen}>
+    <AppShell breadcrumb="Profile" overlayOpen={emailOpen || passwordOpen || githubOpen}>
       <div className="boards-heading">
         <div>
           <h1>Profile</h1>
@@ -68,14 +69,14 @@ export function ProfilePage() {
                   <p>Manage how you access your account.</p>
                   <div className="profile-section-body">
                     <EmailSection user={user} open={emailOpen} onOpenChange={setEmailOpen} />
-                    <PasswordSection user={user} open={passwordOpen} onOpenChange={setPasswordOpen} />
+                    <PasswordSection user={user} githubReturn={github} open={passwordOpen} onOpenChange={setPasswordOpen} />
                   </div>
                 </section>
                 <section id="profile-accounts" className="profile-panel">
                   <h2>Connected accounts</h2>
                   <p>Manage your GitHub connection.</p>
                   <div className="profile-section-body">
-                    <GitHubSection user={user} githubError={github} />
+                    <GitHubSection user={user} githubError={github === "error" || github === "taken" ? github : undefined} open={githubOpen} onOpenChange={setGithubOpen} />
                   </div>
                 </section>
               </div>
@@ -537,22 +538,36 @@ function EmailSection({
   );
 }
 
+/** The server answered a first password with 401: GitHub has not confirmed this account in this session, or its confirmation ran out (ADR 0081). */
+class GitHubConfirmationExpired extends Error {
+  constructor() {
+    super("Your GitHub confirmation has expired. Confirm with GitHub again.");
+  }
+}
+
 function PasswordSection({
   user,
+  githubReturn,
   open,
   onOpenChange,
 }: {
   user: User;
+  /** What the GitHub round trip answered when it sent the browser back here, if it did. */
+  githubReturn: "error" | "taken" | "reauthed" | "reauth-error" | undefined;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const queryClient = useQueryClient();
-  // An account made with GitHub has no password yet: it sets one without a current password (ADR 0065).
+  // An account made with GitHub has no password yet: it sets one without a current password, but only after
+  // GitHub has approved its own account again in this session (ADR 0081).
   const settingFirst = !user.hasPassword;
+  const [confirmed, setConfirmed] = useState(settingFirst && githubReturn === "reauthed");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    settingFirst && githubReturn === "reauth-error" ? "GitHub did not confirm this account. Use the GitHub account connected to it." : null,
+  );
   const [success, setSuccess] = useState<string | null>(null);
   const editorId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -564,7 +579,10 @@ function PasswordSection({
         json: settingFirst ? { newPassword } : { currentPassword, newPassword },
       });
       if (!response.ok) {
-        if (response.status === 401) throw new Error("Current password is incorrect.");
+        if (response.status === 401) {
+          if (settingFirst) throw new GitHubConfirmationExpired();
+          throw new Error("Current password is incorrect.");
+        }
         if (response.status === 429) throw new Error("Too many attempts. Try again later.");
         if (response.status === 400) throw new Error("Choose a less predictable password.");
         throw new Error("Could not update your password.");
@@ -587,14 +605,52 @@ function PasswordSection({
     onError: (err: Error) => {
       setError(err.message);
       setSuccess(null);
+      // The confirmation was spent or has run out: back to the GitHub step.
+      if (err instanceof GitHubConfirmationExpired) {
+        setConfirmed(false);
+        setNewPassword("");
+        setConfirmPassword("");
+        onOpenChange(false);
+        restoreFocusSoon(triggerRef.current);
+      }
     },
   });
+
+  // The first password starts with GitHub: the page leaves for it and comes back with `?github=reauthed`.
+  const confirmWithGitHub = useMutation({
+    mutationFn: async () => {
+      const response = await api.auth.github.reauth.$post();
+      if (!response.ok) {
+        if (response.status === 429) throw new Error("Too many attempts. Try again later.");
+        if (response.status === 503) throw new Error("GitHub is not set up yet.");
+        throw new Error("Could not reach GitHub.");
+      }
+      return (await response.json()).url;
+    },
+    onSuccess: (url) => window.location.assign(url),
+    onError: (err: Error) => setError(err.message),
+  });
+  // On success the page is leaving for GitHub: keep the button locked until it does.
+  const confirming = confirmWithGitHub.isPending || confirmWithGitHub.isSuccess;
 
   useEffect(() => {
     if (open) firstInputRef.current?.focus();
   }, [open]);
+  // Back from GitHub with the account confirmed: the form is what comes next.
+  useEffect(() => {
+    if (confirmed) onOpenChange(true);
+  }, [confirmed, onOpenChange]);
 
+  // A first password has a form only once GitHub has confirmed the account; until then the button goes to GitHub.
+  const opensForm = !settingFirst || confirmed;
   const openEditor = () => {
+    if (!opensForm) {
+      setSuccess(null);
+      setError(null);
+      confirmWithGitHub.reset();
+      confirmWithGitHub.mutate();
+      return;
+    }
     setCurrentPassword("");
     setNewPassword("");
     setConfirmPassword("");
@@ -616,26 +672,31 @@ function PasswordSection({
       <div className="profile-row">
         <div className="profile-row-identity">
           <strong>Password</strong>
-          <span>{settingFirst ? "Add a password so you can sign in without GitHub." : "Update your sign-in password."}</span>
+          <span>
+            {settingFirst
+              ? "Add a password so you can sign in without GitHub. GitHub confirms it is you first."
+              : "Update your sign-in password."}
+          </span>
         </div>
         <Button
           ref={triggerRef}
           type="button"
           variant="outline"
           className="profile-action"
-          aria-expanded={open}
-          aria-controls={editorId}
+          aria-expanded={opensForm ? open : undefined}
+          aria-controls={opensForm ? editorId : undefined}
           hidden={open}
+          disabled={confirming}
           onClick={openEditor}
         >
-          {settingFirst ? "Set a password" : "Change password"}
+          {confirming ? "Opening GitHub…" : settingFirst ? "Set a password" : "Change password"}
         </Button>
       </div>
       {open && (
         <ProfileCredentialDialog
           title={settingFirst ? "Set a password" : "Change password"}
           formLabel={settingFirst ? "Set a password" : "Change password"}
-          description={settingFirst ? "Choose a password for your Foxban account." : "Choose a new password for your Foxban account."}
+          description={settingFirst ? "GitHub confirmed it is you. Choose a password for your Foxban account." : "Choose a new password for your Foxban account."}
           formId={editorId}
           busy={updatePassword.isPending}
           onClose={closeEditor}
@@ -725,15 +786,32 @@ function PasswordSection({
           </div>
         </ProfileCredentialDialog>
       )}
+      {!open && error && <p role="alert" className="profile-status profile-status-error">{error}</p>}
       {success && <p role="status" className="profile-status profile-status-success">{success}</p>}
     </div>
   );
 }
 
-function GitHubSection({ user, githubError }: { user: User; githubError: "error" | "taken" | undefined }) {
+function GitHubSection({
+  user,
+  githubError,
+  open,
+  onOpenChange,
+}: {
+  user: User;
+  githubError: "error" | "taken" | undefined;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const queryClient = useQueryClient();
   const [success, setSuccess] = useState<string | null>(null);
   const [clearedGithubError, setClearedGithubError] = useState(false);
+  // An account with a password proves it before the link starts (ADR 0081); one without has nothing to prove.
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const editorId = useId();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const firstInputRef = useRef<HTMLInputElement>(null);
 
   const disconnect = useMutation({
     mutationFn: async () => {
@@ -750,6 +828,59 @@ function GitHubSection({ user, githubError }: { user: User; githubError: "error"
       setSuccess(null);
     },
   });
+
+  const link = useMutation({
+    mutationFn: async () => {
+      const response = await api.auth.github.link.$post({ json: user.hasPassword ? { currentPassword } : {} });
+      if (!response.ok) {
+        if (response.status === 401) throw new Error("Current password is incorrect.");
+        if (response.status === 429) throw new Error("Too many attempts. Try again later.");
+        if (response.status === 503) throw new Error("GitHub is not set up yet.");
+        throw new Error("Could not connect GitHub.");
+      }
+      return (await response.json()).url;
+    },
+    onSuccess: (url) => {
+      setCurrentPassword("");
+      window.location.assign(url);
+    },
+    onError: (err: Error) => {
+      setLinkError(err.message);
+    },
+  });
+  // On success the page is leaving for GitHub: keep the form locked until it does.
+  const linking = link.isPending || link.isSuccess;
+
+  useEffect(() => {
+    if (open) firstInputRef.current?.focus();
+  }, [open]);
+
+  const startLink = () => {
+    setSuccess(null);
+    setClearedGithubError(true);
+    setLinkError(null);
+    setCurrentPassword("");
+    link.reset();
+    if (user.hasPassword) onOpenChange(true);
+    else link.mutate();
+  };
+  const closeEditor = () => {
+    if (linking) return;
+    setCurrentPassword("");
+    setLinkError(null);
+    onOpenChange(false);
+    restoreFocusSoon(triggerRef.current);
+  };
+
+  // While the dialog is open it shows a link error itself.
+  const errorMessage =
+    disconnect.error?.message ??
+    (open ? null : linkError) ??
+    (githubError && !clearedGithubError
+      ? githubError === "taken"
+        ? "That GitHub account is already linked to another foxban account."
+        : "GitHub connection failed."
+      : null);
 
   return (
     <div className="profile-field profile-github">
@@ -790,31 +921,66 @@ function GitHubSection({ user, githubError }: { user: User; githubError: "error"
               {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
             </Button>
           ) : (
-            <a
-              href="/auth/github/start"
-              onClick={() => {
-                setSuccess(null);
-                setClearedGithubError(true);
-              }}
-              className={buttonVariants({ className: "profile-action" })}
+            <Button
+              ref={triggerRef}
+              type="button"
+              className="profile-action"
+              aria-expanded={user.hasPassword ? open : undefined}
+              aria-controls={user.hasPassword ? editorId : undefined}
+              hidden={open}
+              disabled={linking}
+              onClick={startLink}
             >
-              Connect GitHub
-            </a>
+              {linking && !user.hasPassword ? "Connecting…" : "Connect GitHub"}
+            </Button>
           )}
         </div>
       </div>
       {user.githubLogin && !user.hasPassword && (
         <p className="profile-hint">Set a password before disconnecting GitHub, so you can still sign in.</p>
       )}
-      {((githubError && !clearedGithubError) || disconnect.error) && (
-        <p role="alert" className="profile-status profile-status-error">
-          {disconnect.error
-            ? disconnect.error.message
-            : githubError === "taken"
-              ? "That GitHub account is already linked to another foxban account."
-              : "GitHub connection failed."}
-        </p>
+      {open && (
+        <ProfileCredentialDialog
+          title="Connect GitHub"
+          formLabel="Connect GitHub"
+          description="Enter your current password to connect GitHub."
+          formId={editorId}
+          busy={linking}
+          onClose={closeEditor}
+          onSubmit={(event) => {
+            event.preventDefault();
+            setLinkError(null);
+            link.mutate();
+          }}
+        >
+          <Field label="Current password">
+            <Input
+              ref={firstInputRef}
+              type="password"
+              required
+              maxLength={PASSWORD_MAX_LENGTH}
+              autoComplete="current-password"
+              className="profile-control"
+              disabled={linking}
+              value={currentPassword}
+              onChange={(event) => {
+                setLinkError(null);
+                setCurrentPassword(event.target.value);
+              }}
+            />
+          </Field>
+          {linkError && <p role="alert" className="profile-status profile-status-error">{linkError}</p>}
+          <div className="profile-editor-actions">
+            <Button type="button" variant="outline" className="profile-action" disabled={linking} onClick={closeEditor}>
+              Cancel
+            </Button>
+            <Button type="submit" className="profile-action" disabled={linking}>
+              {linking ? "Connecting…" : "Connect GitHub"}
+            </Button>
+          </div>
+        </ProfileCredentialDialog>
       )}
+      {errorMessage && <p role="alert" className="profile-status profile-status-error">{errorMessage}</p>}
       {success && <p role="status" className="profile-status profile-status-success">{success}</p>}
     </div>
   );

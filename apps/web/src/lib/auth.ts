@@ -28,3 +28,12 @@ export const meQuery = queryOptions({
   // Fetched once and then only after an explicit invalidation (login/logout).
   staleTime: "static",
 });
+
+/**
+ * A realtime socket was closed with `SESSION_REVOKED_CLOSE`: the server ended this session (a sign-out
+ * or a password change elsewhere, ADR 0082). Leave the way a sign-out does. Nothing here can reconnect, and
+ * a full load drops every cache and lets `/login` read the session again.
+ */
+export function leaveRevokedSession(): void {
+  window.location.assign("/login");
+}

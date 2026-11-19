@@ -25,6 +25,8 @@ import {
   toAuthUser,
   toSessionUser,
   BOARD_SELECT_COLS,
+  recheckSessionAfterUpgrade,
+  requestSessionHash,
   boardManageSql,
   boardMemberIdsSql,
   boardOpenSql,
@@ -51,7 +53,7 @@ import {
   userAvatarObjectKey,
   parseAvatarObjectKey,
 } from "./attachment-lifecycle";
-import { INTERNAL_IS_ADMIN_HEADER, INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
+import { INTERNAL_IS_ADMIN_HEADER, INTERNAL_SESSION_HASH_HEADER, INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER, upgradeHeaders } from "./internal-headers";
 import { boardClient } from "./board-client";
 import { boardDestination, boardSource, run as runCardTransfer } from "./card-transfer";
 import type { WriteBackCard } from "./board-api";
@@ -1132,14 +1134,15 @@ const app = new Hono<AppEnv>()
   // unauthorized plain request gets 401/403 rather than 426.
   // Realtime protocol version is verified after auth and membership but before DO
   // stub access to prevent stale/incompatible clients from scanning DO SQLite rows.
-  .get("/boards/:id/ws", requireAuth, requireMember, (c) => {
+  .get("/boards/:id/ws", requireAuth, requireMember, async (c) => {
     if (c.req.query("realtimeVersion") !== REALTIME_PROTOCOL_VERSION) {
       return c.json({ error: "realtime client update required" }, 409);
     }
     const board = c.get("board");
-    return boardClient(c.env, board.id).connect(c.req.raw, c.get("user").id, board.capabilities.canManageColumns);
+    const response = await boardClient(c.env, board.id).connect(c.req.raw, c.get("user").id, board.capabilities.canManageColumns, await requestSessionHash(c));
+    return recheckSessionAfterUpgrade(c, response, board.id);
   })
-  .get("/presence/ws", requireAuth, (c) => {
+  .get("/presence/ws", requireAuth, async (c) => {
     if (c.req.query("realtimeVersion") !== REALTIME_PROTOCOL_VERSION) {
       return c.json({ error: "realtime client update required" }, 409);
     }
@@ -1154,16 +1157,13 @@ const app = new Hono<AppEnv>()
     }
 
     const stub = c.env.PRESENCE_DO.get(c.env.PRESENCE_DO.idFromName("global"));
-    const headers = new Headers(c.req.raw.headers);
+    // The client's `x-foxban-*` headers and its cookie are dropped before the trusted ones are set.
+    const headers = upgradeHeaders(c.req.raw);
     headers.set(INTERNAL_USER_ID_HEADER, user.id);
-    // Always set: the client's own headers are copied, so a forged one must be overwritten.
+    headers.set(INTERNAL_SESSION_HASH_HEADER, await requestSessionHash(c));
     headers.set(INTERNAL_IS_ADMIN_HEADER, isAdminEmail(c.env, user.email) ? "true" : "false");
-    if (effectiveTz) {
-      headers.set(INTERNAL_TIMEZONE_HEADER, effectiveTz);
-    } else {
-      headers.delete(INTERNAL_TIMEZONE_HEADER);
-    }
-    return stub.fetch(new Request(c.req.raw, { headers }));
+    if (effectiveTz) headers.set(INTERNAL_TIMEZONE_HEADER, effectiveTz);
+    return recheckSessionAfterUpgrade(c, await stub.fetch(new Request(c.req.raw, { headers })), null);
   })
   // Development info (ADR 0064) for the card fronts: every card's pull requests in one read, with no GitHub call and no polling.
   .get("/boards/:id/development", requireAuth, requireMember, async (c) => c.json(await boardClient(c.env, c.get("board").id).boardDevelopment()))

@@ -9,7 +9,7 @@ class FakeSocket {
   static last: FakeSocket | null = null;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor(readonly url: string) {
     FakeSocket.count += 1;
@@ -43,7 +43,7 @@ test.afterAll(() => {
 });
 
 const wait = (ms: number) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
-const closeLatest = () => act(async () => FakeSocket.last!.onclose?.());
+const closeLatest = () => act(async () => FakeSocket.last!.onclose?.({ code: 1006 }));
 const goOnline = () => act(async () => void g.dispatchEvent(new Event("online")));
 
 test("presence restarts on online only after it gave up, and not after unmount", async () => {

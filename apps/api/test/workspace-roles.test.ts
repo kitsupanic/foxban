@@ -468,6 +468,41 @@ describe("an invitation is only as good as the admin who issued it", () => {
     expect(await roleOf(workspace, kept)).toBeNull();
   });
 
+  it("does not let a demoted admin leave and rejoin as admin through another admin's link", async () => {
+    const creator = await person();
+    const demoted = await person();
+    const workspace = await createWorkspace(creator);
+    const { token } = await invite(creator, workspace);
+    const memberLink = await invite(creator, workspace, "member");
+    expect((await accept(demoted, workspace, token)).status).toBe(200);
+    expect(await roleOf(workspace, demoted)).toBe("admin");
+
+    expect((await setRole(creator, workspace, demoted, "member")).status).toBe(200);
+    expect((await removeMember(demoted, workspace, demoted)).status).toBe(200);
+
+    const accepted = await accept(demoted, workspace, token);
+    expect(accepted.status).toBe(400);
+    expect(await accepted.json()).toEqual(UNAVAILABLE);
+    expect(await roleOf(workspace, demoted)).toBeNull();
+    // Member links survive a demotion: they hand back nothing that was taken away.
+    expect(await listedIds(creator, workspace)).toEqual([memberLink.id]);
+  });
+
+  it("leaves another admin's admin link usable when a member is set to member, which is no demotion", async () => {
+    const creator = await person();
+    const peer = await person();
+    const newcomer = await person();
+    const workspace = await createWorkspace(creator);
+    await add(creator, workspace, peer, "member");
+    const { id, token } = await invite(creator, workspace);
+
+    expect((await setRole(creator, workspace, peer, "member")).status).toBe(200);
+
+    expect(await listedIds(creator, workspace)).toEqual([id]);
+    expect((await accept(newcomer, workspace, token)).status).toBe(200);
+    expect(await roleOf(workspace, newcomer)).toBe("admin");
+  });
+
   it("refuses the invite of an admin who was removed, to anyone", async () => {
     const creator = await person();
     const gone = await person();
@@ -490,7 +525,8 @@ describe("an invitation is only as good as the admin who issued it", () => {
     const newcomer = await person();
     const workspace = await createWorkspace(creator);
     await add(creator, workspace, issuer, "admin");
-    const { id, token } = await invite(issuer, workspace);
+    // A member link: the issuer's demotion revokes their admin links outright (ADR 0080).
+    const { id, token } = await invite(issuer, workspace, "member");
     expect(await listedIds(creator, workspace)).toEqual([id]);
     expect((await inspect(newcomer, workspace, token)).status).toBe(200);
 
@@ -506,7 +542,7 @@ describe("an invitation is only as good as the admin who issued it", () => {
     expect((await inspect(newcomer, workspace, token)).status).toBe(200);
     const accepted = await accept(newcomer, workspace, token);
     expect(accepted.status).toBe(200);
-    expect(await roleOf(workspace, newcomer)).toBe("admin");
+    expect(await roleOf(workspace, newcomer)).toBe("member");
   });
 
   /**
