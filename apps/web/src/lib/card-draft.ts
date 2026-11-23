@@ -278,7 +278,6 @@ export function createCardDraft(scope: AuthoredScope, env: CardDraftEnv, seed: {
   };
 }
 
-export type CardDraftCore = ReturnType<typeof createCardDraft>;
 
 export function useCardDraft(
   scope: AuthoredScope,
@@ -327,4 +326,3 @@ export function useCardDraft(
   return { ...state, ...actions, current: getState };
 }
 
-export type CardDraft = ReturnType<typeof useCardDraft>;

@@ -226,7 +226,11 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
     }
 
     for (const [boardId, items] of attachmentItemsByBoard) {
-      if (!(await boardClient(env, boardId).reconcileAttachments(items))) failures.add(boardId);
+      try {
+        if (!(await boardClient(env, boardId).reconcileAttachments(items))) failures.add(boardId);
+      } catch {
+        failures.add(boardId);
+      }
     }
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor !== undefined);
@@ -329,11 +333,7 @@ async function checkGitHubWrite(c: Context<AppEnv>, cardContext: WriteBackCard, 
   const currentBoard = await findAccessibleBoard(c.env, c.get("user"), board.id);
   if (!currentBoard) return c.json({ error: "forbidden" } as const, 403);
   if (currentBoard.pendingAccessChange) {
-    c.header("Retry-After", "2");
-    return c.json(
-      { code: "access_change_pending", error: "Board access is changing. Please retry." } as const,
-      503,
-    );
+    return accessPendingResponse();
   }
   if (
     currentBoard.accessVersion !== board.accessVersion ||
@@ -930,14 +930,15 @@ const app = new Hono<AppEnv>()
     const operationId=typeof body.operationId==="string"&&z.string().uuid().safeParse(body.operationId).success?body.operationId:crypto.randomUUID();
     try{
       const resumed=await resolveAccessChangeAttempt(c.env,actor,operationId,"board-member-remove",{boardId:board.id,userId:targetUserId});
-      if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,resumed.result===ACCESS_CHANGE_ABORT.forbidden?403:404):c.json({ok:true} as const);}
-      if(targetUserId===board.ownerId)return c.json({error:"board owner cannot be removed"} as const,403);
+      if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?404:403):c.json({ok:true} as const);}
+      // The owner's row goes only once they are out of the board's workspace (ADR 0087); the reservation and the commit assert it again.
+      if(targetUserId===board.ownerId&&await c.env.DB.prepare("SELECT 1 AS present FROM workspace_members WHERE workspace_id=? AND user_id=?").bind(board.workspaceId,targetUserId).first())return c.json({error:"board owner cannot be removed"} as const,403);
       if(targetUserId===actor.id)return c.json({error:"cannot remove self from board"} as const,403);
       // A board manager is removed only by someone who manages the board (the reservation and the commit assert it again).
       if(!board.capabilities.canManageBoard&&await c.env.DB.prepare("SELECT 1 AS present FROM board_members WHERE board_id=? AND user_id=? AND role='manager'").bind(board.id,targetUserId).first())return c.json({error:"forbidden"} as const,403);
       const result=await runAccessChange(c.env,actor,{operationId,kind:"board-member-remove",payload:{boardId:board.id,userId:targetUserId},workspaceIds:[board.workspaceId],boards:[{boardId:board.id,workspaceId:board.workspaceId}]});
       if(result.state!=="completed")return c.json(result,202);
-      if(result.outcome==="aborted")return c.json({error:result.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,result.result===ACCESS_CHANGE_ABORT.forbidden?403:404);
+      if(result.outcome==="aborted")return c.json({error:result.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,result.result===ACCESS_CHANGE_ABORT.boardNotFound?404:403);
       return c.json({ok:true} as const);
     }catch(e){if(e instanceof AccessChangeConflict)return c.json(ACCESS_CONFLICT,409);throw e;}
   })

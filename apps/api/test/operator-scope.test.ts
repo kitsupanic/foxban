@@ -177,6 +177,17 @@ describe("an instance Admin who is also a workspace admin", () => {
   });
 });
 
+describe("an instance Admin who is a plain workspace member", () => {
+  it("counts the same boards in the workspace read as in the list, not the Private ones they were not added to", async () => {
+    const { owner, operator, team, open } = await scene();
+    await addMember(owner, team, operator, "member");
+
+    expect((await workspacesOf(operator)).find((item) => item.id === team)).toMatchObject({ access: "member", role: "member", boardCount: 1 });
+    expect(await boardIdsOf(operator, `?workspaceId=${team}`)).toEqual([open]);
+    expect(await (await get(`/workspaces/${team}`, operator.cookie)).json()).toMatchObject({ workspace: { id: team, access: "member", boardCount: 1 } });
+  });
+});
+
 describe("GET /boards", () => {
   it("lists only what the viewer has as a member or a Guest, an Admin included", async () => {
     const { owner, member, guest, stranger, operator, guestOperator, open, hidden } = await scene();

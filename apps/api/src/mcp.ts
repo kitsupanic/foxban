@@ -65,7 +65,7 @@ function forbiddenHttp(): Response {
   });
 }
 
-function originAllowed(request: Request, env: Env): boolean {
+export function originAllowed(request: Request, env: Env): boolean {
   const origin = request.headers.get("origin");
   if (origin === null) return true;
   if (origin === "null" || origin.includes(",")) return false;

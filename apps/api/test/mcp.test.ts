@@ -783,6 +783,59 @@ describe("MCP transport", () => {
     }
   });
 
+  it("filters list_tasks by state, assignee, column and query across pages", async () => {
+    const { board, token, userId } = await fixture();
+    const columnId = crypto.randomUUID();
+    const otherColumnId = crypto.randomUUID();
+    await seedColumn(board.id, columnId, userId);
+    await seedColumn(board.id, otherColumnId, userId);
+    const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board.id));
+    await runInDurableObject(stub, (_instance, state) => {
+      // [id, column, title, assignee, archived]
+      const rows: Array<[string, string, string, string | null, number | null]> = [
+        ["f1", columnId, "Fix login", "alice", null],
+        ["f2", columnId, "fix LOGOUT", "bob", null],
+        ["f3", otherColumnId, "Fix cache", "alice", null],
+        ["f4", columnId, "Fix old", "alice", 5],
+        ["f5", columnId, "Docs", null, null],
+      ];
+      rows.forEach(([id, col, title, assignee, archivedAt], index) => {
+        state.storage.sql.exec(
+          `INSERT INTO cards(id, column_id, title, description, position, task_number, subtask_done,
+             task_type, priority, assignee_id, due_date, created_at, updated_at, archived_at)
+           VALUES (?, ?, ?, '', ?, ?, 0, 'task', 'medium', ?, NULL, 1, 1, ?)`,
+          id, col, title, `a${index}`, index + 1, assignee, archivedAt,
+        );
+      });
+    });
+    const client = new Client({ name: "filters-test", version: "1.0.0" });
+    await client.connect(transport(token));
+    try {
+      const ids = async (args: Record<string, unknown>): Promise<string[]> => {
+        const out: string[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 10; page += 1) {
+          const result = await client.callTool({
+            name: "list_tasks",
+            arguments: { board: { id: board.id }, limit: 1, ...args, ...(cursor ? { cursor } : {}) },
+          });
+          const data = (result.structuredContent as { data: { items: Array<{ id: string }>; nextCursor: string | null } }).data;
+          out.push(...data.items.map((item) => item.id));
+          if (!data.nextCursor) return out;
+          cursor = data.nextCursor;
+        }
+        throw new Error("did not terminate");
+      };
+      expect(await ids({ state: "active", query: "FIX", columnId, assigneeId: "alice" })).toEqual(["f1"]);
+      expect(await ids({ state: "archived" })).toEqual(["f4"]);
+      expect(await ids({ state: "all", assigneeId: "alice" })).toEqual(["f1", "f3", "f4"]);
+      expect(await ids({ state: "active", assigneeId: null })).toEqual(["f5"]);
+      expect(await ids({ state: "active", columnId: otherColumnId })).toEqual(["f3"]);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("keeps filtered task matches and escaped comments across bounded pages", async () => {
     const { board, token, userId } = await fixture();
     const columnId = crypto.randomUUID();

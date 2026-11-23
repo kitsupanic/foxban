@@ -200,7 +200,6 @@ export const McpCommandRequestSchema = z.strictObject({
   board: McpBoardIdentitySchema,
   command: McpCommandSchema,
 });
-export type McpCommandRequest = z.infer<typeof McpCommandRequestSchema>;
 
 export const McpTaskListRequestSchema = z.strictObject({
   board: McpBoardIdentitySchema,

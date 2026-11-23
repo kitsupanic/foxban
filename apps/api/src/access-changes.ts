@@ -261,6 +261,13 @@ function managerRemovalGuard(ops: number): string {
 }
 
 /**
+ * The board's creator is still a member of its workspace (ADR 0087). Their `board_members` row is
+ * removed like anyone's once they are not. Binds: board, target.
+ */
+const OWNER_IN_WORKSPACE = `EXISTS(SELECT 1 FROM boards ob JOIN workspace_members ow ON ow.workspace_id=ob.workspace_id AND ow.user_id=ob.owner_id
+  WHERE ob.id=? AND ob.owner_id=?)`;
+
+/**
  * Who may remove a member: an admin may remove anyone, and any member may remove
  * themselves, which is how a member leaves. Binds: workspace, actor, target.
  */
@@ -674,8 +681,10 @@ function commitStatements(
           op.id,
         ),
         env.DB.prepare(
-          `INSERT OR IGNORE INTO board_members(board_id,user_id,role) VALUES(?,?,'member')`,
-        ).bind(boardId, payload.ownerId as string),
+          // The owner keeps a seat only if they are in the destination: a removed creator is not re-granted (ADR 0087).
+          `INSERT OR IGNORE INTO board_members(board_id,user_id,role)
+           SELECT ?,?,'member' WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)`,
+        ).bind(boardId, payload.ownerId as string, destination, payload.ownerId as string),
         ...(payload.grantManager
           ? [
               env.DB.prepare(
@@ -802,6 +811,11 @@ function commitStatements(
           workspaceId,
           userId,
         ),
+        // The creator's own row, written when they made the board, is no guest grant: it goes with the
+        // membership, or they would keep every board they created (ADR 0087). Other grants stay.
+        env.DB.prepare(
+          `DELETE FROM board_members WHERE user_id=? AND board_id IN (SELECT id FROM boards WHERE workspace_id=? AND owner_id=?)`,
+        ).bind(userId, workspaceId, userId),
         // A removal (not a self-leave) retires the workspace's invite links (ADR 0079): they are
         // multi-use, so the removed member could rejoin with the one they already used.
         ...(op.actorId !== userId
@@ -876,7 +890,7 @@ function commitStatements(
         preparedAck,
         assertion(
           env,
-          `${boardAccessPredicate("?", ops)}${op.kind === "board-member-remove" ? ` AND NOT EXISTS(SELECT 1 FROM boards b WHERE b.id=? AND b.owner_id=?) AND ${managerRemovalGuard(ops)}` : ""}`,
+          `${boardAccessPredicate("?", ops)}${op.kind === "board-member-remove" ? ` AND NOT ${OWNER_IN_WORKSPACE} AND ${managerRemovalGuard(ops)}` : ""}`,
           op.kind === "board-member-remove"
             ? [...permissionBinds, boardId, userId, boardId, userId, ...permissionBinds]
             : permissionBinds,
@@ -1471,7 +1485,7 @@ function authorityAssertions(
       return [
         assertion(
           env,
-          `${boardPermission} AND NOT EXISTS(SELECT 1 FROM boards o WHERE o.id=? AND o.owner_id=?) AND ${managerRemovalGuard(ops)}`,
+          `${boardPermission} AND NOT ${OWNER_IN_WORKSPACE} AND ${managerRemovalGuard(ops)}`,
           [boardId, actor.id, actor.id, actor.id, boardId, payload.userId as string, boardId, payload.userId as string, boardId, actor.id, actor.id, actor.id],
         ),
       ];

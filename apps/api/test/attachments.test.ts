@@ -1372,7 +1372,7 @@ describe("scheduled attachment and avatar reconciliation", () => {
     expect(await env.ATTACHMENTS.head(orphanAvatarKey)).toBeNull();
   });
 
-  it("keeps reconciling later pages when a board refuses an earlier one, then fails once at the end", async () => {
+  it.each(["refuses", "throws"])("keeps reconciling later pages when a board %s on an earlier one, then fails once at the end", async (how) => {
     const [refusing, serving] = ["board-sweep-refusing", "board-sweep-serving"];
     const keys = [refusing, serving].map((board) => `${board}/${crypto.randomUUID()}`);
     let pages = 0;
@@ -1389,6 +1389,7 @@ describe("scheduled attachment and avatar reconciliation", () => {
         get: (name: string) => ({
           fetch: async (...args: Parameters<DurableObjectStub["fetch"]>) => {
             reached.push(name);
+            if (name === refusing && how === "throws") throw new Error("board unreachable");
             return name === refusing
               ? new Response("access is changing", { status: 503 })
               : env.BOARD_DO.get(env.BOARD_DO.idFromName(name)).fetch(...args);

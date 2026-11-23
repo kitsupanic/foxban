@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import { PASSWORD, createBoard, generateAccountInvite, inviteLinkFor, mintedInviteToken, openAccountInvites, openBoardList, openPersonalWorkspace, signup, submitSignup, uniqueEmail } from "./helpers";
+import { PASSWORD, createBoard, generateAccountInvite, inviteLinkFor, revokeButtonFor, mintedInvite, openAccountInvites, openBoardList, openPersonalWorkspace, signup, submitSignup, uniqueEmail } from "./helpers";
 
 /** The signup form's message for a missing, unknown or already-used invite. */
 const REFUSED = "This signup needs a valid invite link. Ask an admin for a new one.";
@@ -8,6 +8,7 @@ type Admin = {
   page: Page;
   link: string;
   token: string;
+  id: string;
 };
 
 /** Registers an admin (an `@admin.test` address from the pool `.dev.vars` lists) and mints one link. */
@@ -15,23 +16,27 @@ async function adminWithInviteLink(browser: Browser, suffix: string): Promise<Ad
   const context = await browser.newContext();
   const page = await context.newPage();
   await signup(page, uniqueEmail(suffix), "Invite Admin");
-  const { link, token } = await generateAccountInvite(page);
-  return { page, link, token };
+  const { link, token, id } = await generateAccountInvite(page);
+  return { page, link, token, id };
 }
 const fixtureDates = {
   oldUse: Date.UTC(2024, 0, 2),
   newUse: Date.UTC(2025, 6, 14),
 };
+// ADR 0085: the list carries the hash as `id` and an expiry, never a token.
+const week = 7 * 24 * 60 * 60 * 1000;
+const fixtureInvite = (id: string, createdAt: number, usedBy: string | null = null, usedAt: number | null = null) =>
+  ({ id, createdAt, expiresAt: createdAt + week, usedBy, usedAt });
 const usedFixtures = [
-  { token: "used-older", createdAt: Date.UTC(2025, 11, 1), usedBy: "user-1", usedAt: fixtureDates.oldUse },
-  { token: "used-newer", createdAt: Date.UTC(2023, 1, 1), usedBy: "user-2", usedAt: fixtureDates.newUse },
-  { token: "used-unknown", createdAt: Date.UTC(2026, 1, 1), usedBy: "user-3", usedAt: null },
+  fixtureInvite("used-older", Date.UTC(2025, 11, 1), "user-1", fixtureDates.oldUse),
+  fixtureInvite("used-newer", Date.UTC(2023, 1, 1), "user-2", fixtureDates.newUse),
+  fixtureInvite("used-unknown", Date.UTC(2026, 1, 1), "user-3", null),
 ];
 
 test("account invite fixtures render populated, active-empty, and completely empty states", async ({ page }) => {
   let fixture = [
-    { token: "active-old", createdAt: Date.UTC(2024, 4, 1), usedBy: null, usedAt: null },
-    { token: "active-new-one", createdAt: Date.UTC(2025, 4, 1), usedBy: null, usedAt: null },
+    fixtureInvite("active-old", Date.UTC(2024, 4, 1)),
+    fixtureInvite("active-new-one", Date.UTC(2025, 4, 1)),
     ...usedFixtures,
   ];
   await page.route("**/invites", async (route) => {
@@ -44,7 +49,12 @@ test("account invite fixtures render populated, active-empty, and completely emp
   await signup(page, uniqueEmail("invites-fixtures"), "Invite Fixture Admin");
   const main = await openAccountInvites(page);
   await expect(main.getByRole("heading", { name: "Active links 2" })).toBeVisible();
-  await expect(main.getByRole("textbox", { name: "Invite link for active-n" })).toHaveValue(/active-new-one$/);
+  // The server keeps no token, so a listed link is never rendered: only its dates and Revoke are.
+  await expect(main.getByRole("button", { name: "Revoke invite active-n", exact: true })).toBeVisible();
+  await expect(main.getByRole("button", { name: "Revoke invite active-o", exact: true })).toBeVisible();
+  await expect(main.getByText("Link not kept")).toHaveCount(2);
+  await expect(main.getByRole("textbox")).toHaveCount(0);
+  await expect(main.getByText(`expires ${new Intl.DateTimeFormat(undefined, { year: "numeric", month: "long", day: "numeric" }).format(Date.UTC(2025, 4, 1) + week)}`)).toBeVisible();
   await expect(main.getByText("No active invite links")).toHaveCount(0);
   await expect(main.getByRole("heading", { name: "Invite history 3" })).toBeVisible();
   const historyRows = main.locator(".account-invites-timeline li");
@@ -71,24 +81,38 @@ test("account invite fixtures render populated, active-empty, and completely emp
 
 test("invite page keeps content through recoverable request and clipboard failures", async ({ page }) => {
   let getCalls = 0;
+  let generateFails = true;
+  const retainedInvite = fixtureInvite("retained-active", Date.UTC(2025, 1, 1));
+  const madeInvite = fixtureInvite("clipboard-made", Date.now());
+  const madeToken = "clipboard-made-token";
   await page.route("**/invites", async (route) => {
     if (route.request().resourceType() !== "fetch") return route.continue();
     if (route.request().method() === "GET") {
       getCalls += 1;
       if (getCalls <= 4) return route.fulfill({ status: 500, json: { error: "synthetic list failure" } });
-      return route.fulfill({ json: { invites: [{ token: "retained-active", createdAt: Date.UTC(2025, 1, 1), usedBy: null, usedAt: null }] } });
+      return route.fulfill({ json: { invites: generateFails ? [retainedInvite] : [madeInvite, retainedInvite] } });
     }
-    if (route.request().method() === "POST") return route.fulfill({ status: 500, json: { error: "synthetic generation failure" } });
+    if (route.request().method() === "POST") {
+      if (generateFails) return route.fulfill({ status: 500, json: { error: "synthetic generation failure" } });
+      return route.fulfill({ json: { ...madeInvite, token: madeToken } });
+    }
     return route.continue();
   });
   await signup(page, uniqueEmail("invites-recovery"), "Invite Recovery Admin");
   await page.getByRole("link", { name: "Account invites" }).filter({ visible: true }).click();
   await expect(page.getByRole("alert")).toHaveText("Could not load invites.");
   await page.getByRole("button", { name: "Try again" }).click();
-  const retained = page.getByRole("textbox", { name: "Invite link for retained" });
+  // A listed row has no link (ADR 0085), so the row itself is what must survive.
+  const retained = page.getByRole("button", { name: "Revoke invite retained", exact: true });
   await expect(retained).toBeVisible();
   await page.getByRole("button", { name: "Generate invite link" }).click();
   await expect(page.getByRole("alert")).toHaveText("Could not generate an invite link.");
+  await expect(retained).toBeVisible();
+
+  // Copy needs a link, which only a successful generation in this tab provides.
+  generateFails = false;
+  await page.getByRole("button", { name: "Generate invite link" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Invite link generated." })).toBeVisible();
   await expect(retained).toBeVisible();
 
   await page.evaluate(() => {
@@ -97,9 +121,9 @@ test("invite page keeps content through recoverable request and clipboard failur
       value: { writeText: async () => { throw new Error("clipboard unavailable"); } },
     });
   });
-  await page.getByRole("button", { name: "Copy invite link for retained" }).click();
+  await page.getByRole("button", { name: "Copy invite link for clipboar", exact: true }).click();
   await expect(page.getByText("Invite link copied to clipboard")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Copy invite link for retained" })).toHaveText(/Copy link/);
+  await expect(page.getByRole("button", { name: "Copy invite link for clipboar", exact: true })).toHaveText(/Copy link/);
 });
 
 test("generating before the initial invite list loads keeps the returned link after the stale response", async ({ page }) => {
@@ -107,11 +131,13 @@ test("generating before the initial invite list loads keeps the returned link af
   const initialRelease = Promise.withResolvers<void>();
   const initialFinished = Promise.withResolvers<void>();
   const refreshRelease = Promise.withResolvers<void>();
-  const token = "generated-before-initial-list";
+  const id = "generated-before-initial-list";
+  const token = "token-of-generated-before-initial-list";
+  const generated = { id, createdAt: Date.now(), expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 };
   let getCalls = 0;
   await page.route("**/invites", async (route) => {
     if (route.request().resourceType() !== "fetch") return route.continue();
-    if (route.request().method() === "POST") return route.fulfill({ json: { token } });
+    if (route.request().method() === "POST") return route.fulfill({ json: { ...generated, token } });
     if (route.request().method() !== "GET") return route.continue();
     getCalls += 1;
     if (getCalls === 1) {
@@ -122,7 +148,7 @@ test("generating before the initial invite list loads keeps the returned link af
       return;
     }
     await refreshRelease.promise;
-    return route.fulfill({ json: { invites: [{ token, createdAt: Date.now(), usedBy: null, usedAt: null }] } });
+    return route.fulfill({ json: { invites: [{ ...generated, usedBy: null, usedAt: null }] } });
   });
   await signup(page, uniqueEmail("invites-initial-race"), "Invite Race Admin");
   await page.getByRole("link", { name: "Account invites" }).filter({ visible: true }).click();
@@ -133,7 +159,7 @@ test("generating before the initial invite list loads keeps the returned link af
   initialRelease.resolve();
   await initialFinished.promise;
 
-  const returnedLink = page.getByRole("textbox", { name: `Invite link for ${token.slice(0, 8)}`, exact: true });
+  const returnedLink = page.getByRole("textbox", { name: `Invite link for ${id.slice(0, 8)}`, exact: true });
   await expect(returnedLink).toHaveValue(`${new URL(page.url()).origin}/signup?invite=${token}`);
   await expect.poll(() => getCalls).toBe(2);
   await expect(page.getByRole("button", { name: "Generating…" })).toBeDisabled();
@@ -163,7 +189,7 @@ test("invite mutation locks survive navigation until generation and revocation s
     await postRelease.promise;
     await route.fulfill({ response });
   });
-  const minted = mintedInviteToken(page);
+  const minted = mintedInvite(page);
   await main.getByRole("button", { name: "Generate invite link" }).click();
   await postReached.promise;
   await page.getByRole("link", { name: "Profile", exact: true }).click();
@@ -171,13 +197,16 @@ test("invite mutation locks survive navigation until generation and revocation s
   await expect(remountedAfterPost.getByRole("button", { name: "Generate invite link" })).toBeDisabled();
   await expect(remountedAfterPost.getByRole("button", { name: /^Revoke invite/ }).first()).toBeDisabled();
   postRelease.resolve();
-  const token = await minted;
-  await expect(inviteLinkFor(page, token)).toBeVisible();
+  const { id } = await minted;
+  // The generating page unmounted while the POST was held, so its one-time link is gone (ADR 0085):
+  // the row still lands, as a listed invite without a link.
+  await expect(revokeButtonFor(page, id)).toBeVisible();
+  await expect(inviteLinkFor(page, id)).toHaveCount(0);
   await expect(remountedAfterPost.getByRole("button", { name: "Generate invite link" })).toBeEnabled();
   const deleteReached = Promise.withResolvers<void>();
   const deleteRelease = Promise.withResolvers<void>();
   let deleteHeld = false;
-  await page.route(`**/invites/${token}`, async (route) => {
+  await page.route(`**/invites/${id}`, async (route) => {
     if (deleteHeld) {
       await route.fallback();
       return;
@@ -188,17 +217,17 @@ test("invite mutation locks survive navigation until generation and revocation s
     await deleteRelease.promise;
     await route.fulfill({ response });
   });
-  await page.getByRole("button", { name: `Revoke invite ${token.slice(0, 8)}` }).click();
+  await revokeButtonFor(page, id).click();
   await deleteReached.promise;
   await page.getByRole("link", { name: "Profile", exact: true }).click();
   const remountedAfterDelete = await openAccountInvites(page);
   await expect(remountedAfterDelete.getByRole("button", { name: "Generate invite link" })).toBeDisabled();
   await expect(remountedAfterDelete.getByRole("button", { name: /^Revoke invite/ }).first()).toBeDisabled();
   deleteRelease.resolve();
-  await expect(inviteLinkFor(page, token)).toHaveCount(0);
+  await expect(revokeButtonFor(page, id)).toHaveCount(0);
   await expect(remountedAfterDelete.getByRole("button", { name: "Generate invite link" })).toBeEnabled();
-  await page.getByRole("button", { name: `Revoke invite ${seeded.token.slice(0, 8)}` }).click();
-  await expect(inviteLinkFor(page, seeded.token)).toHaveCount(0);
+  await revokeButtonFor(page, seeded.id).click();
+  await expect(revokeButtonFor(page, seeded.id)).toHaveCount(0);
 });
 
 test("account invites is a reloadable admin workspace route with guarded direct access", async ({ browser }) => {
@@ -262,11 +291,12 @@ test("an admin's invite link registers one plain user and is then spent", async 
   await openPersonalWorkspace(guest);
   await expect(guest.getByRole("heading", { name: "Boards", exact: true })).toBeVisible();
 
-  // The consumed token is inert on the admin's side: listed, but no link to copy.
+  // The consumed token is inert on the admin's side: listed, but no link to copy or revoke.
   await admin.page.reload();
   const invitesDialog = await openAccountInvites(admin.page);
   await expect(invitesDialog.getByText("Used", { exact: true }).first()).toBeVisible();
-  await expect(inviteLinkFor(admin.page, admin.token)).toHaveCount(0);
+  await expect(inviteLinkFor(admin.page, admin.id)).toHaveCount(0);
+  await expect(revokeButtonFor(admin.page, admin.id)).toHaveCount(0);
 
   await admin.page.context().close();
   await guestContext.close();
@@ -300,13 +330,12 @@ test("a revoked invite link is refused", async ({ browser }) => {
   const admin = await adminWithInviteLink(browser, "invites-revoke");
 
   // The fresh row is the first one, so its Revoke is the first one too.
-  await admin.page
-    .getByRole("button", { name: `Revoke invite ${admin.token.slice(0, 8)}` })
-    .click();
+  await revokeButtonFor(admin.page, admin.id).click();
   await expect(
     admin.page.getByRole("status").filter({ hasText: "Invite revoked." }),
   ).toHaveText("Invite revoked.");
-  await expect(inviteLinkFor(admin.page, admin.token)).toHaveCount(0);
+  await expect(inviteLinkFor(admin.page, admin.id)).toHaveCount(0);
+  await expect(revokeButtonFor(admin.page, admin.id)).toHaveCount(0);
 
   const guestContext = await browser.newContext();
   const guest = await guestContext.newPage();
@@ -351,7 +380,7 @@ test("a plain user gets no invites section and cannot sign up without a link", a
   await guestContext.close();
 });
 
-test("pending invites have distinct token-qualified accessible names and copy reannounces after reversion", async ({
+test("pending invites have distinct id-qualified accessible names and copy reannounces after reversion", async ({
   browser,
 }) => {
   const context = await browser.newContext({
@@ -363,15 +392,15 @@ test("pending invites have distinct token-qualified accessible names and copy re
 
   await expect(page.getByRole("heading", { name: "Account invites" })).toBeVisible();
   await expect(page.getByText("loading invites…")).toHaveCount(0);
-  const { link: link1, token: token1 } = await generateAccountInvite(page);
-  const { link: link2, token: token2 } = await generateAccountInvite(page);
+  const { link: link1, id: id1 } = await generateAccountInvite(page);
+  const { link: link2, id: id2 } = await generateAccountInvite(page);
 
-  expect(token1).not.toBe(token2);
-  const short1 = token1.slice(0, 8);
-  const short2 = token2.slice(0, 8);
+  expect(id1).not.toBe(id2);
+  const short1 = id1.slice(0, 8);
+  const short2 = id2.slice(0, 8);
   expect(short1).not.toBe(short2);
 
-  // Prove at least two pending invite inputs have distinct accessible names tied to their own token
+  // Prove at least two pending invite inputs have distinct accessible names tied to their own invite id
   const input1 = page.getByRole("textbox", { name: `Invite link for ${short1}`, exact: true });
   const input2 = page.getByRole("textbox", { name: `Invite link for ${short2}`, exact: true });
   await expect(input1).toBeVisible();
@@ -381,7 +410,7 @@ test("pending invites have distinct token-qualified accessible names and copy re
   await expect(input1).toHaveValue(link1);
   await expect(input2).toHaveValue(link2);
 
-  // Distinct Copy and Revoke controls tied to each token
+  // Distinct Copy and Revoke controls tied to each invite id
   const copy1 = page.getByRole("button", { name: `Copy invite link for ${short1}` });
   const copy2 = page.getByRole("button", { name: `Copy invite link for ${short2}` });
   await expect(copy1).toHaveAccessibleName(`Copy invite link for ${short1}`);
@@ -434,16 +463,16 @@ test("a failed revoke preserves actionable alert while row remains and clears it
   browser,
 }) => {
   const admin = await adminWithInviteLink(browser, "invites-fail-revoke");
-  const { page, token } = admin;
+  const { page, id } = admin;
 
   // 1. Still-present-row server failure: DELETE fails with 500, but GET still returns the row.
-  await page.route(`**/invites/${token}`, (route) => {
+  await page.route(`**/invites/${id}`, (route) => {
     if (route.request().method() === "DELETE") {
       return route.fulfill({ status: 500, json: { error: "Database unavailable" } });
     }
     return route.continue();
   });
-  const shortToken = token.slice(0, 8);
+  const shortToken = id.slice(0, 8);
   const revokeBtn = page.getByRole("button", { name: `Revoke invite ${shortToken}` });
   await revokeBtn.click();
 
@@ -455,7 +484,7 @@ test("a failed revoke preserves actionable alert while row remains and clears it
   ).toBeVisible();
 
   // 2. Disappeared-target revoke: route DELETE failure plus GET response without that token.
-  await page.unroute(`**/invites/${token}`);
+  await page.unroute(`**/invites/${id}`);
 
   await page.route("**/invites*", async (route) => {
     if (route.request().method() === "DELETE") {
@@ -463,10 +492,10 @@ test("a failed revoke preserves actionable alert while row remains and clears it
     }
     if (route.request().method() === "GET") {
       const response = await route.fetch();
-      const json = (await response.json()) as { invites: Array<{ token: string }> };
+      const json = (await response.json()) as { invites: Array<{ id: string }> };
       return route.fulfill({
         json: {
-          invites: json.invites.filter((inv) => inv.token !== token),
+          invites: json.invites.filter((inv) => inv.id !== id),
         },
       });
     }
@@ -482,5 +511,33 @@ test("a failed revoke preserves actionable alert while row remains and clears it
   await expect(page.getByRole("alert")).toHaveCount(0);
 
   await page.unroute("**/invites*");
+  await page.context().close();
+});
+
+test("a generated link is shown once: after a reload the row has no link, only Revoke", async ({ browser }) => {
+  const admin = await adminWithInviteLink(browser, "invites-shown-once");
+  const { page, id } = admin;
+
+  // The server list never carries a token (ADR 0085).
+  const listed = await page.request.get("/invites");
+  expect(listed.status()).toBe(200);
+  const { invites } = (await listed.json()) as { invites: Array<Record<string, unknown>> };
+  const row = invites.find((invite) => invite.id === id);
+  expect(row).toBeDefined();
+  expect(row).not.toHaveProperty("token");
+  expect(typeof row?.expiresAt).toBe("number");
+  expect(JSON.stringify(invites)).not.toContain(admin.token);
+
+  await page.reload();
+  const main = await openAccountInvites(page);
+  await expect(revokeButtonFor(page, id)).toBeVisible();
+  await expect(inviteLinkFor(page, id)).toHaveCount(0);
+  await expect(main.getByText("Link not kept").first()).toBeVisible();
+
+  // The unseen link still works until revoked: revoking goes by id.
+  await revokeButtonFor(page, id).click();
+  await expect(main.getByRole("status").filter({ hasText: "Invite revoked." })).toBeVisible();
+  await expect(revokeButtonFor(page, id)).toHaveCount(0);
+
   await page.context().close();
 });

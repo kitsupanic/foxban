@@ -83,11 +83,15 @@ export type BoardAccessFacts = {
   workspaceRole: string | null | undefined;
 };
 
-/** The board-open rule of ADR 0066, in TS. `boardOpenSql` is the same rule in SQL. */
+/**
+ * The board-open rule of ADR 0066 as amended by 0087, in TS. `boardOpenSql` is the same rule in SQL.
+ * The creator opens only while still a member of the board's workspace (`workspaceRole`), as they manage
+ * only then; one who was removed or left keeps only what a `board_members` row gives any guest.
+ */
 export function canOpenBoard(f: BoardAccessFacts): boolean {
   return (
     f.operator ||
-    f.owner ||
+    (f.owner && f.workspaceRole != null) ||
     f.explicitRole != null ||
     f.workspaceRole === "admin" ||
     (f.accessMode === "workspace" && f.workspaceRole != null)
@@ -97,18 +101,18 @@ export function canOpenBoard(f: BoardAccessFacts): boolean {
 /**
  * Manage rights (ADR 0066), in TS. `boardManageSql` is the same rule in SQL. The creator
  * and an explicit board manager manage only while still a member of the board's workspace
- * (`workspaceRole`): one who was removed or left keeps the open right (`canOpenBoard`) but
- * not the manage right.
+ * (`workspaceRole`): one who was removed or left and still has a `board_members` row opens
+ * the board (`canOpenBoard`) but does not manage it.
  */
 export function canManageBoard(f: BoardAccessFacts): boolean {
   return f.operator || ((f.owner || f.explicitRole === "manager") && f.workspaceRole != null) || f.workspaceRole === "admin";
 }
 
 /**
- * The board-open rule of ADR 0066 as one SQL condition: the viewer owns `board`,
- * has a board_members row on it, is an admin of its workspace, or is a member of
- * its workspace while it is a Workspace board. Every query that decides who opens
- * a board builds its condition here, so the rule has one copy.
+ * The board-open rule of ADR 0066 (creator term amended by 0087) as one SQL condition: the viewer
+ * has a board_members row on `board`, or is a member of its workspace who owns it, administers it,
+ * or reaches it while it is a Workspace board. Every query that decides who opens a board builds
+ * its condition here, so the rule has one copy.
  *
  * `board` is the boards alias in scope. `viewer` is a SQL expression for the user
  * id (`?` or a column); it appears 3 times, so `?` takes 3 binds of the same id.
@@ -116,9 +120,8 @@ export function canManageBoard(f: BoardAccessFacts): boolean {
  * differ on purpose about when an instance Admin counts, so each passes its own.
  */
 export function boardOpenSql(board: string, viewer: string, operator?: string): string {
-  return `(${operator ? `${operator} OR ` : ""}${board}.owner_id=${viewer}
-    OR EXISTS(SELECT 1 FROM board_members open_bm WHERE open_bm.board_id=${board}.id AND open_bm.user_id=${viewer})
-    OR EXISTS(SELECT 1 FROM workspace_members open_wm WHERE open_wm.workspace_id=${board}.workspace_id AND open_wm.user_id=${viewer} AND (${board}.access_mode='workspace' OR open_wm.role='admin')))`;
+  return `(${operator ? `${operator} OR ` : ""}EXISTS(SELECT 1 FROM board_members open_bm WHERE open_bm.board_id=${board}.id AND open_bm.user_id=${viewer})
+    OR EXISTS(SELECT 1 FROM workspace_members open_wm WHERE open_wm.workspace_id=${board}.workspace_id AND open_wm.user_id=${viewer} AND (${board}.access_mode='workspace' OR open_wm.role='admin' OR ${board}.owner_id=${viewer})))`;
 }
 
 /**
@@ -466,23 +469,29 @@ export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Spends `invite` and inserts the user in one D1 batch, so a token is never spent without its user nor a
- * user created without a token: the UPDATE claims the token only while it is unspent, and the INSERT's
- * EXISTS sees that claim only if it landed. Resolves false when the invite was not spendable. A failing
+ * user created without a token: the UPDATE claims the token only while it is unspent and its creator is still
+ * a configured admin (ADR 0085), and the INSERT's EXISTS sees that claim only if it landed. The table holds
+ * only the token's hash. Resolves false when the invite was not spendable, whatever the reason. A failing
  * INSERT (duplicate email or GitHub id) throws, and the batch rolls the claim back with it.
  */
 export async function createUserWithInvite(
-  db: D1Database,
+  env: Env,
   invite: string,
   user: { id: string; email: string; name: string; passwordHash: string; githubLogin?: string; githubUserId?: number },
   now: number,
 ): Promise<boolean> {
-  const [claim] = await db.batch([
-    db.prepare("UPDATE invites SET used_by = ?, used_at = ? WHERE token = ? AND used_at IS NULL AND created_at > ?").bind(user.id, now, invite, now - INVITE_TTL_MS),
-    db.prepare(
+  const tokenHash = await sha256Hex(invite);
+  const [claim] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE invites SET used_by = ?, used_at = ?
+        WHERE token_hash = ? AND used_at IS NULL AND created_at > ?
+          AND EXISTS (SELECT 1 FROM users creator WHERE creator.id = invites.created_by AND creator.email IN (SELECT value FROM json_each(?)))`,
+    ).bind(user.id, now, tokenHash, now - INVITE_TTL_MS, JSON.stringify(adminEmails(env))),
+    env.DB.prepare(
       `INSERT INTO users (id, email, name, password_hash, created_at, github_login, github_user_id)
        SELECT ?, ?, ?, ?, ?, ?, ?
-        WHERE EXISTS (SELECT 1 FROM invites WHERE token = ? AND used_by = ? AND used_at = ?)`,
-    ).bind(user.id, user.email, user.name, user.passwordHash, now, user.githubLogin ?? null, user.githubUserId ?? null, invite, user.id, now),
+        WHERE EXISTS (SELECT 1 FROM invites WHERE token_hash = ? AND used_by = ? AND used_at = ?)`,
+    ).bind(user.id, user.email, user.name, user.passwordHash, now, user.githubLogin ?? null, user.githubUserId ?? null, tokenHash, user.id, now),
   ]);
   return claim?.meta.changes === 1;
 }
@@ -516,7 +525,7 @@ export async function signUpWithGitHub(
   const userId = crypto.randomUUID();
   try {
     const created = await createUserWithInvite(
-      env.DB,
+      env,
       invite,
       { id: userId, email, name: account.login, passwordHash: NO_PASSWORD_HASH, githubLogin: account.login, githubUserId: account.id },
       Date.now(),

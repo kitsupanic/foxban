@@ -29,6 +29,19 @@ function seedCard(sql: SqlStorage, id: string, taskNumber: number): void {
 const count = (sql: SqlStorage, table: string) => sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n;
 
 describe("mutation pipeline", () => {
+  it("refuses a second equivalent card link, in either direction", () =>
+    onBoard((sql, run) => {
+      seedCard(sql, "c1", 1);
+      seedCard(sql, "c2", 2);
+      const link = (id: string, source: string, target: string, kind: string) => ({ type: "relation.create", mutationId: `m-${id}`, id, sourceCardId: source, targetCardId: target, kind });
+      run(link("r1", "c1", "c2", "blocks"));
+      expect(() => run(link("r2", "c1", "c2", "blocks"))).toThrow("already linked");
+      expect(() => run(link("r3", "c2", "c1", "blocks"))).toThrow("already linked");
+      run(link("r4", "c1", "c2", "relates"));
+      expect(() => run(link("r5", "c2", "c1", "relates"))).toThrow("already linked");
+      expect(count(sql, "card_relations")).toBe(2);
+    }));
+
   it("keeps comment authorship to the socket's own user", () =>
     onBoard((sql, run) => {
       seedCard(sql, "c1", 1);

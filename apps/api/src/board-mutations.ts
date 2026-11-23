@@ -415,7 +415,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       const archivedCards = sql
         .exec<ArchivedCardRow>(`${ARCHIVED_CARD_SELECT} WHERE column_id = ? AND archived_at = ?`, message.id, now)
         .toArray()
-        .map((row) => ({ ...row, subtaskDone: isCompleted(sql, row.columnId) }));
+        .map((row) => ({ ...row, subtaskDone: row.subtaskDone === 1 }));
 
       sql.exec("DELETE FROM columns WHERE id = ?", message.id);
       syncAutoRoles(sql);
@@ -861,6 +861,20 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
       if (message.sourceCardId === message.targetCardId) throw new Error("a card cannot be linked to itself");
       requireLiveCard(sql, message.sourceCardId);
       requireLiveCard(sql, message.targetCardId);
+      // Same equivalence as the web's alreadyLinked: same kind, same pair, either direction.
+      if (
+        sql
+          .exec(
+            `SELECT 1 FROM card_relations WHERE kind = ?
+                AND ((source_card_id = ? AND target_card_id = ?) OR (source_card_id = ? AND target_card_id = ?))`,
+            message.kind,
+            message.sourceCardId,
+            message.targetCardId,
+            message.targetCardId,
+            message.sourceCardId,
+          )
+          .toArray().length > 0
+      ) throw new Error("These cards are already linked.");
       sql.exec(
         "INSERT INTO card_relations(id, source_card_id, target_card_id, kind) VALUES (?, ?, ?, ?)",
         message.id,

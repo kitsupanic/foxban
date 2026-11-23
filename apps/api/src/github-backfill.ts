@@ -24,7 +24,9 @@ import { extractTaskKeys } from "./task-keys";
  * retries with growing delay and then gives up. Re-running a repo after a partial run is safe because every write is idempotent.
  */
 const WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** Branch names are tiny, so they page at 100. A page of 100 PRs can pass the 2 MiB response cap (measured 2.28 MB), so PRs page at 30. */
 const PER_PAGE = 100;
+const PR_PER_PAGE = 30;
 const LEASE_MS = 2 * 60 * 1000;
 const RETRY_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -41,6 +43,8 @@ const OPS_CEILING = 900;
 const MAX_PR_COST = 2 + 20;
 /** Hard caps per repo (pages per list, and keyed PRs or branches loaded), so one repo's worst case stays inside the budget's headroom. shortcut: past these the oldest items are skipped, upgrade to a resumable cursor if real repos hit them. */
 const MAX_PAGES = 10;
+/** The same 1000 PRs per list as before, at 30 per page. */
+const MAX_PR_PAGES = 34;
 const MAX_KEYED = 100;
 
 /** A drain's running subrequest count and its ceiling (a parameter of `drainBackfill` so a test can make it small). */
@@ -86,6 +90,7 @@ const holdUntil = (env: Env, repoId: number, at: number, refund = false) =>
 
 /** The few fields of a list item that decide whether it is in the window or names a key; the rest is the event matcher's. */
 const ListedPullRequestSchema = z.object({
+  number: z.number().int(),
   title: z.string(),
   body: z.string().nullish(),
   updated_at: z.string(),
@@ -94,12 +99,21 @@ const ListedPullRequestSchema = z.object({
 });
 
 async function backfillPullRequests(env: Env, token: string, repo: { id: number; fullName: string }, cutoff: number, budget: Budget): Promise<void> {
+  // PRs linked by hand have no key in their text: the routing table is how the webhook finds them, so it is how the repair does (one read for the repo).
+  reserve(budget, 1);
+  const { results: routes } = await env.DB.prepare(
+    "SELECT DISTINCT r.pr_number AS number FROM github_pr_routes r JOIN boards b ON b.id = r.board_id WHERE r.repo_id = ?",
+  )
+    .bind(repo.id)
+    .all<{ number: number }>();
+  budget.ops += 1;
+  const routed = new Set(routes.map((route) => route.number));
   let keyed = 0;
   for (const state of ["open", "closed"] as const) {
     let pastWindow = false;
-    for (let page = 1; page <= MAX_PAGES && !pastWindow; page++) {
+    for (let page = 1; page <= MAX_PR_PAGES && !pastWindow; page++) {
       reserve(budget, 1);
-      const items = await listPullRequestsPage(env.GITHUB_API_BASE, token, repo.fullName, state, page, PER_PAGE);
+      const items = await listPullRequestsPage(env.GITHUB_API_BASE, token, repo.fullName, state, page, PR_PER_PAGE);
       budget.ops += 1;
       for (const item of items) {
         const listed = ListedPullRequestSchema.safeParse(item);
@@ -113,7 +127,7 @@ async function backfillPullRequests(env: Env, token: string, repo: { id: number;
           }
           if (!(Date.parse(pr.closed_at ?? "") >= cutoff)) continue;
         }
-        if (extractTaskKeys([pr.head.ref, pr.title, pr.body]).length === 0) continue;
+        if (!routed.has(pr.number) && extractTaskKeys([pr.head.ref, pr.title, pr.body]).length === 0) continue;
         if (++keyed > MAX_KEYED) return;
         reserve(budget, MAX_PR_COST);
         try {
@@ -123,7 +137,7 @@ async function backfillPullRequests(env: Env, token: string, repo: { id: number;
           if (!(error instanceof z.ZodError)) throw error;
         }
       }
-      if (items.length < PER_PAGE) break;
+      if (items.length < PR_PER_PAGE) break;
     }
   }
 }
@@ -137,13 +151,24 @@ async function backfillBranches(env: Env, token: string, repo: { id: number; ful
     names.push(...listed);
     if (listed.length < PER_PAGE) break;
   }
+  // A linked branch keeps its board even when its name holds no key, or the key of another board (a transferred card): the routing table, as for webhooks.
+  const { results: routes } = await env.DB.prepare(
+    "SELECT r.branch_name AS name, r.board_id AS boardId FROM github_branch_routes r JOIN boards b ON b.id = r.board_id WHERE r.repo_id = ?",
+  )
+    .bind(repo.id)
+    .all<{ name: string; boardId: string }>();
+  budget.ops += 1;
+  const routed = new Map<string, string[]>();
+  for (const { name, boardId } of routes) routed.set(name, [...(routed.get(name) ?? []), boardId]);
   // One D1 read for every board a branch name could mean, not one per branch.
-  const mentions = names.map((name) => ({ name, keys: extractTaskKeys([name]) })).filter(({ keys }) => keys.length > 0);
+  // A routed branch GitHub no longer lists is still read: a lost delete webhook leaves it on the card, and the 404 clears it.
+  const mentions = [...new Set([...names, ...routed.keys()])].map((name) => ({ name, keys: extractTaskKeys([name]) })).filter(({ name, keys }) => keys.length > 0 || routed.has(name));
   const boards = await boardsByKey(env, mentions.flatMap(({ keys }) => keys.map((key) => key.boardKey)));
   budget.ops += 1;
   let read = 0;
   for (const { name, keys } of mentions) {
     const named = namedBoards(boards.filter((board) => keys.some((key) => key.boardKey === board.boardKey)), keys);
+    for (const boardId of routed.get(name) ?? []) if (!named.has(boardId)) named.set(boardId, []);
     if (named.size === 0) continue;
     if (++read > MAX_KEYED) return;
     // One read of the branch, then one call to each board.

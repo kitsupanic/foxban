@@ -228,7 +228,6 @@ export function createSubtaskComposer(scope: AuthoredScope, env: SubtaskComposer
   };
 }
 
-export type SubtaskComposerCore = ReturnType<typeof createSubtaskComposer>;
 
 export function useSubtaskComposer(scope: AuthoredScope, live: { cardId: string; isSubtask: boolean; placeTail: (done: boolean) => string }) {
   const latest = useRef(live);

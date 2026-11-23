@@ -120,6 +120,8 @@ describe("member directory current access", () => {
   it("keeps owner and operator access when the directory has no member rows", async () => {
     const { board, member, token, owner } = await fixture(false);
     await env.DB.prepare("UPDATE boards SET owner_id=? WHERE id=?").bind(member.id, board.id).run();
+    // A creator opens the board only as a member of its workspace (ADR 0087): outside it they need a row.
+    await env.DB.prepare("INSERT INTO workspace_members(workspace_id,user_id,role,created_at,updated_at) VALUES(?,?,'member',0,0)").bind(board.workspaceId, member.id).run();
     await env.DB.prepare("DELETE FROM board_members WHERE board_id=?").bind(board.id).run();
     for (const cookie of [member.cookie, owner.cookie]) {
       const response = await request(`/boards/${board.id}/members`, cookie);
@@ -128,9 +130,8 @@ describe("member directory current access", () => {
       const candidates = await request(`/boards/${board.id}/membership-candidates`, cookie);
       expect(candidates.status).toBe(200);
       const body = await candidates.json<{ candidates: Array<{ id: string }> }>();
-      // The board's workspace is the owner's own: only its members are offered, not the board's new owner,
-      // and the new owner is no member of that workspace (a Guest), so is offered nobody.
-      expect(body.candidates.map((candidate) => candidate.id)).toEqual(cookie === owner.cookie ? [owner.id] : []);
+      // Both are members of the board's workspace and hold no board row, so both are offered.
+      expect(body.candidates.map((candidate) => candidate.id).sort()).toEqual([owner.id, member.id].sort());
       for (const candidate of body.candidates) {
         expect(Object.keys(candidate).sort()).toEqual(["avatarVersion", "email", "githubLogin", "id", "name"]);
       }

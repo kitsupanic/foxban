@@ -56,8 +56,8 @@ describe("the webhook endpoint's signature check", () => {
     expect(unsigned.status).toBe(401);
   });
 
-  it("refuses a body over GitHub's 25 MB cap before reading it, however it is announced", async () => {
-    const big = "a".repeat(25 * 1024 * 1024 + 1);
+  it("refuses a body over the 5 MB cap before reading it, however it is announced", async () => {
+    const big = "a".repeat(5 * 1024 * 1024 + 1);
     const headers = { "x-github-event": "ping", "x-hub-signature-256": await signature(big) };
     // Declared: the Content-Length alone is enough.
     expect((await request("POST", "/webhooks/github", { body: big, headers: { ...headers, "content-length": String(big.length) } })).status).toBe(413);

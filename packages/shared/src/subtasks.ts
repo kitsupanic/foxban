@@ -131,7 +131,7 @@ export function buildSubtaskHierarchy(
 }
 
 /** Root plus every active descendant in deterministic hierarchy order. */
-export function subtaskSubtreeIds(
+function subtaskSubtreeIds(
   hierarchy: Pick<SubtaskHierarchy, "childrenByParent">,
   rootId: string,
 ): string[] {

@@ -190,9 +190,9 @@ describe("backfill after the App is installed", () => {
 
   it("asks for open PRs and for closed PRs newest-update-first, and stops paging at the 30-day cutoff", async () => {
     const board = await newBoard(1);
-    // 130 closed PRs inside the window (two pages and a bit), then old ones that must never be paged to.
+    // 70 closed PRs inside the window (two full pages of 30 and a bit), then old ones that must never be paged to.
     fake.pulls = [
-      ...Array.from({ length: 130 }, (_, index): FakePull => ({
+      ...Array.from({ length: 70 }, (_, index): FakePull => ({
         number: 1000 + index,
         title: index === 0 ? `${board.key}-1 newest` : "chore",
         state: "closed",
@@ -207,15 +207,15 @@ describe("backfill after the App is installed", () => {
         closed: daysAgo(40),
       })),
     ];
-    // 150 open PRs: no window applies to them, so all of them are listed.
-    fake.pulls.push(...Array.from({ length: 150 }, (_, index): FakePull => ({ number: 9000 + index, title: "open", state: "open", updated: daysAgo(100 + index) })));
+    // 70 open PRs: no window applies to them, so all of them are listed.
+    fake.pulls.push(...Array.from({ length: 70 }, (_, index): FakePull => ({ number: 9000 + index, title: "open", state: "open", updated: daysAgo(100 + index) })));
 
     await install();
     await backfillDone();
 
-    expect(fake.pullRequests.filter((call) => call.startsWith("open"))).toEqual(["open page 1 updated desc", "open page 2 updated desc"]);
-    // Page 1 is all in the window, page 2 crosses the cutoff: page 3 is never requested.
-    expect(fake.pullRequests.filter((call) => call.startsWith("closed"))).toEqual(["closed page 1 updated desc", "closed page 2 updated desc"]);
+    expect(fake.pullRequests.filter((call) => call.startsWith("open"))).toEqual(["open page 1 updated desc", "open page 2 updated desc", "open page 3 updated desc"]);
+    // Pages 1 and 2 are all in the window, page 3 crosses the cutoff: page 4 is never requested.
+    expect(fake.pullRequests.filter((call) => call.startsWith("closed"))).toEqual(["closed page 1 updated desc", "closed page 2 updated desc", "closed page 3 updated desc"]);
     expect(await prNumbers(board)).toEqual([1000]);
   });
 
@@ -420,7 +420,7 @@ describe("a repo too big for one drain's subrequests", () => {
   const queue = async () => (await env.DB.prepare("SELECT repo_id AS id, attempts, run_after AS at FROM github_backfill_queue ORDER BY repo_id").all<{ id: number; attempts: number; at: number }>()).results;
 
   it("is held like a failure and dropped after five attempts, and the repos behind it still run", async () => {
-    // Seven full pages of open PRs, a ceiling of six subrequests: the repo never fits. The small repo behind it needs five.
+    // Many full pages of open PRs, a ceiling of eight subrequests: the repo never fits. The small repo behind it needs seven.
     fake.pulls = Array.from({ length: 650 }, (_, index): FakePull => ({ number: index + 1, title: "open", state: "open", updated: daysAgo(100 + index / 100), repo: REPO_NAME }));
     const SMALL_ID = 102;
     // Storage is shared between tests: start from an empty queue, not the previous test's held repo.
@@ -431,23 +431,23 @@ describe("a repo too big for one drain's subrequests", () => {
     ]);
     await enqueueBackfill(env, [REPO_ID, SMALL_ID]);
 
-    await drainBackfill(env, 6);
+    await drainBackfill(env, 8);
     const [big, small] = await queue();
     expect(big).toMatchObject({ id: REPO_ID, attempts: 1 });
     // Held with the failure delay, not due now: it cannot be claimed first again.
     expect(big.at).toBeGreaterThan(Date.now() + 4 * 60_000);
     expect(small).toMatchObject({ id: SMALL_ID, attempts: 0, at: 0 });
 
-    await drainBackfill(env, 6);
+    await drainBackfill(env, 8);
     expect(await queue()).toEqual([expect.objectContaining({ id: REPO_ID, attempts: 1 })]);
 
     for (const attempts of [2, 3, 4]) {
       await env.DB.exec("UPDATE github_backfill_queue SET run_after = 0");
-      await drainBackfill(env, 6);
+      await drainBackfill(env, 8);
       expect(await queue()).toEqual([expect.objectContaining({ id: REPO_ID, attempts })]);
     }
     await env.DB.exec("UPDATE github_backfill_queue SET run_after = 0");
-    await drainBackfill(env, 6);
+    await drainBackfill(env, 8);
     expect(await queue()).toEqual([]);
   });
 
@@ -460,10 +460,10 @@ describe("a repo too big for one drain's subrequests", () => {
       { id: SMALL_ID, fullName: `${OWNER}/small`, private: false },
     ]);
     await enqueueBackfill(env, [REPO_ID, SMALL_ID]);
-    // The small repo goes first and uses five of the six subrequests; the big one then runs out through no fault of its own.
+    // The small repo goes first and uses seven of the eight subrequests; the big one then runs out through no fault of its own.
     await env.DB.exec(`UPDATE github_backfill_queue SET queued_at = 1 WHERE repo_id = ${SMALL_ID}`);
 
-    await drainBackfill(env, 6);
+    await drainBackfill(env, 8);
     expect(await queue()).toEqual([expect.objectContaining({ id: REPO_ID, attempts: 0 })]);
   });
 });

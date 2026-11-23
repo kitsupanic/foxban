@@ -9,6 +9,7 @@ import {
   INVITE_TTL_MS,
   requireAdmin,
   requireAuth,
+  sha256Hex,
   type AppEnv,
 } from "./auth";
 import {
@@ -25,22 +26,26 @@ const GITHUB_APP_MANIFEST_STATE_COOKIE = "github_app_manifest_state";
 
 export const adminRouter = new Hono<AppEnv>()
   // Invites are global signup grants, not board invitations (those live under
-  // /boards/:id/members), and only an admin ever sees or mints one.
+  // /boards/:id/members), and only an admin ever sees or mints one. The table holds each token's
+  // hash (ADR 0085), so the raw token and its link exist only in the response that mints it; a row
+  // is named by its hash (`id`).
   .get("/invites", requireAuth, requireAdmin, async (c) => {
     const { results } = await c.env.DB.prepare(
-      `SELECT token, created_at AS createdAt, used_by AS usedBy, used_at AS usedAt
+      `SELECT token_hash AS id, created_at AS createdAt, created_at + ${INVITE_TTL_MS} AS expiresAt, used_by AS usedBy, used_at AS usedAt
          FROM invites
         WHERE used_at IS NOT NULL OR created_at > ?
         ORDER BY created_at DESC, rowid DESC`,
-    ).bind(Date.now() - INVITE_TTL_MS).all<{ token: string; createdAt: number; usedBy: string | null; usedAt: number | null }>();
+    ).bind(Date.now() - INVITE_TTL_MS).all<{ id: string; createdAt: number; expiresAt: number; usedBy: string | null; usedAt: number | null }>();
     return c.json({ invites: results });
   })
   .post("/invites", requireAuth, requireAdmin, async (c) => {
     const token = createInviteToken();
-    await c.env.DB.prepare("INSERT INTO invites (token, created_by, created_at) VALUES (?, ?, ?)")
-      .bind(token, c.get("user").id, Date.now())
+    const id = await sha256Hex(token);
+    const createdAt = Date.now();
+    await c.env.DB.prepare("INSERT INTO invites (token_hash, created_by, created_at) VALUES (?, ?, ?)")
+      .bind(id, c.get("user").id, createdAt)
       .run();
-    return c.json({ token }, 201);
+    return c.json({ id, token, createdAt, expiresAt: createdAt + INVITE_TTL_MS }, 201);
   })
   // The instance GitHub App (ADR 0064): created once by an Admin through GitHub's
   // app-manifest flow. Nothing here ever returns the App's secrets.
@@ -113,13 +118,13 @@ export const adminRouter = new Hono<AppEnv>()
       return fail();
     }
   })
-  .delete("/invites/:token", requireAuth, requireAdmin, async (c) => {
-    // A spent token stays as the audit trail of who used it, so revoking one is
-    // as much a 404 as a token that never existed.
+  .delete("/invites/:id", requireAuth, requireAdmin, async (c) => {
+    // A spent invite stays as the audit trail of who used it, so revoking one is
+    // as much a 404 as an id that never existed.
     const { meta } = await c.env.DB.prepare(
-      "DELETE FROM invites WHERE token = ? AND used_at IS NULL",
+      "DELETE FROM invites WHERE token_hash = ? AND used_at IS NULL",
     )
-      .bind(c.req.param("token"))
+      .bind(c.req.param("id"))
       .run();
     if (meta.changes !== 1) return c.json({ error: "invite not found" }, 404);
     return c.json({ ok: true });
