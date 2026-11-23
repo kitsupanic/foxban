@@ -31,6 +31,21 @@ function sessionCookie(response: Response): string {
   return header.split(";")[0]!;
 }
 
+/** The `sessions.id` of a cookie: the row is keyed by the cookie value's SHA-256 (ADR 0084). */
+function sessionRowId(cookie: string): Promise<string> {
+  return sha256Hex(cookie.slice("session=".length));
+}
+
+/**
+ * The local rate limiter counts in fixed windows aligned to the wall clock (miniflare: `floor(now / period)`), so a
+ * test that spends a limit and then expects a 429 fails when a window boundary falls inside it. Waits for the next
+ * window when the current one is too near its end. The tests that call it set a timeout above the longest wait.
+ */
+async function startInFreshRateWindow(needMs = 15_000): Promise<void> {
+  const left = 60_000 - (Date.now() % 60_000);
+  if (left < needMs) await new Promise((resolve) => setTimeout(resolve, left + 100));
+}
+
 function post(path: string, body: unknown, cookie?: string, extra?: HeadersInit): Promise<Response> {
   return SELF.fetch(`${ORIGIN}${path}`, {
     method: "POST",
@@ -227,9 +242,16 @@ describe("signup and login", () => {
     expect((await get("/me", cookie)).status).toBe(401);
   });
 
+  it("stores the session's hash, not the cookie value (ADR 0084)", async () => {
+    const cookie = await signup("hashed@foxban.test");
+    const raw = cookie.slice("session=".length);
+    expect(await env.DB.prepare("SELECT 1 FROM sessions WHERE id = ?").bind(raw).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT 1 FROM sessions WHERE id = ?").bind(await sha256Hex(raw)).first()).not.toBeNull();
+  });
+
   it("refuses a session whose expiry has passed", async () => {
     const cookie = await signup("expired@foxban.test");
-    const sessionId = cookie.slice("session=".length);
+    const sessionId = await sessionRowId(cookie);
 
     await env.DB.prepare("UPDATE sessions SET expires_at = ? WHERE id = ?")
       .bind(Date.now() - 1000, sessionId)
@@ -269,7 +291,7 @@ describe("boards and membership", () => {
         workspaceName: expect.stringMatching(/'s workspace$/),
         accessMode: "restricted",
         accessVersion: 0,
-        capabilities: { canManageBoard: true, canManageColumns: true, canManageMembers: true },
+        capabilities: { canManageBoard: true },
         viaWorkspaceAdmin: false,
       },
     ]);
@@ -552,7 +574,7 @@ describe("boards and membership", () => {
         workspaceName: expect.stringMatching(/'s workspace$/),
         accessMode: "restricted",
         accessVersion: 0,
-        capabilities: { canManageBoard: true, canManageColumns: true, canManageMembers: true },
+        capabilities: { canManageBoard: true },
         viaWorkspaceAdmin: false,
       },
       {
@@ -566,7 +588,7 @@ describe("boards and membership", () => {
         workspaceName: expect.stringMatching(/'s workspace$/),
         accessMode: "restricted",
         accessVersion: 0,
-        capabilities: { canManageBoard: true, canManageColumns: true, canManageMembers: true },
+        capabilities: { canManageBoard: true },
         viaWorkspaceAdmin: false,
       },
     ]);
@@ -585,7 +607,7 @@ describe("boards and membership", () => {
       workspaceName: expect.stringMatching(/'s workspace$/),
       accessMode: "restricted",
       accessVersion: 0,
-      capabilities: { canManageBoard: true, canManageColumns: true, canManageMembers: true },
+      capabilities: { canManageBoard: true },
       viaWorkspaceAdmin: false,
     });
 
@@ -1111,7 +1133,7 @@ async function reauthWithGitHub(cookie: string, code: string): Promise<string> {
 /** The GitHub confirmation (`github_reauth_until`) the session `cookie` holds, or null. */
 async function storedReauth(cookie: string): Promise<number | null> {
   const row = await env.DB.prepare("SELECT github_reauth_until AS until FROM sessions WHERE id = ?")
-    .bind(cookie.slice("session=".length))
+    .bind(await sessionRowId(cookie))
     .first<{ until: number | null }>();
   return row!.until;
 }
@@ -1119,7 +1141,7 @@ async function storedReauth(cookie: string): Promise<number | null> {
 /** The stored link state of the session `cookie` holds. */
 async function storedLinkState(cookie: string): Promise<{ hash: string | null; expiresAt: number | null } | null> {
   return env.DB.prepare("SELECT github_link_state_hash AS hash, github_link_expires_at AS expiresAt FROM sessions WHERE id = ?")
-    .bind(cookie.slice("session=".length))
+    .bind(await sessionRowId(cookie))
     .first();
 }
 
@@ -1618,7 +1640,8 @@ describe("profile", () => {
     expect((await post("/auth/login", { email, password: "new horse battery staple" })).status).toBe(200);
   });
 
-  it("caps login attempts on one account across many IPs, above the per-IP limit", async () => {
+  it("caps login attempts on one account across many IPs, above the per-IP limit", { timeout: 45_000 }, async () => {
+    await startInFreshRateWindow();
     const victim = "spread-victim@foxban.test";
     await signup(victim, "Spread Victim");
     const attempt = (email: string, ip: string) =>
@@ -1639,7 +1662,8 @@ describe("profile", () => {
     expect((await attempt("someone-else@foxban.test", "203.0.113.99")).status).toBe(401);
   });
 
-  it("enforces rate limits on email and password changes while requireAuth takes precedence", async () => {
+  it("enforces rate limits on email and password changes while requireAuth takes precedence", { timeout: 45_000 }, async () => {
+    await startInFreshRateWindow();
     const admin = await signup("admin-rate@foxban.test", "Admin Rate");
     const invite = await mintInvite(admin);
     const cookie = await signupWithInvite("user-rate@user.test", invite, "Rate User");
@@ -1924,7 +1948,8 @@ describe("log in with GitHub", () => {
     expect((await get("/me", passwordSession)).status).toBe(200);
   });
 
-  it("is rate limited per client IP like the other auth routes, at both ends", async () => {
+  it("is rate limited per client IP like the other auth routes, at both ends", { timeout: 45_000 }, async () => {
+    await startInFreshRateWindow();
     await linkedUser("gh-rate@foxban.test", "octo", { id: 583231, login: "octocat" });
 
     for (const path of ["/auth/github/login/start", "/auth/github/login/callback?code=octo&state=wrong"]) {
@@ -2341,7 +2366,7 @@ describe("GitHub-only accounts", () => {
   it("lets the confirmation run out after ten minutes", async () => {
     const solo = await githubOnly("solo", { id: 720015, login: "solo-late" });
     await reauthWithGitHub(solo.cookie, "solo");
-    await env.DB.prepare("UPDATE sessions SET github_reauth_until = ? WHERE id = ?").bind(Date.now() - 1, solo.cookie.slice("session=".length)).run();
+    await env.DB.prepare("UPDATE sessions SET github_reauth_until = ? WHERE id = ?").bind(Date.now() - 1, await sessionRowId(solo.cookie)).run();
 
     const refused = await post("/auth/password", { newPassword: NEW_PASSWORD }, solo.cookie);
     expect(refused.status).toBe(401);
@@ -2400,7 +2425,7 @@ describe("GitHub-only accounts", () => {
     expect(url.searchParams.get("redirect_uri")).toBe("https://app.example/auth/github/callback");
     // The server keeps only a hash of the state, with the purpose it was started for.
     const stored = await env.DB.prepare("SELECT github_link_state_hash AS hash, github_link_purpose AS purpose FROM sessions WHERE id = ?")
-      .bind(solo.cookie.slice("session=".length))
+      .bind(await sessionRowId(solo.cookie))
       .first();
     expect(stored).toEqual({ hash: await sha256Hex(url.searchParams.get("state")!), purpose: "reauth" });
   });
@@ -2523,7 +2548,7 @@ describe("linking GitHub proves the account first (ADR 0081)", () => {
 
     // Past its ten minutes it is refused, and cleared.
     const stale = await linkState(await startGitHubLink(cookie, PASSWORD));
-    await env.DB.prepare("UPDATE sessions SET github_link_expires_at = ? WHERE id = ?").bind(Date.now() - 1, cookie.slice("session=".length)).run();
+    await env.DB.prepare("UPDATE sessions SET github_link_expires_at = ? WHERE id = ?").bind(Date.now() - 1, await sessionRowId(cookie)).run();
     expect((await githubLinkCallback(cookie, "octo", stale)).headers.get("location")).toBe("https://app.example/profile?github=error");
     expect(await githubIdOf(cookie)).toBeNull();
     expect(await storedLinkState(cookie)).toEqual({ hash: null, expiresAt: null });
@@ -2914,7 +2939,7 @@ describe("board metadata editing", () => {
       // a successful membership change advances the board's policy version, which
       // is what keeps D1 and the board's own generation in lockstep.
       accessVersion: 1,
-      capabilities: { canManageBoard: true, canManageColumns: true, canManageMembers: true },
+      capabilities: { canManageBoard: true },
       viaWorkspaceAdmin: false,
     });
 
@@ -2959,7 +2984,7 @@ describe("board metadata editing", () => {
       workspaceName: expect.stringMatching(/'s workspace$/),
       accessMode: "restricted",
       accessVersion: 1,
-      capabilities: { canManageBoard: true, canManageColumns: true, canManageMembers: true },
+      capabilities: { canManageBoard: true },
       viaWorkspaceAdmin: false,
     });
 

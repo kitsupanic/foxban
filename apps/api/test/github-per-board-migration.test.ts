@@ -42,7 +42,15 @@ describe("per-board GitHub migration 0020", () => {
     const leftover = await env.DB.prepare("SELECT name FROM sqlite_master WHERE name = 'github_connection_states'").first();
     expect(leftover).toBeNull();
 
-    const boards = await (await SELF.fetch(`${ORIGIN}/boards`, { headers: { cookie } })).json<Array<{ id: string; name: string; key: string }>>();
+    // Migration 0026 ends every session (ADR 0084), so sign in again.
+    const login = await SELF.fetch(`${ORIGIN}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "bound@foxban.test", password: "correct horse battery" }),
+    });
+    expect(login.status).toBe(200);
+    const fresh = login.headers.get("set-cookie")!.split(";")[0]!;
+    const boards = await (await SELF.fetch(`${ORIGIN}/boards`, { headers: { cookie: fresh } })).json<Array<{ id: string; name: string; key: string }>>();
     expect(boards.find((board) => board.id === id)).toMatchObject({ name: "Bound board", key: "BND" });
   });
 });

@@ -44,9 +44,12 @@ export async function compressImage(
     canvas.width = Math.round(bitmap.width * scale);
     canvas.height = Math.round(bitmap.height * scale);
     const context = canvas.getContext("2d");
-    if (context === null) return original;
-    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    bitmap.close();
+    try {
+      if (context === null) return original;
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    } finally {
+      bitmap.close();
+    }
 
     const encoded = await new Promise<Blob | null>((resolve) => {
       canvas.toBlob(resolve, "image/webp", quality);

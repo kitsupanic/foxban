@@ -15,8 +15,6 @@ export type Board = {
   accessVersion: number;
   capabilities: {
     canManageBoard: boolean;
-    canManageColumns: boolean;
-    canManageMembers: boolean;
   };
   /** The viewer is on this Private board only as an admin of its workspace (not added to it). */
   viaWorkspaceAdmin: boolean;

@@ -69,7 +69,7 @@ async function add(by: Person, workspaceId: string, who: Person, role: "admin" |
 const removeFromWorkspace = (by: Person, workspaceId: string, who: Person) =>
   del(`/workspaces/${workspaceId}/members/${who.id}`, { operationId: crypto.randomUUID() }, by.cookie);
 
-type Board = { id: string; workspaceId: string; accessMode: string; capabilities: { canManageBoard: boolean; canManageColumns: boolean } };
+type Board = { id: string; workspaceId: string; accessMode: string; capabilities: { canManageBoard: boolean } };
 
 async function createBoard(by: Person, workspaceId: string, accessMode: "workspace" | "restricted" = "workspace"): Promise<Board> {
   const response = await post(
@@ -92,7 +92,7 @@ describe("a creator who is no longer in the workspace", () => {
     const workspace = await createWorkspace(admin);
     await add(admin, workspace, creator);
     const board = await createBoard(creator, workspace);
-    expect(board.capabilities).toMatchObject({ canManageBoard: true, canManageColumns: true });
+    expect(board.capabilities).toMatchObject({ canManageBoard: true });
     expect((await (leave === "removed" ? removeFromWorkspace(admin, workspace, creator) : removeFromWorkspace(creator, workspace, creator))).status).toBe(200);
     return { admin, creator, workspace, board };
   }
@@ -103,7 +103,7 @@ describe("a creator who is no longer in the workspace", () => {
 
       const metadata = await get(`/boards/${board.id}`, creator.cookie);
       expect(metadata.status).toBe(200);
-      expect(await metadata.json()).toMatchObject({ capabilities: { canManageBoard: false, canManageColumns: false } });
+      expect(await metadata.json()).toMatchObject({ capabilities: { canManageBoard: false } });
 
       const own = await firstWorkspaceId(creator.cookie);
       expect((await patch(`/boards/${board.id}`, { name: "Renamed", key: "RNMD" }, creator.cookie)).status).toBe(403);
@@ -147,11 +147,11 @@ describe("a board manager who is no longer in the workspace", () => {
     expect((await post(`/boards/${board.id}/members`, { userId: manager.id }, owner.cookie)).status).toBe(200);
     await env.DB.prepare("UPDATE board_members SET role='manager' WHERE board_id=? AND user_id=?").bind(board.id, manager.id).run();
     const rights = async () => (await get(`/boards/${board.id}`, manager.cookie).then((r) => r.json<Board>())).capabilities;
-    expect(await rights()).toMatchObject({ canManageBoard: true, canManageColumns: true });
+    expect(await rights()).toMatchObject({ canManageBoard: true });
 
     expect((await removeFromWorkspace(admin, workspace, manager)).status).toBe(200);
 
-    expect(await rights()).toMatchObject({ canManageBoard: false, canManageColumns: false });
+    expect(await rights()).toMatchObject({ canManageBoard: false });
     const own = await firstWorkspaceId(manager.cookie);
     expect((await patch(`/boards/${board.id}`, { name: "Renamed", key: "RNMD" }, manager.cookie)).status).toBe(403);
     expect((await post(`/boards/${board.id}/move-workspace`, {

@@ -161,7 +161,7 @@ export function BoardView({
   const me = useQuery(meQuery);
   // Board metadata is resolved by the route shell via GET /boards/by-key/:key and passed in.
   const meta = boardMeta;
-  const canManageColumns = meta.capabilities.canManageColumns;
+  const canManageColumns = meta.capabilities.canManageBoard;
   // Board members feed the assignee picker and the card-front chips. The card
   // modal renders explicit loading and error/retry recovery rather than
   // degrading to an empty picker, while unresolved assignees render as `?`.

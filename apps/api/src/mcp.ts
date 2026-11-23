@@ -118,7 +118,7 @@ async function callBoardDo(
   route: McpRoute,
   body: unknown,
 ): Promise<McpToolResult> {
-  return boardClient(env, board.id).mcp(route, { userId: principal.user.id, canManageColumns: board.capabilities.canManageColumns }, body);
+  return boardClient(env, board.id).mcp(route, { userId: principal.user.id, canManageColumns: board.capabilities.canManageBoard }, body);
 }
 
 function toolResponse(result: McpToolResult) {

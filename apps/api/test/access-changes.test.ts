@@ -1855,6 +1855,53 @@ describe("access change journal", () => {
     ).toBe(0);
   });
 
+  it("keeps a board fenced when the abort write fails, and aborts on the next run", async () => {
+    const owner = await signupAdmin();
+    const adder = await signupMember(owner);
+    const adderId = (await me(adder)).id;
+    const target = await me(await signupMember(owner));
+    const workspace = await createWorkspace(owner, "Abort write fails");
+    await inviteToWorkspace(owner, workspace, adder, "admin");
+    const board = await createBoard(owner, workspace, "workspace");
+    const before = (await readBoard(board.id))!;
+    const operationId = crypto.randomUUID();
+    expect((await post(`/workspaces/${workspace}/members`, { userId: target.id, operationId }, adder)).status).toBe(200);
+    await rewindToReserved(operationId, before);
+    await env.DB.prepare("DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?").bind(workspace, target.id).run();
+    await env.DB.prepare("UPDATE workspace_members SET role='member' WHERE workspace_id=? AND user_id=?").bind(workspace, adderId).run();
+
+    // Fail only the abort's batch, once: D1 can refuse a write and accept the next one.
+    const realBatch = env.DB.batch.bind(env.DB);
+    let failed = false;
+    const batch = vi.spyOn(env.DB, "batch").mockImplementation(async (statements) => {
+      // Only this operation's abort: recovery also drives whatever other tests left unfinished.
+      const parts = statements.map((statement) => statement as unknown as { statement?: string; params?: unknown[] });
+      const abortsThis = parts.some((part) => part.statement?.includes("SET phase='aborted'") && part.params?.includes(operationId));
+      if (!failed && abortsThis) {
+        failed = true;
+        throw new Error("D1 unavailable");
+      }
+      return realBatch(statements);
+    });
+    try {
+      await recoverAccessChanges(env);
+    } finally {
+      batch.mockRestore();
+    }
+    expect(failed).toBe(true);
+    // The attempt is still open, so its board must stay fenced.
+    expect(await readOperation(operationId)).toMatchObject({ phase: "preparing" });
+    expect(await readAccessState(board.id)).toMatchObject({ pendingOperationId: operationId, frozen: 1 });
+
+    await recoverAccessChanges(env);
+    expect(await readOperation(operationId)).toMatchObject({
+      phase: "completed",
+      outcome: "aborted",
+      result: JSON.stringify(ACCESS_CHANGE_ABORT.forbidden),
+    });
+    expect(await readAccessState(board.id)).toEqual({ generation: before.accessVersion + 1, pendingOperationId: null, frozen: 0 });
+  });
+
   it("aborts a reserved deletion whose only remaining authority was the workspace membership", async () => {
     const admin = await signupAdmin();
     const deleter = await signupMember(admin);
