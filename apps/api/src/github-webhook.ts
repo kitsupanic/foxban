@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { readBoundedBody } from "./agent-credentials";
 import { loadInstanceGitHubApp } from "./github-app";
-import { GitHubApiError, getAppOwnerLogin } from "./github";
+import { GitHubApiError, getAppOwner } from "./github";
 import { drainBackfill } from "./github-backfill";
 import { handleBranchEvent } from "./github-branches";
 import { handlePullRequestEvent } from "./github-development";
@@ -31,8 +31,11 @@ const InstallationEventSchema = z.object({
   repositories_removed: z.array(RepoSchema).default([]),
 });
 
-/** GitHub's cap on a webhook payload. */
-const BODY_LIMIT = 25 * 1024 * 1024;
+/**
+ * Read before the signature is checked, so kept small. GitHub's own cap is 25 MB, and a push can pass 5 MB: that delivery gets
+ * a 413 and is not redelivered, so the branch tip refreshes on the next event or the backfill.
+ */
+const BODY_LIMIT = 5 * 1024 * 1024;
 
 type WebhookResult = "applied" | "ignored" | "accepted" | "dropped";
 
@@ -41,8 +44,8 @@ type WebhookResult = "applied" | "ignored" | "accepted" | "dropped";
  * account count. A GitHub error here propagates: the delivery fails and the Admin page re-read heals it.
  */
 async function ownsInstallation(env: Env, app: InstanceApp, account: string): Promise<boolean> {
-  const owner = await getAppOwnerLogin(env.GITHUB_API_BASE, app.appId, app.privateKey);
-  return owner !== null && owner.toLowerCase() === account.toLowerCase();
+  const owner = await getAppOwner(env.GITHUB_API_BASE, app.appId, app.privateKey);
+  return owner !== null && owner.login.toLowerCase() === account.toLowerCase();
 }
 
 async function handleInstallation(

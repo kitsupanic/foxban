@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import type { Member } from "../lib/api";
-import type { PresenceMap } from "../lib/presence";
+import { usePresenceState } from "../lib/presence";
 import { Avatar } from "./Avatar";
 import { Button } from "./ui/button";
 
@@ -33,13 +33,13 @@ export function formatMemberTime(timezone: string | null, now: Date): string {
 
 export function MemberSidebar({
   membersQuery,
-  presenceMap,
   ownerId,
 }: {
   membersQuery: UseQueryResult<Member[], Error>;
-  presenceMap: PresenceMap;
   ownerId?: string | null;
 }) {
+  // Subscribed here, not in BoardView, so a presence update re-renders only the rail.
+  const presenceMap = usePresenceState();
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {

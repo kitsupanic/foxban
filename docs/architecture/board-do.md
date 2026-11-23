@@ -34,7 +34,7 @@ Presence is app-wide: a user is considered online as long as at least one tab ha
 
 Presence sockets carry the same `sessionHash` and answer the same `POST /internal/sessions/revoke`, so a revoked session drops its presence connection too (ADR 0082); the offline update follows from the socket's close like any other.
 
-Who sees whom (ADR 0075): a viewer gets their own presence and that of each owner and member of every board they can open; an instance Admin (`x-foxban-is-admin`, set by the Worker) sees everyone. The DO reads that from D1 once for a connecting snapshot and once per online/offline change.
+Who sees whom (ADR 0075, 0086): a viewer gets their own presence and that of each owner and each workspace member on every board they can open (all workspace members on a Workspace board, those with a board grant on a Private one); a guest, a board grant without membership of the board's workspace, shows nothing through that board; an instance Admin (`x-foxban-is-admin`, set by the Worker) sees everyone. The DO reads that from D1 once for a connecting snapshot and once per online/offline change.
 
 ## Shared (`packages/shared`)
 

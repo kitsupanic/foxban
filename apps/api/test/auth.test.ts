@@ -1948,19 +1948,34 @@ describe("log in with GitHub", () => {
     expect((await get("/me", passwordSession)).status).toBe(200);
   });
 
-  it("is rate limited per client IP like the other auth routes, at both ends", { timeout: 45_000 }, async () => {
+  it("rate limits the start per client IP with a redirect to /login, and the callback with a redirect to /login?github=error", { timeout: 45_000 }, async () => {
     await startInFreshRateWindow();
     await linkedUser("gh-rate@foxban.test", "octo", { id: 583231, login: "octocat" });
 
-    for (const path of ["/auth/github/login/start", "/auth/github/login/callback?code=octo&state=wrong"]) {
-      const headers = { "CF-Connecting-IP": path.endsWith("start") ? "198.51.100.21" : "198.51.100.22" };
-      for (let attempt = 0; attempt < 10; attempt++) {
-        expect((await SELF.fetch(`${ORIGIN}${path}`, { headers, redirect: "manual" })).status).toBe(302);
-      }
-      const throttled = await SELF.fetch(`${ORIGIN}${path}`, { headers, redirect: "manual" });
-      expect(throttled.status).toBe(429);
-      expect(await throttled.json()).toEqual({ error: "too many requests" });
+    const start = { headers: { "CF-Connecting-IP": "198.51.100.21" }, redirect: "manual" } as const;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      expect((await SELF.fetch(`${ORIGIN}/auth/github/login/start`, start)).status).toBe(302);
     }
+    const throttled = await SELF.fetch(`${ORIGIN}/auth/github/login/start`, start);
+    expect(throttled.status).toBe(302);
+    expect(new URL(throttled.headers.get("location")!).pathname + new URL(throttled.headers.get("location")!).search).toBe("/login?github=error");
+
+    // The callback is limited per IP too: a script sets its own state cookie, so each junk request would cost a D1 read and a POST to GitHub.
+    const junk = { headers: { "CF-Connecting-IP": "198.51.100.22" }, redirect: "manual" } as const;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const res = await SELF.fetch(`${ORIGIN}/auth/github/login/callback?code=octo&state=wrong`, junk);
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("/login?github=error");
+    }
+    // A valid round trip begun elsewhere is refused from the exhausted IP, and signs in from a fresh one.
+    const begun = await SELF.fetch(`${ORIGIN}/auth/github/login/start`, { headers: { "CF-Connecting-IP": "198.51.100.23" }, redirect: "manual" });
+    const state = new URL(begun.headers.get("location")!).searchParams.get("state")!;
+    const cookie = begun.headers.getSetCookie().map((header) => header.split(";")[0]).join("; ");
+    const limited = await SELF.fetch(`${ORIGIN}/auth/github/login/callback?code=octo&state=${state}`, { headers: { ...junk.headers, cookie }, redirect: "manual" });
+    expect(limited.status).toBe(302);
+    expect(new URL(limited.headers.get("location")!).pathname + new URL(limited.headers.get("location")!).search).toBe("/login?github=error");
+    expect(signedInCookie(limited)).toBeNull();
+    expect(signedInCookie(await logInWithGitHub("octo", { "CF-Connecting-IP": "198.51.100.24" }))).not.toBeNull();
   });
 });
 
@@ -1984,8 +1999,9 @@ describe("sign up with GitHub", () => {
   }
 
   async function inviteRow(token: string): Promise<{ usedBy: string | null; usedAt: number | null }> {
-    const { invites } = await (await get("/invites", admin)).json<{ invites: Array<{ token: string; usedBy: string | null; usedAt: number | null }> }>();
-    return invites.find((invite) => invite.token === token)!;
+    const { invites } = await (await get("/invites", admin)).json<{ invites: Array<{ id: string; usedBy: string | null; usedAt: number | null }> }>();
+    const id = await sha256Hex(token);
+    return invites.find((invite) => invite.id === id)!;
   }
 
   it("creates the account and spends the invite when an unknown GitHub account arrives with a valid invite", async () => {

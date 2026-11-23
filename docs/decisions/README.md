@@ -92,3 +92,6 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0082 — Revoking a session closes its open sockets](0082-session-revocation-closes-sockets.md) (amends 0011, 0026)
 - [0083 — Browser writes and socket upgrades carry a checked origin](0083-csrf-origin-check.md)
 - [0084 — Session rows are keyed by the cookie's hash](0084-session-ids-stored-hashed.md) (amends 0008)
+- [0085 — Signup invites are stored hashed and need their creator to still be an admin](0085-signup-invites-stored-hashed.md) (amends 0012)
+- [0086 — A guest row does not show the guest's presence](0086-guest-presence-hidden.md) (amends 0075)
+- [0087 — A board's creator opens it only while in its workspace](0087-creator-opens-only-while-in-workspace.md) (amends 0066)

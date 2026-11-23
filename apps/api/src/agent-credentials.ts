@@ -3,7 +3,6 @@ import { z } from "zod";
 import {
   BOARD_SELECT_COLS,
   createInviteToken,
-  appOrigin,
   requireAuth,
   SESSION_USER_COLS,
   sha256Hex,
@@ -16,6 +15,7 @@ import {
   type SessionUserRow,
 } from "./auth";
 import { AgentScopeSchema, decodeCursor, encodeCursor, type AgentScope } from "./mcp-contract";
+import { originAllowed } from "./mcp";
 
 const TOKEN_PREFIX = "foxban_mcp_";
 const TOKEN_RE = /^foxban_mcp_[A-Za-z0-9_-]{43}$/;
@@ -145,19 +145,7 @@ export async function authenticateAgentCredential(env: Env, authorization: strin
 export const agentCredentialsRouter = new Hono<AppEnv>()
   .use("*", async (c, next) => {
     c.header("Cache-Control", "no-store");
-    const origin = c.req.header("origin");
-    if (origin !== undefined && (origin === "null" || origin.includes(","))) {
-      return c.json({ error: "forbidden" } as const, 403);
-    }
-    if (origin !== undefined) {
-      try {
-        if (new URL(origin).origin !== new URL(appOrigin(c.env, c.req.url)).origin || origin !== new URL(origin).origin) {
-          return c.json({ error: "forbidden" } as const, 403);
-        }
-      } catch {
-        return c.json({ error: "forbidden" } as const, 403);
-      }
-    }
+    if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "forbidden" } as const, 403);
     await next();
   })
   .use("*", requireAuth)

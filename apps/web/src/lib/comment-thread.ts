@@ -535,7 +535,6 @@ export function createCommentThread(scope: AuthoredScope, env: CommentThreadEnv)
   };
 }
 
-export type CommentThreadCore = ReturnType<typeof createCommentThread>;
 
 export function useCommentThread(
   scope: AuthoredScope,

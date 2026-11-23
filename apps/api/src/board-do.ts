@@ -3045,21 +3045,24 @@ export class BoardDO extends DurableObject<Env> {
       ) throw new MutationRefusal("invalid_cursor", "Task cursor is invalid.");
       after = cursor.after;
     }
-    const candidates = this.ctx.storage.sql.exec<{ id: string; taskNumber: number }>(
-      `SELECT id, task_number AS taskNumber FROM cards
-        WHERE task_number > ? AND task_number IS NOT NULL
-        ORDER BY task_number`,
-      after,
-    ).toArray();
+    // state, column and assignee filter exactly in SQL (effectiveColumnId is column_id). The
+    // title query stays in JS: SQLite lower() is ASCII-only, so it would differ from toLowerCase.
+    // The cursor is lazy, so breaking at limit + 1 reads no further rows.
+    const where = ["task_number > ?", "task_number IS NOT NULL"];
+    const args: Array<string | number | null> = [after];
+    if (input.state === "active") where.push("archived_at IS NULL");
+    if (input.state === "archived") where.push("archived_at IS NOT NULL");
+    if (input.columnId !== undefined) { where.push("column_id = ?"); args.push(input.columnId); }
+    if (input.assigneeId !== undefined) { where.push("assignee_id IS ?"); args.push(input.assigneeId); }
+    const candidates = this.ctx.storage.sql.exec<{ id: string; title: string }>(
+      `SELECT id, title FROM cards WHERE ${where.join(" AND ")} ORDER BY task_number`,
+      ...args,
+    );
     const items: Array<z.infer<typeof TaskSummarySchema>> = [];
     for (const candidate of candidates) {
+      if (normalizedFilters.query && !candidate.title.toLowerCase().includes(normalizedFilters.query)) continue;
       const record = this.taskSummary(candidate.id, input.board);
       if (!record) continue;
-      if (input.state === "active" && record.archivedAt !== null) continue;
-      if (input.state === "archived" && record.archivedAt === null) continue;
-      if (normalizedFilters.query && !record.title.toLowerCase().includes(normalizedFilters.query)) continue;
-      if (input.columnId !== undefined && record.effectiveColumnId !== input.columnId) continue;
-      if (input.assigneeId !== undefined && record.assigneeId !== input.assigneeId) continue;
       items.push(record);
       if (items.length > input.limit) break;
     }

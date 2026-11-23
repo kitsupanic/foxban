@@ -257,14 +257,34 @@ describe("presence live protocol and multi-tab lifecycle", () => {
     bobClient.close();
   });
 
-  it("shows a non-admin only the people on boards they can open", async () => {
-    const admin = await signup("presence-minter@foxban.test");
-    const invite = async () => (await (await post("/invites", {}, admin)).json<{ token: string }>()).token;
+  /** Signs up plain (non-admin) accounts through invites an admin mints, and puts boards and workspace members in place. */
+  async function scene() {
+    const admin = await signup(`presence-minter-${crypto.randomUUID()}@foxban.test`);
     const join = async (email: string) => {
-      const response = await post("/auth/signup", { email, name: email, password: PASSWORD, invite: await invite() });
+      const invite = (await (await post("/invites", {}, admin)).json<{ token: string }>()).token;
+      const response = await post("/auth/signup", { email, name: email, password: PASSWORD, invite });
       expect(response.status).toBe(200);
       return { cookie: sessionCookie(response), id: (await response.json<{ id: string }>()).id };
     };
+    const board = async (owner: { cookie: string }, accessMode: "workspace" | "restricted" = "workspace") => {
+      const created = await post("/boards", { name: "Scope", key: `PS${Math.random().toString(36).slice(2, 6).toUpperCase()}`, workspaceId: await firstWorkspaceId(owner.cookie), accessMode }, owner.cookie);
+      expect(created.status).toBe(200);
+      return (await created.json<{ id: string }>()).id;
+    };
+    const joinWorkspace = async (owner: { cookie: string }, userId: string) => {
+      const now = Date.now();
+      await env.DB.prepare("INSERT INTO workspace_members(workspace_id, user_id, role, created_at, updated_at) VALUES (?, ?, 'member', ?, ?)").bind(await firstWorkspaceId(owner.cookie), userId, now, now).run();
+    };
+    const snapshotIds = async (client: PresenceClient) => {
+      const frame = (await client.next()).message;
+      if (frame.type !== "presence.snapshot") throw new Error("expected a snapshot");
+      return frame.members.map((m) => m.userId).sort();
+    };
+    return { join, board, joinWorkspace, snapshotIds };
+  }
+
+  it("shows a non-admin only the people on boards they can open", async () => {
+    const { join, board, joinWorkspace } = await scene();
     const carol = await join("carol-scope@user.test");
     const dave = await join("dave-scope@user.test");
 
@@ -276,11 +296,9 @@ describe("presence live protocol and multi-tab lifecycle", () => {
     expect(lonely.type === "presence.snapshot" && lonely.members.map((m) => m.userId)).toEqual([dave.id]);
     daveClient.close();
 
-    // Once Dave is on Carol's board, each sees the other.
-    const board = await post("/boards", { name: "Scope", key: `PS${Math.random().toString(36).slice(2, 6).toUpperCase()}`, workspaceId: await firstWorkspaceId(carol.cookie) }, carol.cookie);
-    expect(board.status).toBe(200);
-    const { id: boardId } = await board.json<{ id: string }>();
-    await env.DB.prepare("INSERT INTO board_members(board_id, user_id, role) VALUES (?, ?, 'member')").bind(boardId, dave.id).run();
+    // Once Dave is in Carol's workspace, with its Workspace board, each sees the other.
+    await board(carol);
+    await joinWorkspace(carol, dave.id);
     const daveAgain = await connectPresenceWs(dave.cookie);
     const shared = (await daveAgain.next()).message;
     expect(shared.type === "presence.snapshot" && shared.members.map((m) => m.userId).sort()).toEqual([carol.id, dave.id].sort());
@@ -288,6 +306,62 @@ describe("presence live protocol and multi-tab lifecycle", () => {
     expect(await carolClient.nextUserUpdate(dave.id)).toMatchObject({ userId: dave.id, online: true });
     carolClient.close();
     daveAgain.close();
+  });
+
+  it("does not show a guest added by email to the board's people (ADR 0086), but shows a workspace co-member", async () => {
+    const { join, board, joinWorkspace, snapshotIds } = await scene();
+    const mallory = await join("mallory-guest@user.test");
+    const victim = await join("victim-guest@user.test");
+    const erin = await join("erin-guest@user.test");
+    await joinWorkspace(mallory, erin.id);
+    const boardId = await board(mallory);
+
+    // The victim is online before the add, so a presence row exists to leak.
+    const victimClient = await connectPresenceWs(victim.cookie);
+    await victimClient.nextUserUpdate(victim.id);
+    const erinClient = await connectPresenceWs(erin.cookie);
+    await erinClient.nextUserUpdate(erin.id);
+
+    // Mallory adds the victim by id, as the exact-email lookup lets anyone who can open the board do.
+    const added = await post(`/boards/${boardId}/members`, { userId: victim.id, operationId: crypto.randomUUID() }, mallory.cookie);
+    expect(added.status).toBe(200);
+
+    const malloryClient = await connectPresenceWs(mallory.cookie);
+    expect(await snapshotIds(malloryClient)).toEqual([mallory.id, erin.id].sort());
+
+    // A change of the victim's reaches nobody on the board: the frame for it was sent before this connect returned, ahead of Erin's.
+    (await connectPresenceWs(victim.cookie)).close();
+    (await connectPresenceWs(erin.cookie)).close();
+    const heard: string[] = [];
+    while (!heard.includes(erin.id)) {
+      const frame = (await malloryClient.nextMatching((msg) => msg.type === "presence.updated")).message;
+      if (frame.type === "presence.updated") heard.push(frame.member.userId);
+    }
+    expect(heard).not.toContain(victim.id);
+    // The guest still sees the board's own people, owner and workspace members.
+    const victimAgain = await connectPresenceWs(victim.cookie);
+    expect(await snapshotIds(victimAgain)).toEqual([mallory.id, erin.id, victim.id].sort());
+    malloryClient.close();
+    victimClient.close();
+    erinClient.close();
+    victimAgain.close();
+  });
+
+  it("on a Private board shows only workspace members who hold a grant on it", async () => {
+    const { join, board, joinWorkspace, snapshotIds } = await scene();
+    const owner = await join("owner-private@user.test");
+    const granted = await join("granted-private@user.test");
+    const bystander = await join("bystander-private@user.test");
+    const guest = await join("guest-private@user.test");
+    for (const user of [granted, bystander]) await joinWorkspace(owner, user.id);
+    const boardId = await board(owner, "restricted");
+    await env.DB.prepare("INSERT INTO board_members(board_id, user_id, role) VALUES (?, ?, 'member'), (?, ?, 'member')").bind(boardId, granted.id, boardId, guest.id).run();
+
+    const clients: PresenceClient[] = [];
+    for (const user of [granted, bystander, guest]) clients.push(await connectPresenceWs(user.cookie));
+    const ownerClient = await connectPresenceWs(owner.cookie);
+    expect(await snapshotIds(ownerClient)).toEqual([owner.id, granted.id].sort());
+    for (const client of [...clients, ownerClient]) client.close();
   });
 
   it("two tabs for one user maintain online after one closes; final close broadcasts offline with persisted timestamp", async () => {

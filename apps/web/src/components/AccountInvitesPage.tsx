@@ -8,7 +8,8 @@ import { AppShell } from "./AppShell";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
-type Invite = { token: string; createdAt: number; usedBy: string | null; usedAt: number | null };
+// `id` is the invite's hash (ADR 0085): the server keeps no token, so a link exists only in the tab that created it.
+type Invite = { id: string; createdAt: number; expiresAt: number; usedBy: string | null; usedAt: number | null };
 const invitesKey = ["invites"];
 const invitesMutationKey = ["invites", "mutation"];
 const generateInviteMutationKey = [...invitesMutationKey, "generate"];
@@ -22,7 +23,8 @@ export function AccountInvitesPage() {
   const { data: user } = useQuery(meQuery);
   const [generateSuccess, setGenerateSuccess] = useState<string | null>(null);
   const [revokeSuccess, setRevokeSuccess] = useState<string | null>(null);
-  const [revokeError, setRevokeError] = useState<{ token: string; message: string } | null>(null);
+  const [revokeError, setRevokeError] = useState<{ id: string; message: string } | null>(null);
+  const [links, setLinks] = useState<Record<string, string>>({});
   const invites = useQuery({
     queryKey: invitesKey,
     enabled: user?.isAdmin === true,
@@ -37,14 +39,15 @@ export function AccountInvitesPage() {
     mutationFn: async () => {
       const response = await api.invites.$post();
       if (!response.ok) throw new Error("Could not generate an invite link.");
-      return (await response.json()).token as string;
+      return await response.json();
     },
-    onSuccess: async (token) => {
+    onSuccess: async ({ token, ...invite }) => {
       await queryClient.cancelQueries({ queryKey: invitesKey });
       setGenerateSuccess("Invite link generated.");
+      setLinks((current) => ({ ...current, [invite.id]: inviteLink(token) }));
       queryClient.setQueryData<Invite[]>(invitesKey, (current) => [
-        { token, createdAt: Date.now(), usedBy: null, usedAt: null },
-        ...(current ?? []).filter((invite) => invite.token !== token),
+        { ...invite, usedBy: null, usedAt: null },
+        ...(current ?? []).filter((existing) => existing.id !== invite.id),
       ]);
     },
     onError: () => setGenerateSuccess(null),
@@ -54,18 +57,18 @@ export function AccountInvitesPage() {
   });
   const revoke = useMutation({
     mutationKey: revokeInviteMutationKey,
-    mutationFn: async (token: string) => {
-      const response = await api.invites[":token"].$delete({ param: { token } });
+    mutationFn: async (id: string) => {
+      const response = await api.invites[":id"].$delete({ param: { id } });
       if (!response.ok && response.status !== 404) throw new Error("Could not revoke that invite.");
-      return token;
+      return id;
     },
     onSuccess: () => {
       setRevokeSuccess("Invite revoked.");
       setRevokeError(null);
     },
-    onError: (error: Error, token) => {
+    onError: (error: Error, id) => {
       setRevokeSuccess(null);
-      setRevokeError({ token, message: error.message || "Could not revoke that invite." });
+      setRevokeError({ id, message: error.message || "Could not revoke that invite." });
     },
     onSettled: async () => {
       await queryClient.invalidateQueries({ queryKey: invitesKey });
@@ -76,7 +79,7 @@ export function AccountInvitesPage() {
   const used = [...(invites.data?.filter((invite) => invite.usedBy) ?? [])]
     .sort((left, right) => (right.usedAt ?? -Infinity) - (left.usedAt ?? -Infinity));
   const busy = useIsMutating({ mutationKey: invitesMutationKey }) > 0;
-  const actionableRevokeError = revokeError && pending.some((invite) => invite.token === revokeError.token)
+  const actionableRevokeError = revokeError && pending.some((invite) => invite.id === revokeError.id)
     ? revokeError.message
     : null;
 
@@ -85,7 +88,7 @@ export function AccountInvitesPage() {
     else if (user && !user.isAdmin) void navigate({ to: "/", replace: true });
   }, [navigate, user]);
   useEffect(() => {
-    if (revokeError && !pending.some((invite) => invite.token === revokeError.token)) setRevokeError(null);
+    if (revokeError && !pending.some((invite) => invite.id === revokeError.id)) setRevokeError(null);
   }, [pending, revokeError]);
 
   if (!user?.isAdmin) return null;
@@ -93,7 +96,7 @@ export function AccountInvitesPage() {
   return (
     <AppShell breadcrumb="Account invites">
       <div className="boards-heading account-invites-heading">
-        <div><h1>Account invites</h1><p>Invite links grant account signup access.</p></div>
+        <div><h1>Account invites</h1><p>Invite links grant account signup access. A link is shown once, when you generate it: copy it then.</p></div>
         <Button type="button" disabled={busy} onClick={() => { setGenerateSuccess(null); if (generate.error) generate.reset(); generate.mutate(); }}>
           <Plus aria-hidden="true" />{generate.isPending ? "Generating…" : "Generate invite link"}
         </Button>
@@ -116,7 +119,7 @@ export function AccountInvitesPage() {
             ) : (
               <ul className="account-invites-list">
                 {pending.map((invite, index) => (
-                  <PendingInvite key={invite.token} invite={invite} ordinal={pending.length - index} disabled={busy} revoking={revoke.isPending && revoke.variables === invite.token} onRevoke={() => { setRevokeSuccess(null); setRevokeError(null); revoke.mutate(invite.token); }} />
+                  <PendingInvite key={invite.id} invite={invite} link={links[invite.id]} ordinal={pending.length - index} disabled={busy} revoking={revoke.isPending && revoke.variables === invite.id} onRevoke={() => { setRevokeSuccess(null); setRevokeError(null); revoke.mutate(invite.id); }} />
                 ))}
               </ul>
             )}
@@ -124,7 +127,7 @@ export function AccountInvitesPage() {
           <section className="account-invites-rail" aria-labelledby="invite-history-heading">
             <h2 id="invite-history-heading" className="boards-section-heading">Invite history <span>{used.length}</span></h2>
             {used.length === 0 ? <p className="account-invites-history-empty">No used invites yet.</p> : (
-              <ol className="account-invites-timeline">{used.map((invite) => <li key={invite.token}><strong>Used</strong><span>{invite.usedAt === null ? "Unknown" : visibleDate(invite.usedAt)}</span></li>)}</ol>
+              <ol className="account-invites-timeline">{used.map((invite) => <li key={invite.id}><strong>Used</strong><span>{invite.usedAt === null ? "Unknown" : visibleDate(invite.usedAt)}</span></li>)}</ol>
             )}
           </section>
         </div>
@@ -133,21 +136,20 @@ export function AccountInvitesPage() {
   );
 }
 
-function PendingInvite({ invite, ordinal, onRevoke, revoking, disabled }: { invite: Invite; ordinal: number; onRevoke: () => void; revoking: boolean; disabled: boolean }) {
+function PendingInvite({ invite, link, ordinal, onRevoke, revoking, disabled }: { invite: Invite; link: string | undefined; ordinal: number; onRevoke: () => void; revoking: boolean; disabled: boolean }) {
   const [copied, setCopied] = useState(false);
   const [copyCount, setCopyCount] = useState(0);
   const timerRef = useRef<number | null>(null);
-  const link = inviteLink(invite.token);
-  const shortToken = invite.token.slice(0, 8);
+  const shortId = invite.id.slice(0, 8);
   useEffect(() => () => { if (timerRef.current !== null) window.clearTimeout(timerRef.current); }, []);
   return (
     <li className="account-invites-card">
-      <div className="account-invites-card-top"><strong><LinkIcon aria-hidden="true" />Invite link {ordinal}</strong><span><Check aria-hidden="true" />Ready to share</span></div>
-      <div className="account-invites-url-row">
-        <Input readOnly aria-label={`Invite link for ${shortToken}`} value={link} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} className="font-mono text-xs" />
-        <Button type="button" variant="outline" size="sm" aria-label={`Copy invite link for ${shortToken}`} onClick={() => { if (!navigator.clipboard?.writeText) return; void navigator.clipboard.writeText(link).then(() => { if (timerRef.current !== null) window.clearTimeout(timerRef.current); setCopied(true); setCopyCount((count) => count + 1); timerRef.current = window.setTimeout(() => { setCopied(false); timerRef.current = null; }, 2000); }).catch(() => undefined); }}><Copy aria-hidden="true" />{copied ? "Copied" : "Copy link"}</Button>
-      </div>
-      <div className="account-invites-revoke"><Button type="button" variant="ghost" size="xs" disabled={disabled} aria-label={`Revoke invite ${shortToken}`} onClick={onRevoke}>{revoking ? "Revoking…" : "Revoke"}</Button></div>
+      <div className="account-invites-card-top"><strong><LinkIcon aria-hidden="true" />Invite link {ordinal}</strong><span>{link ? <><Check aria-hidden="true" />Ready to share</> : "Link not kept"}</span></div>
+      {link ? <div className="account-invites-url-row">
+        <Input readOnly aria-label={`Invite link for ${shortId}`} value={link} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} className="font-mono text-xs" />
+        <Button type="button" variant="outline" size="sm" aria-label={`Copy invite link for ${shortId}`} onClick={() => { if (!navigator.clipboard?.writeText) return; void navigator.clipboard.writeText(link).then(() => { if (timerRef.current !== null) window.clearTimeout(timerRef.current); setCopied(true); setCopyCount((count) => count + 1); timerRef.current = window.setTimeout(() => { setCopied(false); timerRef.current = null; }, 2000); }).catch(() => undefined); }}><Copy aria-hidden="true" />{copied ? "Copied" : "Copy link"}</Button>
+      </div> : <p>Created {visibleDate(invite.createdAt)}, expires {visibleDate(invite.expiresAt)}. The link was shown once, when it was made. Revoke this one and generate another if it was lost.</p>}
+      <div className="account-invites-revoke"><Button type="button" variant="ghost" size="xs" disabled={disabled} aria-label={`Revoke invite ${shortId}`} onClick={onRevoke}>{revoking ? "Revoking…" : "Revoke"}</Button></div>
       {copied && <p key={copyCount} role="status" className="sr-only">Invite link copied to clipboard</p>}
     </li>
   );

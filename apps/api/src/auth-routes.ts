@@ -20,6 +20,7 @@ import {
   startSession,
   toAuthUser,
   underAccountLimit,
+  underAuthLimit,
   verifyPassword,
   verifyUserPassword,
   revokeRealtimeSessions,
@@ -159,7 +160,7 @@ export const authRouter = new Hono<AppEnv>()
           return c.json(noAdmin ? ADMIN_NOT_CONFIGURED : INVITE_REQUIRED, 403);
         }
         // A failing INSERT (duplicate email) rolls the invite claim back with the batch.
-        if (!(await createUserWithInvite(c.env.DB, invite, { id: user.id, email, name, passwordHash }, now))) {
+        if (!(await createUserWithInvite(c.env, invite, { id: user.id, email, name, passwordHash }, now))) {
           return c.json(INVITE_REQUIRED, 403);
         }
       }
@@ -401,13 +402,15 @@ export const authRouter = new Hono<AppEnv>()
     }
     return c.redirect(`${appOrigin(c.env, c.req.url)}/profile`);
   })
-  // Signing in with the instance GitHub App (ADR 0065): public, so both ends are rate limited like login.
-  // Every outcome is a redirect to /login, where `?github=` carries the reason.
+  // Signing in with the instance GitHub App (ADR 0065): public, so the start and the callback are rate limited per IP like login.
+  // A script sets its own state cookie, so the cookie does not bound the callback: each junk request would cost a D1 read, decrypts and a POST to GitHub.
+  // Both are full-page navigations, so every outcome, the limit included, is a redirect to /login, where `?github=` carries the reason.
   // `?invite=` is the signup page's link: an unknown GitHub account may sign up with it (ADR 0065).
   // `?workspaceInvite=<workspaceId>.<token>` is the login or signup page's pending workspace invitation: the person lands on its join page once signed in.
-  .get("/auth/github/login/start", rateLimitAuth, async (c) => {
+  .get("/auth/github/login/start", async (c) => {
     const queried = c.req.query("workspaceInvite");
     const workspaceInvite = queried !== undefined && WORKSPACE_CONTINUATION.test(queried) ? queried : undefined;
+    if (!(await underAuthLimit(c, c.req.header("CF-Connecting-IP")))) return c.redirect(`${appOrigin(c.env, c.req.url)}/login?github=error${workspaceInvite ? `#workspaceInvite=${workspaceInvite}` : ""}`);
     const githubApp = await getInstanceGitHubAppSummary(c.env);
     if (!githubApp) return c.redirect(`${appOrigin(c.env, c.req.url)}/login?github=unavailable${workspaceInvite ? `#workspaceInvite=${workspaceInvite}` : ""}`);
     // Anything left behind by an abandoned attempt must not ride along with this one.
@@ -415,7 +418,7 @@ export const authRouter = new Hono<AppEnv>()
     carryInFlowCookie(c, GITHUB_LOGIN_WORKSPACE_INVITE_COOKIE, workspaceInvite);
     return c.redirect(beginGitHubFlow(c, githubApp.clientId, GITHUB_LOGIN_STATE_COOKIE, "/auth/github/login/callback").url);
   })
-  .get("/auth/github/login/callback", rateLimitAuth, async (c) => {
+  .get("/auth/github/login/callback", async (c) => {
     const origin = appOrigin(c.env, c.req.url);
     const { state, code, error } = c.req.query();
     const expected = takeFlowCookie(c, GITHUB_LOGIN_STATE_COOKIE);
@@ -425,6 +428,7 @@ export const authRouter = new Hono<AppEnv>()
     const fail = (reason: "error" | "cancelled" | "unlinked" | "exists" = "error") =>
       c.redirect(`${origin}/login?github=${reason}${joining ? `#workspaceInvite=${joining[0]}` : ""}`);
     const signedIn = () => c.redirect(joining ? `${origin}/join-workspace/${joining[1]}#invite=${joining[2]}` : `${origin}/`);
+    if (!(await underAuthLimit(c, c.req.header("CF-Connecting-IP")))) return fail();
     if (!state || !expected || state !== expected) return fail();
     // GitHub sends `error=access_denied` when the person presses Cancel on its approval page.
     if (error) return fail(error === "access_denied" ? "cancelled" : "error");

@@ -54,7 +54,7 @@ async function workspaceView(env:Env,user:SessionUser,workspaceId:string):Promis
       COUNT(DISTINCT b.id) AS boardCount,w.created_at AS createdAt,w.updated_at AS updatedAt
       FROM workspaces w
       LEFT JOIN workspace_members wm ON wm.workspace_id=w.id AND wm.user_id=?
-      LEFT JOIN boards b ON b.workspace_id=w.id AND ${boardOpenSql("b","?","?=1")}
+      LEFT JOIN boards b ON b.workspace_id=w.id AND ${boardOpenSql("b","?","(?=1 AND wm.user_id IS NULL)")}
      WHERE w.id=?
      GROUP BY w.id`).bind(operator,user.id,operator,user.id,user.id,user.id,workspaceId).first<WorkspaceView>();
 }

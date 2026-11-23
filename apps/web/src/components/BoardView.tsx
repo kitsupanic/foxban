@@ -56,7 +56,6 @@ import { useBoardAttachments } from "../lib/attachments";
 import { useAuthoredOperation, useAuthoredScope } from "../lib/authored-operation";
 import { boardQueryKey } from "../lib/board-cache";
 import { cardForTaskKey, taskKey } from "../lib/task-key";
-import { usePresenceState } from "../lib/presence";
 import { Avatar } from "./Avatar";
 import { BoardAppearanceIcon } from "./BoardAppearanceFields";
 import { MemberSidebar } from "./MemberSidebar";
@@ -350,8 +349,6 @@ export function BoardView({
   const shortcutsButtonRef = useRef<HTMLButtonElement>(null);
   const newCardButtonRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const presenceMap = usePresenceState();
-
   useEffect(() => {
     const query = window.matchMedia("(min-width: 768px)");
     const onChange = (event: MediaQueryListEvent) => setWideViewport(event.matches);
@@ -664,9 +661,18 @@ export function BoardView({
     assigneesParam === undefined ? [] : assigneesParam.split(",").filter(Boolean);
   const selectedAssigneeTokens = new Set(assigneeTokens);
   const effectiveAssigneeTokens = [...selectedAssigneeTokens];
-  const visible = state
-    ? visibleCardIds(state, filterTokens, effectiveAssigneeTokens, qParam)
-    : null;
+  const visible = useMemo(
+    () =>
+      state
+        ? visibleCardIds(
+            state,
+            labelsParam === undefined ? [] : labelsParam.split(",").filter(Boolean),
+            [...new Set(assigneesParam === undefined ? [] : assigneesParam.split(",").filter(Boolean))],
+            qParam,
+          )
+        : null,
+    [state, labelsParam, assigneesParam, qParam],
+  );
   // The popover lists the board's labels name-sorted, like the card picker's.
   const filterLabels = state
     ? [...state.labels].sort((a, b) =>
@@ -1813,7 +1819,7 @@ export function BoardView({
               Board members{memberList.length > 0 ? ` (${memberList.length})` : ""}
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <MemberSidebar membersQuery={members} presenceMap={presenceMap} ownerId={meta.ownerId} />
+              <MemberSidebar membersQuery={members} ownerId={meta.ownerId} />
             </div>
           </aside>
         )}
@@ -1851,7 +1857,7 @@ export function BoardView({
               </Button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <MemberSidebar membersQuery={members} presenceMap={presenceMap} ownerId={meta.ownerId} />
+              <MemberSidebar membersQuery={members} ownerId={meta.ownerId} />
             </div>
           </div>
         </div>

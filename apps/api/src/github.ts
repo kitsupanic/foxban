@@ -5,11 +5,6 @@ import type { DevelopmentPullRequest } from "@foxban/shared";
 import { base64Url } from "./base64url";
 
 export interface GitHubRepositoryRef {
-  id: number;
-  owner: string;
-  name: string;
-  fullName: string;
-  url: string;
   defaultBranch: string;
 }
 
@@ -50,7 +45,6 @@ function base64UrlEncodeString(str: string): string {
 
 function pemToArrayBuffer(pem: string): ArrayBuffer {
   const cleaned = pem
-    .replace(/\\n/g, "")
     .replace(/-----BEGIN [A-Z ]+-----/g, "")
     .replace(/-----END [A-Z ]+-----/g, "")
     .replace(/\s+/g, "");
@@ -143,6 +137,7 @@ const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 export const GITHUB_FETCH_TIMEOUT_MS = 8_000;
 /** Default ceiling on a GitHub response body. */
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const PULL_REQUEST_LIST_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Executes a GitHub REST API request with standard headers and bounded JSON parsing.
@@ -154,6 +149,8 @@ async function githubFetch<T>(
     token?: string;
     headers?: Record<string, string>;
     body?: unknown;
+    /** Response ceiling; `DEFAULT_MAX_RESPONSE_BYTES` when absent. */
+    maxBytes?: number;
   } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
@@ -183,7 +180,7 @@ async function githubFetch<T>(
       body,
       signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
     });
-    text = await readBoundedText(response, DEFAULT_MAX_RESPONSE_BYTES);
+    text = await readBoundedText(response, options.maxBytes ?? DEFAULT_MAX_RESPONSE_BYTES);
   } catch (error) {
     // Surfaces as the error type callers already handle (502 on the webhook, a retry in backfill).
     if (error instanceof Error && error.name === "TimeoutError") throw new GitHubApiError(504, "GitHub request timed out");
@@ -262,11 +259,6 @@ export async function getAppOwner(apiBase: string, appId: string, privateKeyPem:
   const jwt = await createGitHubAppJwt(appId, privateKeyPem);
   const data = await githubFetch<{ owner?: { login?: string; type?: string } }>(`${apiBase}/app`, { token: jwt });
   return data.owner?.login ? { login: data.owner.login, isOrganization: data.owner.type === "Organization" } : null;
-}
-
-/** The login of the account that owns the App, or null if GitHub names none. */
-export async function getAppOwnerLogin(apiBase: string, appId: string, privateKeyPem: string): Promise<string | null> {
-  return (await getAppOwner(apiBase, appId, privateKeyPem))?.login ?? null;
 }
 
 const INSTALLATIONS_PAGE_SIZE = 100;
@@ -360,23 +352,9 @@ export async function getRepository(
   repo: string,
 ): Promise<GitHubRepositoryRef> {
   const url = `${apiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
-  const data = await githubFetch<{
-    id: number;
-    name: string;
-    full_name: string;
-    html_url: string;
-    default_branch: string;
-    owner: { login: string };
-  }>(url, { token });
+  const data = await githubFetch<{ default_branch: string }>(url, { token });
 
-  return {
-    id: data.id,
-    name: data.name,
-    owner: data.owner.login,
-    fullName: data.full_name,
-    url: data.html_url,
-    defaultBranch: data.default_branch,
-  };
+  return { defaultBranch: data.default_branch };
 }
 
 /**
@@ -441,7 +419,11 @@ export async function listPullRequestsPage(
   page: number,
   perPage: number,
 ): Promise<unknown[]> {
-  const data = await githubFetch<unknown>(`${apiBase}/repos/${fullName}/pulls?state=${state}&sort=updated&direction=desc&per_page=${perPage}&page=${page}`, { token });
+  const data = await githubFetch<unknown>(`${apiBase}/repos/${fullName}/pulls?state=${state}&sort=updated&direction=desc&per_page=${perPage}&page=${page}`, {
+    token,
+    // 30 PRs with bodies up to 65,536 chars each can pass the 2 MiB default.
+    maxBytes: PULL_REQUEST_LIST_MAX_BYTES,
+  });
   if (!Array.isArray(data)) throw new GitHubApiError(502, "malformed pull request list from GitHub", data);
   return data;
 }

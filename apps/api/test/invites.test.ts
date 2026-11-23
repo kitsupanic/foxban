@@ -1,5 +1,6 @@
 import { SELF, applyD1Migrations, createExecutionContext, env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import { sha256Hex } from "../src/auth";
 import worker from "../src/index";
 
 /**
@@ -17,8 +18,10 @@ const PASSWORD = "correct horse battery";
 const ORIGIN = "https://foxban.test";
 
 type InviteRow = {
-  token: string;
+  /** The invite's hash: the table holds no token (ADR 0085). */
+  id: string;
   createdAt: number;
+  expiresAt: number;
   usedBy: string | null;
   usedAt: number | null;
 };
@@ -75,8 +78,9 @@ async function listInvites(cookie: string): Promise<InviteRow[]> {
  * emails) rather than to the whole list.
  */
 async function listOwn(cookie: string, ...tokens: string[]): Promise<InviteRow[]> {
+  const ids = await Promise.all(tokens.map(sha256Hex));
   const invites = await listInvites(cookie);
-  return invites.filter((row) => tokens.includes(row.token));
+  return invites.filter((row) => ids.includes(row.id));
 }
 
 describe("admin identification", () => {
@@ -135,7 +139,7 @@ describe("invite-gated signup", () => {
     const user = await response.json<{ id: string }>();
     // No token was passed, so none can have been charged to this account.
     expect(
-      await env.DB.prepare("SELECT token FROM invites WHERE used_by = ?").bind(user.id).first(),
+      await env.DB.prepare("SELECT token_hash FROM invites WHERE used_by = ?").bind(user.id).first(),
     ).toBeNull();
   });
 
@@ -144,7 +148,7 @@ describe("invite-gated signup", () => {
     const token = await mintInvite(admin);
 
     expect((await signup("second.admin@foxban.test", token)).status).toBe(200);
-    expect(await listOwn(admin, token)).toMatchObject([{ token, usedBy: null, usedAt: null }]);
+    expect(await listOwn(admin, token)).toMatchObject([{ id: await sha256Hex(token), usedBy: null, usedAt: null }]);
   });
 
   it("refuses a non-admin with a missing, unknown or already spent token, identically", async () => {
@@ -177,7 +181,7 @@ describe("invite-gated signup", () => {
   it("refuses an unspent token older than a week and drops it from the list", async () => {
     const admin = await adminSession("expires@foxban.test");
     const token = await mintInvite(admin);
-    await env.DB.prepare("UPDATE invites SET created_at = ? WHERE token = ?").bind(Date.now() - 8 * 24 * 60 * 60 * 1000, token).run();
+    await env.DB.prepare("UPDATE invites SET created_at = ? WHERE token_hash = ?").bind(Date.now() - 8 * 24 * 60 * 60 * 1000, await sha256Hex(token)).run();
 
     const late = await signup("late@user.test", token);
     expect(late.status).toBe(403);
@@ -194,7 +198,7 @@ describe("invite-gated signup", () => {
     const user = await response.json<{ id: string }>();
 
     const [row] = await listOwn(admin, token);
-    expect(row).toMatchObject({ token, usedBy: user.id });
+    expect(row).toMatchObject({ id: await sha256Hex(token), usedBy: user.id });
     expect(row!.usedAt).toBeGreaterThanOrEqual(before);
   });
 
@@ -210,6 +214,62 @@ describe("invite-gated signup", () => {
     expect(duplicate.status).toBe(409);
 
     expect(await listOwn(admin, second)).toMatchObject([{ usedBy: null, usedAt: null }]);
+  });
+});
+
+describe("invites are stored hashed and need their creator to stay an admin (ADR 0085)", () => {
+  /** The refusal an unknown token gets: a refused invite must look the same whatever the reason. */
+  const REFUSED = { error: "a valid invite is required to sign up" };
+
+  it("keeps only the token's hash, and shows the token only in the response that mints it", async () => {
+    const admin = await adminSession("hashed@foxban.test");
+    const minted = await request("POST", "/invites", undefined, admin);
+    expect(minted.status).toBe(201);
+    const { id, token, createdAt, expiresAt } = await minted.json<{ id: string; token: string; createdAt: number; expiresAt: number }>();
+    expect(id).toBe(await sha256Hex(token));
+    expect(expiresAt - createdAt).toBe(7 * 24 * 60 * 60 * 1000);
+
+    expect(await env.DB.prepare("SELECT 1 FROM invites WHERE token_hash = ?").bind(token).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT created_by FROM invites WHERE token_hash = ?").bind(id).first()).not.toBeNull();
+    const listed = (await listInvites(admin)).find((row) => row.id === id);
+    expect(listed).toMatchObject({ id, createdAt, expiresAt, usedBy: null, usedAt: null });
+    expect(JSON.stringify(listed)).not.toContain(token);
+    // The hash is no bearer secret: presenting it as the token signs nobody up.
+    expect((await signup("hash-as-token@user.test", id)).status).toBe(403);
+    expect((await signup("real-token@user.test", token)).status).toBe(200);
+  });
+
+  it("refuses a token whose creator is no longer an admin, like any invalid one, and honours it again once they are", async () => {
+    const creator = "former-admin@foxban.test";
+    const admin = await adminSession(creator);
+    const token = await mintInvite(admin);
+    const configured = env.ADMIN_EMAILS;
+    env.ADMIN_EMAILS = configured.split(",").filter((entry) => entry.trim().toLowerCase() !== creator).join(",");
+    try {
+      const refused = await signup("late-guest@user.test", token);
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toEqual(REFUSED);
+      expect(await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind("late-guest@user.test").first()).toBeNull();
+      expect(await env.DB.prepare("SELECT used_at FROM invites WHERE token_hash = ?").bind(await sha256Hex(token)).first()).toEqual({ used_at: null });
+    } finally {
+      env.ADMIN_EMAILS = configured;
+    }
+    // The refusal spent nothing: with the creator an admin again, the same token works.
+    expect((await signup("back-guest@user.test", token)).status).toBe(200);
+  });
+
+  it("lets another admin's token through while a demoted admin's is refused", async () => {
+    const [stays, leaves] = ["stays-admin@foxban.test", "leaves-admin@foxban.test"];
+    const [staysCookie, leavesCookie] = [await adminSession(stays!), await adminSession(leaves!)];
+    const [kept, dropped] = [await mintInvite(staysCookie), await mintInvite(leavesCookie)];
+    const configured = env.ADMIN_EMAILS;
+    env.ADMIN_EMAILS = configured.split(",").filter((entry) => entry.trim().toLowerCase() !== leaves).join(",");
+    try {
+      expect((await signup("kept-guest@user.test", kept)).status).toBe(200);
+      expect((await signup("dropped-guest@user.test", dropped)).status).toBe(403);
+    } finally {
+      env.ADMIN_EMAILS = configured;
+    }
   });
 });
 
@@ -260,7 +320,7 @@ describe("the invite routes", () => {
     for (const [method, path] of [
       ["GET", "/invites"],
       ["POST", "/invites"],
-      ["DELETE", `/invites/${token}`],
+      ["DELETE", `/invites/${await sha256Hex(token)}`],
     ] as const) {
       const anonymous = await request(method, path);
       expect(anonymous.status).toBe(401);
@@ -272,7 +332,7 @@ describe("the invite routes", () => {
     }
 
     // None of the refused calls minted or revoked anything.
-    expect(await listOwn(admin, token)).toMatchObject([{ token, usedAt: null }]);
+    expect(await listOwn(admin, token)).toMatchObject([{ id: await sha256Hex(token), usedAt: null }]);
   });
 
   it("mints base64url tokens, lists them newest first and revokes unused ones", async () => {
@@ -285,17 +345,18 @@ describe("the invite routes", () => {
     expect(second).not.toBe(first);
 
     // Newest first, and only these two are this test's business.
-    expect((await listOwn(admin, first, second)).map((row) => row.token)).toEqual([second, first]);
+    const [firstId, secondId] = [await sha256Hex(first), await sha256Hex(second)];
+    expect((await listOwn(admin, first, second)).map((row) => row.id)).toEqual([secondId, firstId]);
 
-    const revoked = await request("DELETE", `/invites/${first}`, undefined, admin);
+    const revoked = await request("DELETE", `/invites/${firstId}`, undefined, admin);
     expect(revoked.status).toBe(200);
-    expect((await listOwn(admin, first, second)).map((row) => row.token)).toEqual([second]);
+    expect((await listOwn(admin, first, second)).map((row) => row.id)).toEqual([secondId]);
 
     // A revoked token is gone for signup too.
     expect((await signup("revoked@user.test", first)).status).toBe(403);
   });
 
-  it("404s a token that is unknown or already spent", async () => {
+  it("404s an invite that is unknown or already spent", async () => {
     const admin = await adminSession("delete404@foxban.test");
     const token = await mintInvite(admin);
 
@@ -305,7 +366,7 @@ describe("the invite routes", () => {
 
     expect((await signup("spent@user.test", token)).status).toBe(200);
     // Spent rows are kept as the audit trail rather than deleted.
-    expect((await request("DELETE", `/invites/${token}`, undefined, admin)).status).toBe(404);
-    expect(await listOwn(admin, token)).toMatchObject([{ token, usedAt: expect.any(Number) }]);
+    expect((await request("DELETE", `/invites/${await sha256Hex(token)}`, undefined, admin)).status).toBe(404);
+    expect(await listOwn(admin, token)).toMatchObject([{ id: await sha256Hex(token), usedAt: expect.any(Number) }]);
   });
 });

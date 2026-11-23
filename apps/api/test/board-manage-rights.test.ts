@@ -8,7 +8,8 @@ import { queriesOf, workerWithPausedD1 } from "./paused-d1";
 
 /**
  * Who manages a board, and who may take a manager off it: the creator and a board manager
- * manage only while still in the board's workspace, removing a board manager takes manage rights,
+ * manage only while still in the board's workspace (a creator who is out of it opens the board only
+ * through a guest row, ADR 0087), removing a board manager takes manage rights,
  * and a board is not "moved" to the workspace it is already in.
  */
 const ORIGIN = "https://foxban.test";
@@ -85,7 +86,10 @@ const sessionUser = async (who: Person) =>
   (await env.DB.prepare(`SELECT id,email,name,github_login AS githubLogin,avatar_version AS avatarVersion,timezone FROM users WHERE id=?`).bind(who.id).first<SessionUser>())!;
 
 describe("a creator who is no longer in the workspace", () => {
-  /** A board made by `creator`, a plain member of a workspace `admin` runs; `leave` then takes them out of it. */
+  /**
+   * A board made by `creator`, a plain member of a workspace `admin` runs; `leave` then takes them out of it,
+   * which takes the board with it (ADR 0087), so `admin` adds them back to it as a guest.
+   */
   async function scene(leave: "removed" | "left") {
     const admin = await person();
     const creator = await person();
@@ -94,11 +98,13 @@ describe("a creator who is no longer in the workspace", () => {
     const board = await createBoard(creator, workspace);
     expect(board.capabilities).toMatchObject({ canManageBoard: true });
     expect((await (leave === "removed" ? removeFromWorkspace(admin, workspace, creator) : removeFromWorkspace(creator, workspace, creator))).status).toBe(200);
+    expect((await get(`/boards/${board.id}`, creator.cookie)).status).toBe(403);
+    expect((await post(`/boards/${board.id}/members`, { userId: creator.id }, admin.cookie)).status).toBe(200);
     return { admin, creator, workspace, board };
   }
 
   for (const leave of ["removed", "left"] as const) {
-    it(`keeps the open right but loses every manage right once ${leave}`, async () => {
+    it(`opens the board only as a guest and loses every manage right once ${leave}`, async () => {
       const { admin, creator, workspace, board } = await scene(leave);
 
       const metadata = await get(`/boards/${board.id}`, creator.cookie);

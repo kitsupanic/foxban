@@ -5,7 +5,7 @@ import {
   type PresenceUpdatedMessage,
   type WorkspaceInvalidated,
 } from "@foxban/shared";
-import { boardMemberSql, boardOpenSql } from "./auth";
+import { boardOpenSql } from "./auth";
 import { INTERNAL_IS_ADMIN_HEADER, INTERNAL_TIMEZONE_HEADER, INTERNAL_USER_ID_HEADER } from "./internal-headers";
 import { REVOKE_SESSIONS_PATH, SessionRevocationSchema, closeRevokedSockets, sessionHashOf } from "./session-revocation";
 
@@ -20,17 +20,22 @@ type SocketAttachment = {
 
 /**
  * Presence is shown on a board's member rail, so a viewer sees the people on the boards they can open:
- * each such board's owner and members. Everyone else on the instance stays hidden, as ADR 0072 keeps
+ * each such board's owner and its workspace members (all of them on a Workspace board, only those with a
+ * `board_members` row on a Private one). A guest, someone with a `board_members` row but no membership of
+ * the board's workspace, is left out: anyone who can open a board may add any account by email, so a guest
+ * row is no consent to be watched (ADR 0086). Everyone else on the instance stays hidden, as ADR 0072 keeps
  * member pickers from listing the instance.
  */
 const VISIBLE_TO_VIEWER_SQL = `WITH open_boards AS (SELECT b.id, b.owner_id, b.access_mode, b.workspace_id FROM boards b WHERE ${boardOpenSql("b", "?1")})
   SELECT owner_id AS id FROM open_boards
-  UNION SELECT bm.user_id FROM board_members bm JOIN open_boards ob ON bm.board_id = ob.id
-  UNION SELECT wm.user_id FROM workspace_members wm JOIN open_boards ob ON ob.access_mode = 'workspace' AND wm.workspace_id = ob.workspace_id`;
+  UNION SELECT wm.user_id FROM open_boards ob JOIN workspace_members wm ON wm.workspace_id = ob.workspace_id
+    WHERE ob.access_mode = 'workspace' OR EXISTS (SELECT 1 FROM board_members bm WHERE bm.board_id = ob.id AND bm.user_id = wm.user_id)`;
 
-/** The viewers among `?1` (a JSON array of ids) who can open a board that `?2` owns or is a member of. */
+/** The mirror image of `VISIBLE_TO_VIEWER_SQL`: the viewers among `?1` (a JSON array of ids) who can open a board that shows `?2`, as its owner or as a workspace member on it. */
 const VIEWERS_OF_SUBJECT_SQL = `SELECT v.value AS id FROM json_each(?1) v
-  WHERE EXISTS (SELECT 1 FROM boards b WHERE ${boardOpenSql("b", "v.value")} AND (b.owner_id = ?2 OR ${boardMemberSql("b", "?2")}))`;
+  WHERE EXISTS (SELECT 1 FROM boards b WHERE ${boardOpenSql("b", "v.value")} AND (b.owner_id = ?2
+    OR EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = b.workspace_id AND wm.user_id = ?2
+      AND (b.access_mode = 'workspace' OR EXISTS (SELECT 1 FROM board_members bm WHERE bm.board_id = b.id AND bm.user_id = ?2)))))`;
 
 type PresenceRow = {
   userId: string;
@@ -238,7 +243,7 @@ export class PresenceDO extends DurableObject<Env> {
     };
   }
 
-  /** The people whose presence `viewerId` may see: themself, and everyone on a board they can open. Empty when D1 fails: presence is cosmetic, so it fails closed. */
+  /** The people whose presence `viewerId` may see: themself, and each board's owner and workspace members on a board they can open. Empty when D1 fails: presence is cosmetic, so it fails closed. */
   private async visibleTo(viewerId: string): Promise<Set<string>> {
     try {
       const { results } = await this.env.DB.prepare(VISIBLE_TO_VIEWER_SQL).bind(viewerId).all<{ id: string }>();

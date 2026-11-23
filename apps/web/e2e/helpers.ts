@@ -218,34 +218,43 @@ export async function openAccountInvites(page: Page): Promise<Locator> {
   return main;
 }
 
-/** Waits for this page's next POST /invites and returns the token it minted. */
-export async function mintedInviteToken(page: Page): Promise<string> {
+/**
+ * Waits for this page's next POST /invites and returns what it minted. `id` is the invite's hash
+ * (ADR 0085): the row's accessible names and DELETE /invites/:id use it, `token` only builds the link.
+ */
+export async function mintedInvite(page: Page): Promise<{ id: string; token: string }> {
   const response = await page.waitForResponse(
     (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/invites"),
   );
-  const { token } = (await response.json()) as { token: string };
-  return token;
+  const { id, token } = (await response.json()) as { id: string; token: string };
+  return { id, token };
 }
 
-/** The pending invite row's link input for one token. */
-export function inviteLinkFor(page: Page, token: string): Locator {
-  return page.getByRole("textbox", { name: `Invite link for ${token.slice(0, 8)}`, exact: true });
+/** The pending invite row's link input for one invite id. It exists only in the tab that generated the link. */
+export function inviteLinkFor(page: Page, id: string): Locator {
+  return page.getByRole("textbox", { name: `Invite link for ${id.slice(0, 8)}`, exact: true });
+}
+
+/** The pending invite row's Revoke button for one invite id. */
+export function revokeButtonFor(page: Page, id: string): Locator {
+  return page.getByRole("button", { name: `Revoke invite ${id.slice(0, 8)}`, exact: true });
 }
 
 /**
  * Generates a fresh account invite and leaves the browser on its page.
  * Invites are one instance-wide pool that parallel workers also write to, so the
- * new invite is found by the token its own POST returned, never by count or position.
+ * new invite is found by the id its own POST returned, never by count or position.
+ * The link is only shown in this tab right after generating (ADR 0085): read it here.
  */
-export async function generateAccountInvite(page: Page): Promise<{ link: string; token: string }> {
+export async function generateAccountInvite(page: Page): Promise<{ link: string; token: string; id: string }> {
   const main = await openAccountInvites(page);
-  const minted = mintedInviteToken(page);
+  const minted = mintedInvite(page);
   await main.getByRole("button", { name: "Generate invite link" }).click();
-  const token = await minted;
+  const { id, token } = await minted;
   await expect(main.getByRole("status").filter({ hasText: "Invite link generated." })).toHaveText("Invite link generated.");
-  const link = await inviteLinkFor(page, token).inputValue();
+  const link = await inviteLinkFor(page, id).inputValue();
   if (new URL(link).searchParams.get("invite") !== token) throw new Error(`invite link does not carry ${token}: ${link}`);
-  return { link, token };
+  return { link, token, id };
 }
 
 /** Board columns in board order; each column is one `[data-column-id]` section. */

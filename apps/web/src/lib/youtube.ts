@@ -99,7 +99,8 @@ function containsYouTubeParagraph(nodes: readonly MdNode[], tight = false): bool
   });
 }
 
-const YOUTUBE_CACHE_LIMIT = 500;
+// Must exceed the largest board: a full clear mid-render re-parses every card on each pass.
+const YOUTUBE_CACHE_LIMIT = 5000;
 const youTubeCache = new Map<string, boolean>();
 
 /** Cached by description: card faces ask on every render and parsing markdown is the cost. */

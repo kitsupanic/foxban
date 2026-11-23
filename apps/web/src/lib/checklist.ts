@@ -201,7 +201,6 @@ export function createChecklist(scope: AuthoredScope, env: ChecklistEnv) {
   };
 }
 
-export type ChecklistCore = ReturnType<typeof createChecklist>;
 
 export function useChecklist(scope: AuthoredScope, live: { cardId: string; items: readonly ChecklistItem[]; placeNew: () => string }) {
   const latest = useRef(live);
