@@ -91,3 +91,4 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0081 — Linking GitHub needs the current password](0081-github-link-needs-current-password.md) (amends 0065)
 - [0082 — Revoking a session closes its open sockets](0082-session-revocation-closes-sockets.md) (amends 0011, 0026)
 - [0083 — Browser writes and socket upgrades carry a checked origin](0083-csrf-origin-check.md)
+- [0084 — Session rows are keyed by the cookie's hash](0084-session-ids-stored-hashed.md) (amends 0008)

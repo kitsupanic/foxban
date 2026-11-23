@@ -222,7 +222,7 @@ export function boardClient(env: Env, boardId: string) {
         reply<ErrorBody & { receipt?: CardTransferReceipt }>(call("transferImport", { userId, body })),
     },
 
-    /** The realtime socket: the browser's own upgrade request, passed through with the identity the Worker decided on. `sessionHash` is the SHA-256 of the session id it was authenticated with (ADR 0082). */
+    /** The realtime socket: the browser's own upgrade request, passed through with the identity the Worker decided on. `sessionHash` is the SHA-256 of the session cookie it was authenticated with, = `sessions.id` (ADR 0082, 0084). */
     connect(request: Request, userId: string, canManageColumns: boolean, sessionHash: string): Promise<Response> {
       // No `x-foxban-*` of the browser's and no cookie: the Worker's own headers are the only identity the board gets.
       const headers = upgradeHeaders(request);

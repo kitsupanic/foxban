@@ -293,8 +293,7 @@ function BoardActions({
   onRequestMove: (board: Board) => void;
 }) {
   if (deleting) return <span role="status" className="boards-page-success">Deleting…</span>;
-  const { canManageBoard, canManageMembers } = board.capabilities;
-  if (!canManageMembers && !canManageBoard) return null;
+  const { canManageBoard } = board.capabilities;
   return <BoardActionsMenu board={board} canEdit={canManageBoard} canDelete={canManageBoard} canMove={canManageBoard} onMove={() => onRequestMove(board)} onAddMember={(trigger) => onRequestAddMember(board, trigger)} onEdit={(trigger) => onRequestEdit(board, trigger)} onDelete={(trigger) => onRequestDelete(board, trigger)} />;
 }
 

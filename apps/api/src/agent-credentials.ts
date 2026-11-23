@@ -3,7 +3,6 @@ import { z } from "zod";
 import {
   BOARD_SELECT_COLS,
   createInviteToken,
-  findAccessibleBoard,
   appOrigin,
   requireAuth,
   SESSION_USER_COLS,
@@ -174,10 +173,9 @@ export const agentCredentialsRouter = new Hono<AppEnv>()
     const parsed = IssueCredentialSchema.safeParse(raw);
     if (!parsed.success) return c.json({ error: "invalid request" } as const, 400);
     const user = c.get("user");
-    for (const boardId of parsed.data.boardIds) {
-      if ((await findAccessibleBoard(c.env, user, boardId)) === null) {
-        return c.json({ error: "forbidden" } as const, 403);
-      }
+    // The ids are distinct (schema), so one row per id means every board opens.
+    if ((await listAuthorizedBoards(c.env, { user, boardIds: parsed.data.boardIds })).length !== parsed.data.boardIds.length) {
+      return c.json({ error: "forbidden" } as const, 403);
     }
     const token = TOKEN_PREFIX + createInviteToken();
     const now = Date.now();
@@ -242,18 +240,17 @@ export const agentCredentialsRouter = new Hono<AppEnv>()
     return c.body(null, 204);
   });
 
-export async function listAuthorizedBoards(env: Env, principal: AgentPrincipal): Promise<RawBoardRecord[]> {
+export async function listAuthorizedBoards(env: Env, principal: Pick<AgentPrincipal, "user" | "boardIds">): Promise<RawBoardRecord[]> {
   if (principal.boardIds.length === 0) return [];
-  const placeholders = principal.boardIds.map(() => "?").join(", ");
   const user = principal.user;
-  // One query: the same open rule (and operator term) `findAccessibleBoard` applies, for every granted board at once.
+  // One query (ids as one JSON bind: D1 caps a query at 100 bound parameters): the same open rule (and operator term) `findAccessibleBoard` applies, for every granted board at once.
   const { results } = await env.DB.prepare(
     `SELECT ${BOARD_SELECT_COLS}
        FROM boards
        JOIN workspaces ON workspaces.id=boards.workspace_id
-      WHERE boards.id IN (${placeholders})
+      WHERE boards.id IN (SELECT value FROM json_each(?))
         AND ${boardOpenSql("boards", "?", "?=1")}
       ORDER BY boards.id`,
-  ).bind(...principal.boardIds, isAdminEmail(env, user.email) ? 1 : 0, user.id, user.id, user.id).all<RawBoardRecord>();
+  ).bind(JSON.stringify(principal.boardIds), isAdminEmail(env, user.email) ? 1 : 0, user.id, user.id, user.id).all<RawBoardRecord>();
   return results;
 }

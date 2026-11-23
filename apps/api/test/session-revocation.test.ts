@@ -388,8 +388,9 @@ describe("an upgrade that outlives its session", () => {
   // session deleted between `requireAuth` and the accept cannot be staged through `SELF.fetch`, so this drives the
   // recheck itself: the sockets are open, the row is deleted with no revocation sent (as if the sweep had already
   // passed this object), and `revokeIfSessionEnded` is what closes them.
-  const sessionId = (cookie: string) => cookie.slice(cookie.indexOf("=") + 1);
-  const deleteRow = (cookie: string) => env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(sessionId(cookie)).run();
+  // The row id and the socket hash are the same value: the SHA-256 of the cookie value (ADR 0084).
+  const sessionId = (cookie: string) => sha256Hex(cookie.slice(cookie.indexOf("=") + 1));
+  const deleteRow = async (cookie: string) => env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(await sessionId(cookie)).run();
 
   it("closes the socket of a session whose row is gone, on the board and on presence, and only that session's", async () => {
     const owner = await account();
@@ -405,8 +406,8 @@ describe("an upgrade that outlives its session", () => {
     expect(await boardA.closeCode(300)).toBe("open");
     expect(await presenceA.closeCode(300)).toBe("open");
 
-    await revokeIfSessionEnded(env, sessionId(a), owner.id, boardId);
-    await revokeIfSessionEnded(env, sessionId(a), owner.id, null);
+    await revokeIfSessionEnded(env, await sessionId(a), owner.id, boardId);
+    await revokeIfSessionEnded(env, await sessionId(a), owner.id, null);
     expect(await boardA.closeCode()).toBe(SESSION_REVOKED_CLOSE);
     expect(await presenceA.closeCode()).toBe(SESSION_REVOKED_CLOSE);
     for (const survivor of [boardB, presenceB]) expect(await survivor.closeCode(300)).toBe("open");
@@ -418,8 +419,8 @@ describe("an upgrade that outlives its session", () => {
     const board = await openBoard(owner.cookie, boardId);
     const presence = await openPresence(owner.cookie);
 
-    await revokeIfSessionEnded(env, sessionId(owner.cookie), owner.id, boardId);
-    await revokeIfSessionEnded(env, sessionId(owner.cookie), owner.id, null);
+    await revokeIfSessionEnded(env, await sessionId(owner.cookie), owner.id, boardId);
+    await revokeIfSessionEnded(env, await sessionId(owner.cookie), owner.id, null);
     for (const socket of [board, presence]) expect(await socket.closeCode(300)).toBe("open");
   });
 
@@ -427,9 +428,9 @@ describe("an upgrade that outlives its session", () => {
     const owner = await account();
     const boardId = await boardWith(owner, await account());
     const board = await openBoard(owner.cookie, boardId);
-    await env.DB.prepare("UPDATE sessions SET expires_at = ? WHERE id = ?").bind(Date.now() - 1, sessionId(owner.cookie)).run();
+    await env.DB.prepare("UPDATE sessions SET expires_at = ? WHERE id = ?").bind(Date.now() - 1, await sessionId(owner.cookie)).run();
 
-    await revokeIfSessionEnded(env, sessionId(owner.cookie), owner.id, boardId);
+    await revokeIfSessionEnded(env, await sessionId(owner.cookie), owner.id, boardId);
     expect(await board.closeCode()).toBe(SESSION_REVOKED_CLOSE);
   });
 
@@ -439,13 +440,13 @@ describe("an upgrade that outlives its session", () => {
     const flaky = { DB: env.DB, BOARD_DO: { idFromName: (name: string) => name, get: () => ({ fetch: async () => (++calls === 1 ? new Response(null, { status: 503 }) : new Response("{}")) }) } } as unknown as Env;
     const owner = await account();
     await deleteRow(owner.cookie);
-    await revokeIfSessionEnded(flaky, sessionId(owner.cookie), owner.id, "some-board");
+    await revokeIfSessionEnded(flaky, await sessionId(owner.cookie), owner.id, "some-board");
     expect(calls).toBe(2);
     expect(warn).not.toHaveBeenCalled();
 
     const down = { DB: env.DB, BOARD_DO: { idFromName: (name: string) => name, get: () => ({ fetch: async () => ((calls += 1), new Response(null, { status: 503 })) }) } } as unknown as Env;
     calls = 0;
-    await revokeIfSessionEnded(down, sessionId(owner.cookie), owner.id, "some-board");
+    await revokeIfSessionEnded(down, await sessionId(owner.cookie), owner.id, "some-board");
     expect(calls).toBe(2);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("some-board"));
   });
@@ -621,7 +622,7 @@ describe("revoking across many boards", () => {
 
 describe("changing the password", () => {
   // Needs the POST /auth/password handler to call, after its successful batch:
-  //   revokeRealtimeSessions(c.env, c.executionCtx, user.id, { exceptSessionHash: await sha256Hex(sessionId) });
+  //   revokeRealtimeSessions(c.env, c.executionCtx, user.id, { exceptSessionHash: sessionHash });
   it("closes the account's other sessions' sockets and keeps the changing session's", async () => {
     const owner = await account();
     const peer = await account();

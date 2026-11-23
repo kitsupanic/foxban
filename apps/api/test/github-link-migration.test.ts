@@ -19,6 +19,15 @@ describe("GitHub link migration 0016", () => {
 
     await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 
-    expect(await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).json()).toMatchObject({ githubLogin: null });
+    // Migration 0026 ends every session (ADR 0084): the old cookie is refused, and one sign-in brings the account back.
+    expect((await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).status).toBe(401);
+    const login = await SELF.fetch(`${ORIGIN}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "linked@foxban.test", password: "correct horse battery" }),
+    });
+    expect(login.status).toBe(200);
+    const fresh = login.headers.get("set-cookie")!.split(";")[0]!;
+    expect(await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie: fresh } })).json()).toMatchObject({ githubLogin: null });
   });
 });

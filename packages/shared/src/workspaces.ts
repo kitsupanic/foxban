@@ -13,8 +13,6 @@ export type WorkspaceAccess = z.infer<typeof WorkspaceAccessSchema>;
 
 export const BoardCapabilitiesSchema = z.strictObject({
   canManageBoard: z.boolean(),
-  canManageColumns: z.boolean(),
-  canManageMembers: z.boolean(),
 });
 export type BoardCapabilities = z.infer<typeof BoardCapabilitiesSchema>;
 

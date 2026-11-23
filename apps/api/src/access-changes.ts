@@ -930,8 +930,8 @@ async function commitOrAbort(
   if (budget.expired) return "retry";
   const evaluation = await evaluateCommit(env, op, payload);
   if (!evaluation.ok) {
-    await abortOperation(env, op, participants, evaluation.reason);
-    return "aborted";
+    // An abort that did not land leaves the attempt open: report retry, or the release below unfences a live attempt.
+    return (await abortOperation(env, op, participants, evaluation.reason)) ? "aborted" : "retry";
   }
   const actor = await env.DB.prepare("SELECT email FROM users WHERE id=?")
     .bind(op.actorId)
@@ -945,8 +945,7 @@ async function commitOrAbort(
   } catch (error) {
     const retryEvaluation = await evaluateCommit(env, op, payload);
     if (retryEvaluation.ok) throw error;
-    await abortOperation(env, op, participants, retryEvaluation.reason);
-    return "aborted";
+    return (await abortOperation(env, op, participants, retryEvaluation.reason)) ? "aborted" : "retry";
   }
 }
 
@@ -988,8 +987,7 @@ async function stageBoardDeletion(
   const evaluation = await evaluateCommit(env, op, payload);
   if (!evaluation.ok) {
     const participants = await loadParticipants(env, op.id);
-    await abortOperation(env, op, participants, evaluation.reason);
-    return "aborted";
+    return (await abortOperation(env, op, participants, evaluation.reason)) ? "aborted" : "retry";
   }
   try {
     await env.DB.batch([

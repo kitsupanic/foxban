@@ -1,5 +1,4 @@
 import { Hono, type Context } from "hono";
-import { getCookie } from "hono/cookie";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import {
@@ -29,7 +28,6 @@ import {
   recheckSessionAfterUpgrade,
   requestSessionHash,
   revokeRealtimeSessions,
-  SESSION_COOKIE,
   boardManageSql,
   boardMemberIdsSql,
   boardOpenSql,
@@ -475,12 +473,13 @@ const app = new Hono<AppEnv>()
     }
     // A linked GitHub id is a sign-in credential (ADR 0065): dropping it ends the other sessions, as a password
     // change does, in the same batch so an unlinked account never keeps them.
+    const sessionHash = await requestSessionHash(c);
     if (githubLogin !== undefined) {
-      statements.push(c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND id != ?").bind(user.id, getCookie(c, SESSION_COOKIE) ?? ""));
+      statements.push(c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND id != ?").bind(user.id, sessionHash));
     }
     if (statements.length > 0) await c.env.DB.batch(statements);
     if (githubLogin !== undefined) {
-      revokeRealtimeSessions(c.env, c.executionCtx, user.id, { exceptSessionHash: await requestSessionHash(c) });
+      revokeRealtimeSessions(c.env, c.executionCtx, user.id, { exceptSessionHash: sessionHash });
     }
 
     const updatedUser: SessionUser = {
@@ -714,7 +713,7 @@ const app = new Hono<AppEnv>()
       id: crypto.randomUUID(), name, key, ownerId: user.id, icon, color,
       workspaceId: destination.id, workspaceName: destination.name,
       accessMode, accessVersion: 0,
-      capabilities: { canManageBoard:true,canManageColumns:true,canManageMembers:true },
+      capabilities: { canManageBoard:true },
       viaWorkspaceAdmin: false,
     };
     try {
@@ -1155,7 +1154,7 @@ const app = new Hono<AppEnv>()
       return c.json({ error: "realtime client update required" }, 409);
     }
     const board = c.get("board");
-    const response = await boardClient(c.env, board.id).connect(c.req.raw, c.get("user").id, board.capabilities.canManageColumns, await requestSessionHash(c));
+    const response = await boardClient(c.env, board.id).connect(c.req.raw, c.get("user").id, board.capabilities.canManageBoard, await requestSessionHash(c));
     return recheckSessionAfterUpgrade(c, response, board.id);
   })
   .get("/presence/ws", requireAuth, async (c) => {

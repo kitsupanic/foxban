@@ -13,8 +13,8 @@ import {
   isAdminEmail,
   NO_PASSWORD_HASH,
   rateLimitAuth,
+  requestSessionHash,
   requireAuth,
-  SESSION_COOKIE,
   sha256Hex,
   signUpWithGitHub,
   startSession,
@@ -135,7 +135,7 @@ function beginGitHubFlow(c: Context<AppEnv>, clientId: string, stateCookie: stri
  */
 async function storeGitHubFlow(c: Context<AppEnv>, state: string, purpose: "link" | "reauth") {
   await c.env.DB.prepare("UPDATE sessions SET github_link_state_hash = ?, github_link_expires_at = ?, github_link_purpose = ? WHERE id = ?")
-    .bind(await sha256Hex(state), Date.now() + GITHUB_FLOW_TTL_SECONDS * 1000, purpose, getCookie(c, SESSION_COOKIE) ?? "")
+    .bind(await sha256Hex(state), Date.now() + GITHUB_FLOW_TTL_SECONDS * 1000, purpose, await requestSessionHash(c))
     .run();
 }
 
@@ -271,12 +271,12 @@ export const authRouter = new Hono<AppEnv>()
       const { currentPassword, newPassword } = c.req.valid("json");
       const user = c.get("user");
       if (!(await underAccountLimit(c, user.email))) return c.json({ error: "too many requests" } as const, 429);
-      const sessionId = getCookie(c, SESSION_COOKIE) ?? "";
+      const sessionHash = await requestSessionHash(c);
       // An account with no password has no secret to prove, and the session alone must not be enough: a first
       // password is a new sign-in credential. It has to have approved its own GitHub account on this session
       // just now (ADR 0081, amending 0065); the callback leaves that proof, and the batch below spends it.
       // The compare-and-set against the marker lets only one first password win. Anything else must present the current one.
-      if (!user.hasPassword && !(await c.env.DB.prepare("SELECT 1 FROM sessions WHERE id = ? AND github_reauth_until > ?").bind(sessionId, Date.now()).first())) {
+      if (!user.hasPassword && !(await c.env.DB.prepare("SELECT 1 FROM sessions WHERE id = ? AND github_reauth_until > ?").bind(sessionHash, Date.now()).first())) {
         return c.json(GITHUB_REAUTH_REQUIRED, 401);
       }
       const verifiedHash = user.hasPassword
@@ -293,21 +293,21 @@ export const authRouter = new Hono<AppEnv>()
         c.env.DB.prepare(
           `UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?
               AND (password_hash != ? OR EXISTS (SELECT 1 FROM sessions WHERE id = ? AND github_reauth_until > ?))`,
-        ).bind(newHash, user.id, verifiedHash, NO_PASSWORD_HASH, sessionId, Date.now()),
+        ).bind(newHash, user.id, verifiedHash, NO_PASSWORD_HASH, sessionHash, Date.now()),
         c.env.DB.prepare(
           `DELETE FROM sessions
             WHERE user_id = ?
               AND id != ?
               AND EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)`,
-        ).bind(user.id, sessionId, user.id, newHash),
-        c.env.DB.prepare("UPDATE sessions SET github_reauth_until = NULL WHERE id = ?").bind(sessionId),
+        ).bind(user.id, sessionHash, user.id, newHash),
+        c.env.DB.prepare("UPDATE sessions SET github_reauth_until = NULL WHERE id = ?").bind(sessionHash),
       ]);
 
       if (updateResult?.meta.changes !== 1) {
         return c.json({ error: "invalid credentials" }, 401);
       }
       // The other sessions' rows are gone; their open sockets must go too (ADR 0082).
-      revokeRealtimeSessions(c.env, c.executionCtx, user.id, { exceptSessionHash: await sha256Hex(sessionId) });
+      revokeRealtimeSessions(c.env, c.executionCtx, user.id, { exceptSessionHash: sessionHash });
 
       return c.json({ ok: true });
     },
@@ -350,7 +350,7 @@ export const authRouter = new Hono<AppEnv>()
     const code = c.req.query("code");
     const expected = getCookie(c, GITHUB_STATE_COOKIE);
     deleteCookie(c, GITHUB_STATE_COOKIE, { path: "/" });
-    const sessionId = getCookie(c, SESSION_COOKIE) ?? "";
+    const sessionHash = await requestSessionHash(c);
     // The stored state is single use: the first callback spends it, whatever comes of the rest. The first statement
     // answers the purpose it was stored with only when it was this one that spent it (RETURNING shows the row after
     // the update, so it leaves the purpose for the second statement to clear).
@@ -359,8 +359,8 @@ export const authRouter = new Hono<AppEnv>()
         `UPDATE sessions SET github_link_state_hash = NULL, github_link_expires_at = NULL
           WHERE id = ? AND github_link_state_hash = ? AND github_link_expires_at > ?
           RETURNING github_link_purpose AS purpose`,
-      ).bind(sessionId, await sha256Hex(state ?? ""), Date.now()),
-      c.env.DB.prepare("UPDATE sessions SET github_link_state_hash = NULL, github_link_expires_at = NULL, github_link_purpose = NULL WHERE id = ?").bind(sessionId),
+      ).bind(sessionHash, await sha256Hex(state ?? ""), Date.now()),
+      c.env.DB.prepare("UPDATE sessions SET github_link_state_hash = NULL, github_link_expires_at = NULL, github_link_purpose = NULL WHERE id = ?").bind(sessionHash),
     ]);
     const purpose = spent?.results[0]?.purpose;
     if (purpose !== "link" && purpose !== "reauth") return fail();
@@ -381,7 +381,7 @@ export const authRouter = new Hono<AppEnv>()
       const { meta } = await c.env.DB.prepare(
         "UPDATE sessions SET github_reauth_until = ? WHERE id = ? AND EXISTS (SELECT 1 FROM users WHERE users.id = sessions.user_id AND users.github_user_id = ?)",
       )
-        .bind(Date.now() + GITHUB_REAUTH_TTL_MS, sessionId, account.id)
+        .bind(Date.now() + GITHUB_REAUTH_TTL_MS, sessionHash, account.id)
         .run();
       return meta.changes === 1 ? c.redirect(`${appOrigin(c.env, c.req.url)}/profile?github=reauthed`) : fail("reauth-error");
     }

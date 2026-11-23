@@ -177,8 +177,6 @@ export function toBoardRow(raw: RawBoardRecord): BoardRow {
     accessVersion: raw.accessVersion,
     capabilities: {
       canManageBoard: canManage,
-      canManageColumns: canManage,
-      canManageMembers: true,
     },
     viaWorkspaceAdmin:
       raw.accessMode === "restricted" &&
@@ -530,7 +528,7 @@ export async function signUpWithGitHub(
   }
 }
 
-/** Creates a session row for `userId` and puts its id in the response cookie. */
+/** Creates a session row for `userId` and puts a new random id in the response cookie. The row is keyed by that id's SHA-256 (ADR 0084), so a read of D1 is no sign-in. */
 export async function startSession(
   c: Context<AppEnv>,
   userId: string,
@@ -538,15 +536,16 @@ export async function startSession(
 ): Promise<boolean> {
   const now = Date.now();
   const id = randomHex(32);
+  const rowId = await sha256Hex(id);
   const inserted = verifiedHash === undefined
     ? await c.env.DB.prepare("INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)")
-        .bind(id, userId, now + SESSION_TTL_MS)
+        .bind(rowId, userId, now + SESSION_TTL_MS)
         .run()
     : await c.env.DB.prepare(
         `INSERT INTO sessions (id, user_id, expires_at)
          SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)`,
       )
-        .bind(id, userId, now + SESSION_TTL_MS, userId, verifiedHash)
+        .bind(rowId, userId, now + SESSION_TTL_MS, userId, verifiedHash)
         .run();
   if (inserted.meta.changes !== 1) return false;
   // Expired rows are already rejected on read; sweeping them here keeps the table
@@ -564,16 +563,16 @@ export async function startSession(
 }
 
 export async function endSession(c: Context<AppEnv>): Promise<void> {
-  const id = getCookie(c, SESSION_COOKIE);
-  if (id) {
-    const ended = await c.env.DB.prepare("DELETE FROM sessions WHERE id = ? RETURNING user_id AS userId").bind(id).first<{ userId: string }>();
+  if (getCookie(c, SESSION_COOKIE)) {
+    const hash = await requestSessionHash(c);
+    const ended = await c.env.DB.prepare("DELETE FROM sessions WHERE id = ? RETURNING user_id AS userId").bind(hash).first<{ userId: string }>();
     // The row is gone, so the session's open sockets must go too (ADR 0082).
-    if (ended) revokeRealtimeSessions(c.env, c.executionCtx, ended.userId, { sessionHashes: [await sha256Hex(id)] });
+    if (ended) revokeRealtimeSessions(c.env, c.executionCtx, ended.userId, { sessionHashes: [hash] });
   }
   deleteCookie(c, SESSION_COOKIE, { path: "/" });
 }
 
-/** The SHA-256 of the request's session id: how a socket names its session to a Durable Object without handing it the bearer secret (ADR 0082). Call after `requireAuth`. */
+/** The SHA-256 of the request's session cookie: the `sessions.id` row key (ADR 0084), and how a socket names its session to a Durable Object without handing it the bearer secret (ADR 0082). */
 export function requestSessionHash(c: Context<AppEnv>): Promise<string> {
   return sha256Hex(getCookie(c, SESSION_COOKIE) ?? "");
 }
@@ -713,10 +712,10 @@ export function revokeRealtimeSessions(
  * revocation, for that session's hash, sent to that same object (a board's when `boardId` is set, the PresenceDO's
  * when null), with one retry. Either the sweep saw the socket or this read sees the deleted row.
  */
-export async function revokeIfSessionEnded(env: Env, sessionId: string, userId: string, boardId: string | null): Promise<void> {
-  const live = await env.DB.prepare("SELECT 1 AS live FROM sessions WHERE id = ? AND expires_at > ?").bind(sessionId, Date.now()).first();
+export async function revokeIfSessionEnded(env: Env, sessionHash: string, userId: string, boardId: string | null): Promise<void> {
+  const live = await env.DB.prepare("SELECT 1 AS live FROM sessions WHERE id = ? AND expires_at > ?").bind(sessionHash, Date.now()).first();
   if (live) return;
-  const body: SessionRevocation = { userId, sessionHashes: [await sha256Hex(sessionId)] };
+  const body: SessionRevocation = { userId, sessionHashes: [sessionHash] };
   if (!(await revokeOn(env, boardId, body)) && !(await revokeOn(env, boardId, body))) {
     console.warn(`[session] a socket opened by an ended session was not closed on ${boardId ?? "presence"}`);
   }
@@ -726,7 +725,7 @@ export async function revokeIfSessionEnded(env: Env, sessionId: string, userId: 
 export function recheckSessionAfterUpgrade(c: Context<AppEnv>, response: Response, boardId: string | null): Response {
   if (response.status === 101) {
     c.executionCtx.waitUntil(
-      revokeIfSessionEnded(c.env, getCookie(c, SESSION_COOKIE) ?? "", c.get("user").id, boardId).catch((error) =>
+      requestSessionHash(c).then((hash) => revokeIfSessionEnded(c.env, hash, c.get("user").id, boardId)).catch((error) =>
         console.warn("[session] could not recheck the session of a new socket:", error instanceof Error ? error.message : error),
       ),
     );
@@ -736,8 +735,7 @@ export function recheckSessionAfterUpgrade(c: Context<AppEnv>, response: Respons
 
 /** Resolves the session cookie to a user, or answers 401. */
 export const requireAuth = createMiddleware<AppEnv>(async (c, next) => {
-  const sessionId = getCookie(c, SESSION_COOKIE);
-  if (!sessionId) return c.json({ error: "unauthorized" } as const, 401);
+  if (!getCookie(c, SESSION_COOKIE)) return c.json({ error: "unauthorized" } as const, 401);
 
   const row = await c.env.DB.prepare(
     `SELECT ${SESSION_USER_COLS}
@@ -745,7 +743,7 @@ export const requireAuth = createMiddleware<AppEnv>(async (c, next) => {
        JOIN users ON users.id = sessions.user_id
       WHERE sessions.id = ? AND sessions.expires_at > ?`,
   )
-    .bind(sessionId, Date.now())
+    .bind(await requestSessionHash(c), Date.now())
     .first<SessionUserRow>();
   if (!row) return c.json({ error: "unauthorized" } as const, 401);
 

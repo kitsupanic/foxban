@@ -1,6 +1,8 @@
 import { SELF, applyD1Migrations, env } from "cloudflare:test";
 import { firstWorkspaceId } from "./first-workspace";
 import { beforeAll, describe, expect, it } from "vitest";
+import { listAuthorizedBoards } from "../src/agent-credentials";
+import type { SessionUser } from "../src/auth";
 
 const ORIGIN = "https://foxban.test";
 const PASSWORD = "correct horse battery";
@@ -84,6 +86,23 @@ describe("agent credentials", () => {
 
     await env.DB.prepare("UPDATE agent_credentials SET created_at = ?1 - 1000, expires_at = ?1 WHERE id = ?2").bind(Date.now() - 1000, issued.credential.id).run();
     expect((await call()).status).toBe(401);
+  });
+
+  it("issues and lists a credential for the full 100 boards", async () => {
+    const cookie = await signup(`credential-many-${crypto.randomUUID()}@foxban.test`);
+    const boardIds: string[] = [];
+    for (let i = 0; i < 100; i += 1) boardIds.push(await createBoard(cookie));
+    const issue = (ids: string[]) => SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ name: "Many", boardIds: ids, scopes: ["boards:read"] }),
+    });
+    expect((await issue(boardIds)).status).toBe(201);
+    // The MCP board list reads the same 100 ids; D1 refuses a query with more than 100 bound parameters.
+    const user = await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).json<SessionUser>();
+    expect(await listAuthorizedBoards(env, { user, boardIds })).toHaveLength(100);
+    // One board the user cannot open still refuses the whole batch.
+    expect((await issue([...boardIds.slice(1), crypto.randomUUID()])).status).toBe(403);
   });
 
   it("keeps bearer tokens exclusive to MCP and rejects inaccessible board batches", async () => {

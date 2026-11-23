@@ -35,7 +35,7 @@ const patch = (path: string, body: unknown, session?: string) => request(path, "
 const del = (path: string, body: unknown, session?: string) => request(path, "DELETE", body, session);
 
 type Person = { cookie: string; id: string };
-type Board = { id: string; key: string; viaWorkspaceAdmin: boolean; capabilities: { canManageBoard: boolean; canManageColumns: boolean } };
+type Board = { id: string; key: string; viaWorkspaceAdmin: boolean; capabilities: { canManageBoard: boolean } };
 
 async function signup(email: string, invite?: string): Promise<string> {
   const response = await post("/auth/signup", {
@@ -404,9 +404,9 @@ describe("a workspace admin manages a Private board they were not added to", () 
     const { admin, member, boardMember, board } = await privateBoardWithEveryViewer();
     const metadata = async (who: Person) =>
       (await (await get(`/boards/by-key/${board.key}`, who.cookie)).json<Board>()).capabilities;
-    expect(await metadata(admin)).toMatchObject({ canManageBoard: true, canManageColumns: true });
+    expect(await metadata(admin)).toMatchObject({ canManageBoard: true });
     // A board member who is not a manager keeps what they had.
-    expect(await metadata(boardMember)).toMatchObject({ canManageBoard: false, canManageColumns: false });
+    expect(await metadata(boardMember)).toMatchObject({ canManageBoard: false });
     expect((await get(`/boards/by-key/${board.key}`, member.cookie)).status).toBe(403);
   });
 

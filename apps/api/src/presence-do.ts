@@ -14,7 +14,7 @@ type SocketAttachment = {
   timezone: string | null;
   /** An instance Admin opens every board, so sees everyone's presence. */
   isAdmin?: boolean;
-  /** SHA-256 of the session id the socket was opened with (ADR 0082); absent on a socket accepted before it existed. */
+  /** SHA-256 of the session cookie the socket was opened with, = `sessions.id` (ADR 0082, 0084); absent on a socket accepted before it existed. */
   sessionHash?: string;
 };
 
