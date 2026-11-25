@@ -27,6 +27,7 @@ foxban is a Kanban board that you run on your own Cloudflare account. When a tea
 ## What you need
 
 - A Cloudflare account. The free plan works.
+- R2 turned on in that account. R2 is free for small use, but Cloudflare asks you to add a payment method and start a $0 R2 plan first.
 - To deploy from your own computer, you also need [Node.js](https://nodejs.org) 22 or newer and [pnpm](https://pnpm.io).
 
 ## Pick how to deploy
@@ -35,15 +36,22 @@ There are two ways to deploy. Pick one.
 
 | Way | Good for |
 |---|---|
-| [1. The Deploy button](#1-the-deploy-button) | The fastest start. You click and type your email. |
+| [1. The Deploy button](#1-the-deploy-button) | The fastest start. You click, link GitHub or GitLab, and type your email. |
 | [2. From your computer](#2-from-your-computer) | You want to run one command when you want to update. |
 
 ### 1. The Deploy button
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kitsupanic/foxban)
+<a href="https://deploy.workers.cloudflare.com/?url=https://github.com/kitsupanic/foxban" target="_blank" rel="noopener"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" /></a>
 
-1. Click the button.
-2. Sign in to Cloudflare and to GitHub. Cloudflare makes a copy of foxban in your GitHub account.
+Before you start:
+
+- Have a Cloudflare account. If you do not have one, the button asks you to make one.
+- Turn on R2 in your Cloudflare account. Go to **R2 Object Storage** in the dashboard and start the $0 plan. Cloudflare asks for a payment method for this, but small use is free. If you skip this, the deploy fails when it makes the file storage.
+
+Then:
+
+1. Click the button. It opens in a new tab.
+2. Sign in to Cloudflare. Link your GitHub or GitLab account to Cloudflare when it asks. Cloudflare makes a copy of foxban in that account.
 3. When it asks for `ADMIN_EMAILS`, type your email.
 4. Click **Deploy**. Wait for it to finish.
 5. Open the link that it shows you. Then go to [Your first login](#your-first-login).
@@ -158,7 +166,7 @@ Those repos are now connected for everyone, on all boards. You do not need to se
 
 Each update can change the database. You do not need to do anything for that. Every deploy updates the database for you before the new code goes live.
 
-- **Deploy button:** your copy of foxban is a repo in your GitHub account. It is a copy, not a fork, so GitHub has no sync button for it. Pull the new code from this repo into your copy, and push it. Cloudflare deploys each push on its own:
+- **Deploy button:** your copy of foxban is a repo in your GitHub or GitLab account. It is a copy, not a fork, so there is no sync button for it. Pull the new code from this repo into your copy, and push it. Cloudflare deploys each push on its own:
 
   ```bash
   git pull https://github.com/kitsupanic/foxban.git main && git push
