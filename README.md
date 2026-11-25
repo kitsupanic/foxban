@@ -7,6 +7,9 @@
 Free, real-time Kanban for Cloudflare.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Deploy to Cloudflare](https://img.shields.io/badge/deploy-Cloudflare-F38020?logo=cloudflare&logoColor=white)](#1-the-deploy-button)
+
+[Deploy](#pick-how-to-deploy) · [First login](#your-first-login) · [Settings](#settings) · [GitHub](#advanced-github) · [Updating](#updating) · [Help build it](#for-people-who-want-to-help)
 
 foxban is a Kanban board that you run on your own Cloudflare account. When a teammate moves a card, you see it move right away. The free Cloudflare plan is enough for a small team.
 
@@ -19,6 +22,7 @@ foxban is a Kanban board that you run on your own Cloudflare account. When a tea
 - Cards can have notes, pictures, checklists, due dates and comments.
 - People join by invite only.
 - If you want, cards show their GitHub branches and pull requests, and can make them.
+- Coding agents can read and change boards through an [MCP endpoint](docs/mcp.md).
 
 ## What you need
 
@@ -78,13 +82,7 @@ Deploy:
 pnpm run deploy
 ```
 
-The first time, this makes the database and the file storage for you. At the end, it shows the link to your foxban.
-
-To update later, get the new code and deploy again:
-
-```bash
-git pull && pnpm install && pnpm run deploy
-```
+The first time, this makes the database and the file storage for you. At the end, it shows the link to your foxban. Then go to [Your first login](#your-first-login).
 
 Your `.env.deploy` file stays on your computer. Git does not send it anywhere.
 
@@ -94,13 +92,21 @@ Your `.env.deploy` file stays on your computer. Git does not send it anywhere.
 2. Click **Sign up**. Use the email that you put in `ADMIN_EMAILS`.
 3. Pick a password.
 
+> [!WARNING]
+> Sign up right after you deploy. foxban does not check that an email is really yours. Until you sign up, whoever types an address from `ADMIN_EMAILS` on the sign-up page gets that admin account.
+
 You are now an admin. An admin can make invite links. Send an invite link to each person who should join. Nobody can sign up without one, except admins. A link works once, and stops working 7 days after you make it.
 
-Do this right after you deploy. foxban does not check that an email is really yours. Until you sign up, whoever types an address from `ADMIN_EMAILS` on the sign-up page gets that admin account.
+### More than one admin
 
-Does foxban say that it has no admin yet? Then `ADMIN_EMAILS` is not set. Set it in Cloudflare (**Workers → foxban → Settings → Variables and Secrets**), and then sign up again. Pick the type **Secret**. If you pick **Text**, the next deploy wipes it out.
+`ADMIN_EMAILS` can hold more than one email. Put commas between them. Write each full address, like `you@example.com,boss@example.com`. A pattern such as `*@example.com` does nothing: foxban skips it. Each admin should sign up soon after the deploy, for the reason in the warning above.
 
-`ADMIN_EMAILS` can hold more than one email. Put commas between them. Write each full address, like `you@example.com,boss@example.com`. A pattern such as `*@example.com` does nothing: foxban skips it. Each admin should sign up soon after the deploy, for the reason above.
+### "No admin yet"
+
+Does foxban say that it has no admin yet? Then `ADMIN_EMAILS` is not set. Set it in Cloudflare (**Workers → foxban → Settings → Variables and Secrets**), and then sign up again.
+
+> [!IMPORTANT]
+> Pick the type **Secret**. If you pick **Text**, the next deploy wipes it out.
 
 ## Settings
 
@@ -117,23 +123,36 @@ You set these in `.env.deploy`. Only `ADMIN_EMAILS` is needed.
 
 `.env.deploy.example` has the full list, with notes.
 
-Be careful when you change a name later. A new name makes a new, empty foxban. Your old boards stay under the old name.
+> [!CAUTION]
+> Be careful when you change a name later. A new name makes a new, empty foxban. Your old boards stay under the old name.
 
 ## Advanced: GitHub
 
 You do not need this. foxban works without GitHub.
 
-With GitHub set up, you can do three things:
+### What it does
 
-- Link your GitHub account. Then your GitHub picture shows up as your picture, and you can sign in with **Log in with GitHub**. Your email and password keep working. With an invite link, you can also sign up with GitHub. An account made that way has no password. Set one in Profile, and then you can also disconnect GitHub or change your email.
-- See GitHub work on cards. A branch or pull request that has the card's key in its name, title or text shows on that card, like `KR-42`. It updates in seconds, with no reload.
-- Make a branch or a pull request from a card, and link a pull request by hand when it has no key.
+- **See GitHub work on cards.** A branch or pull request that has the card's key in its name, title or text shows on that card. The key looks like `KR-42`. It updates in seconds, with no reload.
+- **Work from a card.** Make a branch or a pull request from a card. Link a pull request by hand when it has no key.
+- **Sign in with GitHub.** Link your GitHub account in **Profile**. Then your GitHub picture shows up as your picture, and you can use **Log in with GitHub**. Your email and password keep working.
 
-It is one button. An admin opens **GitHub** in the account menu and presses **Create GitHub App**. GitHub asks them to confirm, and they come back to foxban. Then they press **Install on repos** and pick the repos. Those repos are connected for everyone, on all boards.
+With an invite link, a new person can also sign up with GitHub. An account made that way has no password. Set one in **Profile**. Then you can also disconnect GitHub or change your email.
 
-You do not need to set anything in your environment or in GitHub. foxban keeps the App's secrets for you. The first deploy makes a key to protect them. Do not change that key. If you do, the App stops working, and you make it again.
+### Set it up
 
-If you used the old way, with settings like `GITHUB_APP_ID`, you can delete those settings. foxban does not read them any more, and boards no longer have their own repo. Press the button once, and link your GitHub account again in **Profile**.
+An admin does this once:
+
+1. Open **GitHub** in the account menu.
+2. Press **Create GitHub App**. GitHub asks you to confirm, and then sends you back to foxban.
+3. Press **Install on repos** and pick the repos.
+
+Those repos are now connected for everyone, on all boards. You do not need to set anything in your environment or in GitHub. foxban keeps the App's secrets for you.
+
+> [!IMPORTANT]
+> The first deploy makes a key to protect the App's secrets. Do not change that key. If you do, the App stops working, and you must make it again.
+
+> [!NOTE]
+> Did you use the old way, with settings like `GITHUB_APP_ID`? You can delete those settings. foxban does not read them any more, and boards no longer have their own repo. Press **Create GitHub App** once, and link your GitHub account again in **Profile**.
 
 ## Updating
 
