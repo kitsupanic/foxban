@@ -638,6 +638,35 @@ describe("an invite link outlives nobody's removal", () => {
     expect((await accept(member, workspace, await invite(admin, workspace))).status).toBe(200);
   });
 
+  it("refuses to remove someone who is not a member, and revokes nothing", async () => {
+    const admin = await person();
+    const member = await person();
+    const stranger = await person();
+    const workspace = await createWorkspace(admin);
+    const token = await invite(admin, workspace);
+    expect((await accept(member, workspace, token)).status).toBe(200);
+    expect(await liveInvites(workspace)).toBe(1);
+
+    // Someone who never joined, and someone already removed, get the same refusal as an unknown role change target.
+    const operationId = crypto.randomUUID();
+    const never = await del(`/workspaces/${workspace}/members/${stranger.id}`, { operationId }, admin.cookie);
+    expect(never.status).toBe(404);
+    expect(await never.json()).toEqual({ error: "member not found" });
+    expect(await env.DB.prepare(`SELECT phase,outcome FROM access_change_operations WHERE id=?`).bind(operationId).first()).toBeNull(); // refused before anything is reserved or fenced
+    expect(await liveInvites(workspace)).toBe(1);
+
+    expect((await removeMember(admin, workspace, member)).status).toBe(200);
+    expect(await liveInvites(workspace)).toBe(0);
+    const fresh = await invite(admin, workspace);
+    expect(await liveInvites(workspace)).toBe(1);
+    expect((await removeMember(admin, workspace, member)).status).toBe(404);
+    expect(await liveInvites(workspace)).toBe(1);
+    // The same answer comes back for a retry of the refused attempt, and the fresh link still works.
+    expect((await del(`/workspaces/${workspace}/members/${stranger.id}`, { operationId }, admin.cookie)).status).toBe(404);
+    expect((await accept(member, workspace, fresh)).status).toBe(200);
+    expect(await roleOf(workspace, admin)).toBe("admin");
+  });
+
   it("revokes nothing when a member leaves", async () => {
     const admin = await person();
     const leaver = await person();

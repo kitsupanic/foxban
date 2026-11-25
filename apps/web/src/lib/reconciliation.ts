@@ -15,7 +15,6 @@ export type PendingMutation = {
 export type ServerMessageOutcome = {
   cacheState: BoardState | null;
   ackedMutationIds: string[];
-  rolledBackMutationId?: string;
 };
 
 /**
@@ -102,24 +101,11 @@ export class BoardReconciler {
   }
 
   /**
-   * Applies any server-sent message (own echo, peer broadcast, error rejection,
+   * Applies any server-sent message (own echo, peer broadcast,
    * activity, archived cards, purge, numbering) to the authoritative base state
    * and rebases remaining pending mutations over it.
    */
   applyServerMessage(msg: ServerMessage): ServerMessageOutcome {
-    if (msg.type === "error") {
-      let rolledBackMutationId: string | undefined;
-      if (msg.mutationId && this.pending.has(msg.mutationId)) {
-        this.pending.delete(msg.mutationId);
-        rolledBackMutationId = msg.mutationId;
-      }
-      return {
-        cacheState: this.getCacheState(),
-        ackedMutationIds: [],
-        rolledBackMutationId,
-      };
-    }
-
     if (msg.type === "cards.archived") {
       if (this.baseState) {
         this.baseState = reconcileArchivedCards(this.baseState, msg.cards);
@@ -212,17 +198,13 @@ export class BoardReconciler {
   rollback(mutationId: string): {
     cacheState: BoardState | null;
     removed: boolean;
-    entry?: PendingMutation;
   } {
-    const entry = this.pending.get(mutationId);
-    if (!entry) {
+    if (!this.pending.delete(mutationId)) {
       return { cacheState: this.getCacheState(), removed: false };
     }
-    this.pending.delete(mutationId);
     return {
       cacheState: this.getCacheState(),
       removed: true,
-      entry,
     };
   }
 

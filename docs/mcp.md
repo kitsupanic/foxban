@@ -49,7 +49,7 @@ node apps/api/scripts/mcp-client.mjs call list_boards '{}'
 | `unassign_label` | `tasks:write` | `{board,operationKey,task,cardLabelId}`; the join id comes from `get_task`'s label page |
 | `add_comment` | `comments:write` | `{board,operationKey,task,body}` |
 
-Thirteen tools are mounted. `complete_subtask` moves one linked subtask to the board's completed column (`done: true`) or its starting column (`done: false`): it never touches the parent, the siblings or the checklist. The five label tools manage ordinary board labels; `create_label` and `update_label` write the board-wide definition every card shows, `assign_label` adds one association to an active task, and `unassign_label` removes one association — it never deletes the definition. A board-wide delete stays in the UI.
+Thirteen tools are mounted. `complete_subtask` moves one linked subtask to the board's completed column (`done: true`) or its starting column (`done: false`): it never touches the parent, the siblings or the checklist. The four label tools manage ordinary board labels; `create_label` and `update_label` write the board-wide definition every card shows, `assign_label` adds one association to an active task, and `unassign_label` removes one association — it never deletes the definition. A board-wide delete stays in the UI.
 
 `status:*` is a naming convention, not a rule Foxban enforces: several `status:*` labels coexist, assigning one removes nothing, and a definition's `id` — never its name — is its identity. `get_board` and `get_task` return the definitions and a task's assignments as `PageInput` pages, so read the page to find the exact `cardLabelId` before removing an association.
 

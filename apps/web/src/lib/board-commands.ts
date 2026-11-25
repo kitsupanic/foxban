@@ -90,8 +90,9 @@ export function boardCommands(send: SendMutation, readBoard: () => BoardState | 
       const index = rest.findIndex(column => column.id === overColumnId) + (from < over ? 1 : 0);
       const prev = rest[index - 1]?.position ?? null;
       const next = rest[index]?.position ?? null;
-      // Concurrent creates can tie; use the same one-row append fallback as cards.
-      return emit({ type: "column.move", id, position: generateKeyBetween(prev, prev === next ? null : next) });
+      // Concurrent creates can tie (prev === next); bound by the first key above the tie so the column stays beside its neighbours instead of landing at the far right.
+      const upper = prev !== null && prev === next ? rest.find(column => column.position > prev)?.position ?? null : next;
+      return emit({ type: "column.move", id, position: generateKeyBetween(prev, upper) });
     }),
     renameColumn: (id: string, title: string): Sent => emit({ type: "column.rename", id, title }),
     /** The expected current roles let the board refuse a choice made against a stale view. */

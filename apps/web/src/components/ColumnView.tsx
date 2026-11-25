@@ -272,7 +272,8 @@ export function ColumnView({
                 key={card.id}
                 dropPlacement={dropHint?.cardId === card.id ? dropHint.placement : undefined}
                 {...faceProps}
-                subtaskContent={
+                // A card outside every family has nothing to show, and an absent slot keeps its props stable for memo.
+                subtaskContent={!hierarchy.parentByChild.has(card.id) && !hierarchy.childrenByParent.get(card.id)?.length ? undefined : (
                   <>
                   {hierarchy.parentByChild.has(card.id) && <button type="button" className="w-full truncate border-t px-2 py-1 text-left text-xs text-muted-foreground" onClick={() => onOpenCard(hierarchy.parentByChild.get(card.id)!)}>Parent: {index.cardsById.get(hierarchy.parentByChild.get(card.id)!)?.title}</button>}
                   <CardSubtaskFamily
@@ -284,7 +285,7 @@ export function ColumnView({
                     disclosure={{ collapsed: collapsedSubtasks, onToggle: onToggleSubtasks }}
                   />
                   </>
-                }
+                )}
                 onOpen={onOpenCard}
               />
             );

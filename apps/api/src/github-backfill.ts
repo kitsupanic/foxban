@@ -38,7 +38,7 @@ const OPS_BUDGET = 300;
  * No single repo may spend more than this (the real limit is 1000). A repo that would cross it stops and is held with the
  * same growing delay as any failure, so the rest of the queue gets its turns; the claim counted an attempt, so one that never fits is dropped after MAX_ATTEMPTS.
  */
-const OPS_CEILING = 900;
+export const OPS_CEILING = 900;
 /** Worst case for one PR: two D1 reads and a board call for each of the up to 20 boards its keys name. */
 const MAX_PR_COST = 2 + 20;
 /** Hard caps per repo (pages per list, and keyed PRs or branches loaded), so one repo's worst case stays inside the budget's headroom. shortcut: past these the oldest items are skipped, upgrade to a resumable cursor if real repos hit them. */
@@ -95,7 +95,7 @@ const ListedPullRequestSchema = z.object({
   body: z.string().nullish(),
   updated_at: z.string(),
   closed_at: z.string().nullish(),
-  head: z.object({ ref: z.string() }),
+  head: z.object({ ref: z.string(), repo: z.object({ id: z.number().int() }).nullish() }),
 });
 
 async function backfillPullRequests(env: Env, token: string, repo: { id: number; fullName: string }, cutoff: number, budget: Budget): Promise<void> {
@@ -127,7 +127,9 @@ async function backfillPullRequests(env: Env, token: string, repo: { id: number;
           }
           if (!(Date.parse(pr.closed_at ?? "") >= cutoff)) continue;
         }
-        if (!routed.has(pr.number) && extractTaskKeys([pr.head.ref, pr.title, pr.body]).length === 0) continue;
+        // A fork's PR names no card by key (ADR 0088), so only a routed one is worth the write.
+        const namesKey = pr.head.repo?.id === repo.id && extractTaskKeys([pr.head.ref, pr.title, pr.body]).length > 0;
+        if (!routed.has(pr.number) && !namesKey) continue;
         if (++keyed > MAX_KEYED) return;
         reserve(budget, MAX_PR_COST);
         try {

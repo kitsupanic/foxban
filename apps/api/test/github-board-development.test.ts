@@ -67,7 +67,7 @@ function pullRequestEvent(number: number, title: string, options: { state?: "ope
       merged: options.merged ?? false,
       html_url: `https://github.example/${REPO_NAME}/pull/${number}`,
       updated_at: new Date(BASE_TIME + (options.seconds ?? 0) * 1000).toISOString(),
-      head: { ref: "work" },
+      head: { ref: "work", repo: { id: REPO_ID } },
     },
   };
 }

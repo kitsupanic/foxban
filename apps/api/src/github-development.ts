@@ -26,7 +26,7 @@ const PullRequestEventSchema = z.object({
     merged_at: z.string().nullish(),
     html_url: z.url({ protocol: /^https?$/ }),
     updated_at: z.string().transform((text) => Date.parse(text)).pipe(z.number().int().positive()),
-    head: z.object({ ref: z.string() }),
+    head: z.object({ ref: z.string(), repo: z.object({ id: z.number().int() }).nullish() }),
   }),
 });
 
@@ -72,7 +72,9 @@ export async function boardsNamedByKeys(env: Env, keys: ReturnType<typeof extrac
 /**
  * Routes a pull request event from a connected repo (the caller has checked that) to
  * the boards that hold it. A board is told when the PR's branch, title or body names
- * one of its task keys (matched by board key, so unknown keys fall away), or when it
+ * one of its task keys (matched by board key, so unknown keys fall away) and the PR's
+ * head is in the connected repo itself (a fork's, or one whose head repo is gone, is
+ * stranger-written text and links nothing by key, ADR 0088), or when it
  * already links the PR through the routing table. Each board links and updates only
  * its own cards. Returns whether any card changed. A caller that budgets subrequests
  * passes `budget`, which gets what this cost: two D1 reads and one call per board.
@@ -81,7 +83,7 @@ export async function handlePullRequestEvent(env: Env, payload: unknown, budget?
   const { repository, pull_request: pr } = PullRequestEventSchema.parse(payload);
   const pullRequest = toDevelopmentPullRequest({ id: repository.id, fullName: repository.full_name }, pr);
 
-  const boards = await boardsNamedByKeys(env, extractTaskKeys([pr.head.ref, pr.title, pr.body]));
+  const boards = pr.head.repo?.id === repository.id ? await boardsNamedByKeys(env, extractTaskKeys([pr.head.ref, pr.title, pr.body])) : new Map<string, number[]>();
   for (const boardId of await routedBoardIds(env, repository.id, pr.number)) {
     if (!boards.has(boardId)) boards.set(boardId, []);
   }

@@ -4,6 +4,7 @@ import type {
   Card,
   CardLabel,
   CardRelation,
+  CardRestored,
   ChecklistItem,
   ClientMessage,
   Column,
@@ -338,7 +339,7 @@ function syncAutoRoles(state: BoardState): BoardState {
  */
 export function applyMutation(
   state: BoardState,
-  msg: ClientMessage,
+  msg: ClientMessage | CardRestored,
   boardId: string,
 ): BoardState {
   switch (msg.type) {
@@ -528,6 +529,8 @@ export function applyMutation(
     // frame; the verbatim mutation only settles the sender's pending timer.
     case "card.purge":
       return state;
+    // Server-only, after the verbatim `card.restore` (ADR 0089): the description the snapshot's archived card did not carry.
+    case "card.restored": return reconcileRestoredDescription(state, msg.id, msg.description);
     case "card.restore": {
       const archived = state.archivedCards.find((candidate) => candidate.id === msg.id);
       if (!archived) return state;
@@ -783,6 +786,23 @@ export function reconcileArchivedCards(
     cards: state.cards.filter((card) => !incomingById.has(card.id)),
     archivedCards,
   };
+}
+
+/**
+ * Installs the description of a server-only `card.restored` frame on the card the
+ * preceding `card.restore` brought back (ADR 0089). Nothing else about the card
+ * changes. A card that is not active here (purged, or archived again) is left alone.
+ */
+export function reconcileRestoredDescription(
+  state: BoardState,
+  id: string,
+  description: string,
+): BoardState {
+  const index = state.cards.findIndex((card) => card.id === id);
+  if (index === -1 || state.cards[index]!.description === description) return state;
+  const cards = [...state.cards];
+  cards[index] = { ...cards[index]!, description };
+  return { ...state, cards };
 }
 
 /**

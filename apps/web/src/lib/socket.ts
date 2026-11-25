@@ -397,15 +397,9 @@ export function useBoardSocket(
         eventsRef.current?.resolved?.(id);
         notifyMutation(id, "accepted");
       }
-      if (outcome.rolledBackMutationId) {
-        const timer = pendingTimersRef.current.get(outcome.rolledBackMutationId);
-        if (timer !== undefined) {
-          clearTimeout(timer);
-          pendingTimersRef.current.delete(outcome.rolledBackMutationId);
-        }
-        eventsRef.current?.resolved?.(outcome.rolledBackMutationId);
-      }
-      if (outcome.cacheState) {
+      // These two never change board state; skipping the write spares every card a re-render.
+      const changesBoard = msg.type !== "activity.recorded" && msg.type !== "github.invalidated";
+      if (changesBoard && outcome.cacheState) {
         queryClient.setQueryData<BoardState>(boardQueryKey(boardId), outcome.cacheState);
       }
     };

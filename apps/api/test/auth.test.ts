@@ -4,6 +4,7 @@ import {
   type ServerMessage,
 } from "@foxban/shared";
 import { SELF, applyD1Migrations, createExecutionContext, env, runInDurableObject } from "cloudflare:test";
+import { Hono } from "hono";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 /**
@@ -19,7 +20,7 @@ beforeAll(async () => {
 import worker, { reconcileAttachmentObjects } from "../src/index";
 import { firstWorkspaceId } from "./first-workspace";
 import { parseAvatarObjectKey } from "../src/attachment-lifecycle";
-import { sha256Hex } from "../src/auth";
+import { sha256Hex, startSession, type AppEnv } from "../src/auth";
 import { GitHubApiError, getBranch } from "../src/github";
 
 const PASSWORD = "correct horse battery";
@@ -1977,6 +1978,34 @@ describe("log in with GitHub", () => {
     expect(signedInCookie(limited)).toBeNull();
     expect(signedInCookie(await logInWithGitHub("octo", { "CF-Connecting-IP": "198.51.100.24" }))).not.toBeNull();
   });
+
+  it("starts a session only while the account is still linked to the GitHub id that signed in, so a disconnect that lands first wins", async () => {
+    const linked = await linkedUser("gh-guard@foxban.test", "guard", { id: 583299, login: "guard" });
+    const userId = await getUserId(linked);
+    const sessions = async () => (await env.DB.prepare("SELECT count(*) AS n FROM sessions WHERE user_id = ?").bind(userId).first<{ n: number }>())!.n;
+    // The callback's own call, reached directly: a race between its lookup and its insert cannot be staged over HTTP.
+    const app = new Hono<AppEnv>().post("/start", async (c) => c.json(await startSession(c, userId, { githubUserId: Number(c.req.query("github")) })));
+    const start = (githubUserId: number) => app.request(`/start?github=${githubUserId}`, { method: "POST" }, env);
+    const before = await sessions();
+
+    const wrongAccount = await start(583298);
+    expect(await wrongAccount.json()).toBe(false);
+    expect(signedInCookie(wrongAccount)).toBeNull();
+    expect(await sessions()).toBe(before);
+
+    const linkedAccount = await start(583299);
+    expect(await linkedAccount.json()).toBe(true);
+    expect(signedInCookie(linkedAccount)).not.toBeNull();
+    expect(await sessions()).toBe(before + 1);
+
+    // The disconnect (PATCH /me) commits after the callback looked the account up: no session, no cookie.
+    expect((await patch("/me", { githubLogin: null }, linked)).status).toBe(200);
+    const remaining = await sessions();
+    const afterDisconnect = await start(583299);
+    expect(await afterDisconnect.json()).toBe(false);
+    expect(signedInCookie(afterDisconnect)).toBeNull();
+    expect(await sessions()).toBe(remaining);
+  });
 });
 
 describe("sign up with GitHub", () => {
@@ -2127,6 +2156,35 @@ describe("sign up with GitHub", () => {
     for (const password of [PASSWORD, "*", ""]) {
       expect((await post("/auth/login", { email, password: password || "x" })).status).toBe(401);
     }
+  });
+
+  it("lowercases the login in the no-reply address, so the account can sign in by e-mail once it has a password", async () => {
+    const password = "first-ever-password";
+    approves("octo", { id: 710052, login: "OctoCat" });
+    const cookie = signedInCookie(await logInWithGitHub("octo", undefined, await mintInvite(admin)))!;
+    const email = "710052+octocat@users.noreply.github.com";
+    // The login itself is kept as GitHub spells it; only the address is folded.
+    expect(await (await get("/me", cookie)).json()).toMatchObject({ email, githubLogin: "OctoCat" });
+
+    expect(await reauthWithGitHub(cookie, "octo")).toBe("https://app.example/profile?github=reauthed");
+    expect((await post("/auth/password", { newPassword: password }, cookie)).status).toBe(200);
+    // Every e-mail path lowercases what it is given, so the stored address has to be lowercase to be found.
+    expect((await post("/auth/login", { email, password })).status).toBe(200);
+    expect((await post("/auth/login", { email: "710052+OctoCat@users.noreply.github.com", password })).status).toBe(200);
+  });
+
+  it("migration 0029 lowercases existing no-reply addresses and leaves every other address alone", async () => {
+    const migration = env.TEST_MIGRATIONS.find((m) => m.name.startsWith("0029_"))!;
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO users(id,email,name,password_hash,created_at) VALUES ('m29-a','710091+OctoCat@users.noreply.github.com','a','*',1), ('m29-b','710092+quiet@users.noreply.github.com','b','*',1), ('m29-c','Mixed.Case@Example.test','c','*',1)"),
+    ]);
+    await env.DB.batch(migration.queries.map((query) => env.DB.prepare(query)));
+    const { results } = await env.DB.prepare("SELECT id, email FROM users WHERE id LIKE 'm29-%' ORDER BY id").all();
+    expect(results).toEqual([
+      { id: "m29-a", email: "710091+octocat@users.noreply.github.com" },
+      { id: "m29-b", email: "710092+quiet@users.noreply.github.com" },
+      { id: "m29-c", email: "Mixed.Case@Example.test" },
+    ]);
   });
 
   it("fails closed when GitHub will not list the addresses, spending nothing", async () => {

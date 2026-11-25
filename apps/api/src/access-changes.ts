@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { adminEmails, boardManageSql, boardOpenSql, canManageBoard, canOpenBoard, isAdminEmail, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
 import { boardClient } from "./board-client";
+import { stableStringify } from "./mcp-contract";
 
 export type AccessChangeKind =
   | "workspace-member-add"
@@ -171,17 +172,6 @@ const PAYLOAD_SCHEMAS: PayloadSchema = {
   "board-member-add": BoardMemberPayloadSchema,
   "board-member-remove": BoardMemberPayloadSchema,
 };
-
-/** Key-sorted JSON with a stable shape, so replaying an attempt hashes identically. */
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object")
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
-      .join(",")}}`;
-  return JSON.stringify(value);
-}
 
 /**
  * Foreground orchestration is bounded; recovery shares one pass budget. Work that
@@ -539,7 +529,9 @@ async function evaluateCommit(
       const leaving = op.kind === "workspace-member-remove" && op.actorId === payload.userId;
       if (row.actorRole !== "admin" && !(leaving && row.actorRole !== null))
         return { ok: false, reason: ACCESS_CHANGE_ABORT.forbidden };
-      if (op.kind === "workspace-member-role" && row.targetRole === null)
+      // Neither a role change nor a removal has anyone to act on: a removal of a non-member would otherwise
+      // commit, retire the workspace's invite links (ADR 0079) and fence every board for nothing.
+      if (row.targetRole === null)
         return { ok: false, reason: ACCESS_CHANGE_ABORT.memberNotFound };
       // The workspace keeps an admin: the last one cannot be demoted or removed.
       const losesAdmin = op.kind === "workspace-member-remove" || payload.role === "member";
@@ -1639,7 +1631,7 @@ export async function runAccessChange(
   const parsed = PAYLOAD_SCHEMAS[input.kind].safeParse(input.payload);
   if (!parsed.success) throw new AccessChangeConflict();
   const payload = parsed.data as Record<string, unknown>;
-  const payloadJson = canonical(payload);
+  const payloadJson = stableStringify(payload);
   const payloadHash = await sha256Hex(payloadJson);
   const existing = await readOperation(env, input.operationId);
   if (existing) {

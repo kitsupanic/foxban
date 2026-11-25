@@ -295,7 +295,7 @@ const pullRequestEvent = (pull: RemotePull) => ({
     merged: false,
     html_url: `https://github.com/${REPO_NAME}/pull/${pull.number}`,
     updated_at: "2026-11-12T10:00:00Z",
-    head: { ref: pull.head },
+    head: { ref: pull.head, repo: { id: REPO_ID } },
   },
 });
 

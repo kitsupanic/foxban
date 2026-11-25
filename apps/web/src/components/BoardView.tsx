@@ -625,6 +625,12 @@ export function BoardView({
       resetScroll: false,
     });
   };
+  // Every card holds this handler as a prop, so its identity must not change with the board state.
+  const openFromBoardRef = useRef(openFromBoard);
+  useEffect(() => {
+    openFromBoardRef.current = openFromBoard;
+  });
+  const openCardFromBoard = useCallback((id: string) => openFromBoardRef.current(id), []);
   const openFromCard = (id: string) => {
     if (!state) return;
     const card = state.cards.find((candidate) => candidate.id === id);
@@ -1756,7 +1762,7 @@ export function BoardView({
                       boardKey={meta.key}
                       pullRequestBadges={pullRequestBadges}
                       commands={commands}
-                      onOpenCard={openFromBoard}
+                      onOpenCard={openCardFromBoard}
                       onToggleSubtasks={toggleSubtasks}
                       onRequestDelete={(trigger) => openColumnDelete(column.id, trigger)}
                       onAddCard={(trigger) => openCardCreate(column.id, trigger)}

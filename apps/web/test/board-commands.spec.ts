@@ -64,6 +64,15 @@ for (const row of table) {
   });
 }
 
+test("a column dropped between two tied neighbours stays beside them", () => {
+  const column = (id: string, position: string) => ({ id, title: id, position });
+  const tied = { ...fixture(), columns: [column("A", "a0"), column("B", "a1"), column("C", "a1"), column("D", "a2")] };
+  const { sent, commands } = harness(tied);
+  expect(commands.moveColumn("A", "B")).toBe("sent");
+  const { position } = sent[0] as Extract<ClientMessage, { type: "column.move" }>;
+  expect(position > "a1" && position < "a2").toBe(true);
+});
+
 test("assigning a new label and creating one both mint entity ids", () => {
   const { sent, commands } = harness();
   expect(commands.toggleLabel("C", "lab")).toBe("sent");

@@ -1,5 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { ClientMessageSchema } from "@foxban/shared";
+import { ClientMessageSchema, REBALANCE_MAX_POSITIONS, ServerMessageSchema } from "@foxban/shared";
 import { describe, expect, it } from "vitest";
 import { generateKeyBetween } from "fractional-indexing";
 import { REBALANCE_KEY_LENGTH, runMutation } from "../src/board-mutations";
@@ -133,6 +133,31 @@ describe("mutation pipeline", () => {
         expect(sql.exec<{ id: string }>("SELECT id FROM columns WHERE completed = 1").one().id).toBe("done");
       }));
 
+    it("rebalances a column of the frame's largest size and skips one past it, whose frame clients would reject", () =>
+      onBoard((sql, run) => {
+        const fill = (count: number) => {
+          sql.exec("DELETE FROM cards");
+          sql.exec(
+            `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+             INSERT INTO cards(id, column_id, title, position, task_number, created_at, updated_at)
+             SELECT 'bulk-' || i, 'todo', 'c', 'a' || printf('%05d', i), i, 0, 0 FROM n`,
+            count,
+          );
+        };
+        const move = () => run({ type: "card.move", mutationId: "m", id: "bulk-1", columnId: "todo", position: longKey() }).rebalanced;
+
+        fill(REBALANCE_MAX_POSITIONS);
+        const rebalanced = move();
+        expect(rebalanced?.positions).toHaveLength(REBALANCE_MAX_POSITIONS);
+        expect(ServerMessageSchema.safeParse(rebalanced).success).toBe(true);
+
+        fill(REBALANCE_MAX_POSITIONS + 1);
+        expect(move()).toBeNull();
+        // Nothing was rewritten: the moved card keeps the long key it wrote and the rest keep theirs.
+        expect(sql.exec<{ position: string }>("SELECT position FROM cards WHERE id = 'bulk-1'").one().position).toBe(longKey());
+        expect(sql.exec<{ position: string }>("SELECT position FROM cards WHERE id = 'bulk-2'").one().position).toBe("a00002");
+      }));
+
     it("sends no frame when the card or column moved is gone: a stale move writes nothing, even into a non-empty list", () =>
       onBoard((sql, run) => {
         expect(run({ type: "card.move", mutationId: "m", id: "missing", columnId: "todo", position: longKey() }).rebalanced).toBeNull();
@@ -150,10 +175,15 @@ describe("mutation pipeline", () => {
       }));
   });
 
-  it("indexes what the card, comment and attachment paths look up by", () =>
+  it("indexes what the card, comment, attachment, checklist, label and relation paths look up by", () =>
     onBoard((sql) => {
       const indexed = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'").toArray().map((row) => row.name);
-      expect(indexed).toEqual(expect.arrayContaining(["comments_card", "comments_parent", "attachments_object_key", "attachments_card"]));
+      expect(indexed).toEqual(
+        expect.arrayContaining([
+          "comments_card", "comments_parent", "attachments_object_key", "attachments_card",
+          "checklist_items_card", "card_labels_card", "card_labels_label", "card_relations_source", "card_relations_target",
+        ]),
+      );
     }));
 
   it("writes nothing when the gate refuses", () =>

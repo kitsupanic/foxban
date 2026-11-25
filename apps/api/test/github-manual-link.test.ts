@@ -145,7 +145,7 @@ function pullRequestEvent(options: { number?: number; action?: string; title?: s
       merged: options.merged ?? false,
       html_url: `https://github.example/${REPO_NAME}/pull/${number}`,
       updated_at: options.updatedAt ?? at(0),
-      head: { ref: "main-work" },
+      head: { ref: "main-work", repo: { id: REPO_ID } },
     },
   };
 }

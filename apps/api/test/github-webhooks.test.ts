@@ -211,6 +211,30 @@ describe("installing the App", () => {
     expect(await connectedRepos(admin)).toEqual([`${OWNER}/other`, `${OWNER}/web`]);
   });
 
+  // Deliveries can arrive out of order (ADR 0088): an "added" that GitHub no longer backs must not connect the repo.
+  it("does not connect a repo whose 'added' arrived after its 'removed'", async () => {
+    const admin = await adminSession();
+    await deliver("installation", { action: "created", installation: installation(7), repositories: [repo(101, `${OWNER}/api`)] });
+    // GitHub's truth: web was added, then removed again. The installation can no longer reach it.
+    github.installations = [{ id: 7, account: OWNER, repos: [{ id: 101, full_name: `${OWNER}/api` }] }];
+    const kitFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const scoped = init?.method === "POST" && url.includes("/access_tokens") && typeof init.body === "string" && init.body.includes("repository_ids");
+      return scoped ? Response.json({ message: "Unprocessable Entity" }, { status: 422 }) : kitFetch(input, init);
+    }) as typeof fetch;
+
+    const added = await deliver("installation_repositories", {
+      action: "added",
+      installation: installation(7),
+      repository_selection: "selected",
+      repositories_added: [repo(102, `${OWNER}/web`)],
+      repositories_removed: [],
+    });
+    expect(added.status).toBe(200);
+    expect(await connectedRepos(admin)).toEqual([`${OWNER}/api`]);
+  });
+
   it("ignores repos added to an installation on someone else's account", async () => {
     const admin = await adminSession();
     await deliver("installation_repositories", {
@@ -269,6 +293,34 @@ describe("opening the Admin page", () => {
     expect(view.app.owner).toBe(OWNER);
     expect(view.app.ignoredAccounts).toEqual(["Stranger"]);
     expect(view.app.settingsUrl).toMatch(/\/settings\/apps\/foxban-test\/advanced$/);
+  });
+
+  it("drops nothing when GitHub's installation list or repo list ran past the page cap", async () => {
+    const admin = await adminSession();
+    await deliver("installation", { action: "created", installation: installation(7), repositories: [repo(101, `${OWNER}/api`), repo(103, `${OWNER}/old`)] });
+
+    // 100 installations per page for 10 pages: the cap is hit with a full last page, so the list may be partial.
+    const strangers = Array.from({ length: 99 }, (_, i) => ({ id: 1000 + i, account: `Stranger${i}`, repos: [] }));
+    github.installations = [{ id: 7, account: OWNER, repos: [{ id: 101, full_name: `${OWNER}/api` }, { id: 102, full_name: `${OWNER}/web` }] }, ...strangers];
+    const view = await adminView(admin, { listingDown: false });
+    expect(view.app.reposRefreshed).toBe(true);
+    // What was seen is connected, what was not seen is kept.
+    expect(view.app.repos.map((r) => r.fullName).sort()).toEqual([`${OWNER}/api`, `${OWNER}/old`, `${OWNER}/web`]);
+
+    // A complete list drops again.
+    github.installations = [{ id: 7, account: OWNER, repos: [{ id: 101, full_name: `${OWNER}/api` }] }];
+    expect((await adminView(admin, { listingDown: false })).app.repos.map((r) => r.fullName)).toEqual([`${OWNER}/api`]);
+  });
+
+  it("drops nothing when one installation holds more repos than the page cap reads", async () => {
+    const admin = await adminSession();
+    await deliver("installation", { action: "created", installation: installation(7), repositories: [repo(101, `${OWNER}/old`)] });
+    // 50 pages of 100 are read; the last is full, so GitHub may have had more.
+    const many = Array.from({ length: 5000 }, (_, i) => ({ id: 10_000 + i, full_name: `${OWNER}/repo-${i}` }));
+    github.installations = [{ id: 7, account: OWNER, repos: many }];
+    const view = await adminView(admin, { listingDown: false });
+    expect(view.app.repos).toHaveLength(5001);
+    expect(view.app.repos.map((r) => r.fullName)).toContain(`${OWNER}/old`);
   });
 
   it("shows the last known repos, marked as not refreshed, when GitHub cannot be reached", async () => {

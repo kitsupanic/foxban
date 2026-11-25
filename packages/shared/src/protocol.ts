@@ -47,8 +47,10 @@ export const DESCRIPTION_MAX_BYTES = 100_000;
  * Version 12 adds the `positions.rebalanced` frame (ADR 0076).
  * Version 13 swaps the snapshot's `comments` for per-card `commentCounts` and
  * makes `comment.update` / `comment.delete` name their card (ADR 0078).
+ * Version 14 sends the snapshot's archived cards without their descriptions and
+ * adds the `card.restored` frame that brings a restored card's back (ADR 0089).
  */
-export const REALTIME_PROTOCOL_VERSION = "13";
+export const REALTIME_PROTOCOL_VERSION = "14";
 /**
  * Close code of a realtime socket (board or presence) whose session was revoked, by sign-out or by a
  * password change from another session (ADR 0082). A close code, not a frame, so it needs no version bump.
@@ -608,6 +610,7 @@ export const SnapshotSchema = z.object({
   workflowRolesExplicit: z.boolean(),
   columns: z.array(ColumnSchema),
   cards: z.array(CardSchema),
+  /** Archived cards carry an empty `description` here: nothing shows it, and `card.restored` brings it back (ADR 0089). */
   archivedCards: z.array(ArchivedCardSchema),
   checklistItems: z.array(ChecklistItemSchema),
   attachments: z.array(AttachmentSchema),
@@ -648,6 +651,9 @@ export const CardNumberedSchema = z.strictObject({
   taskNumber: TaskNumber,
 });
 
+/** The most positions one `positions.rebalanced` frame lists; the board skips a rebalance of a longer list rather than send a frame clients reject (ADR 0076). */
+export const REBALANCE_MAX_POSITIONS = 10_000;
+
 /**
  * Server -> client, after the verbatim frame of the mutation that wrote a long key (ADR 0076):
  * the new keys of the cards of one column (`cards`) or of the board's columns (`columns`).
@@ -656,7 +662,18 @@ export const CardNumberedSchema = z.strictObject({
 export const PositionsRebalancedSchema = z.strictObject({
   type: z.literal("positions.rebalanced"),
   table: z.enum(["cards", "columns"]),
-  positions: z.array(z.strictObject({ id: Identifier, position: Position })).min(1).max(10000),
+  positions: z.array(z.strictObject({ id: Identifier, position: Position })).min(1).max(REBALANCE_MAX_POSITIONS),
+});
+
+/**
+ * Server -> client, to every socket after the verbatim `card.restore` frame (ADR 0089): the restored
+ * card's description. The snapshot holds archived cards without one, so a client restoring from it
+ * cannot rebuild the card on its own.
+ */
+export const CardRestoredSchema = z.strictObject({
+  type: z.literal("card.restored"),
+  id: Identifier,
+  description: Description,
 });
 
 
@@ -743,6 +760,7 @@ export const ServerMessageSchema = z.discriminatedUnion("type", [
   CardsArchivedSchema,
   ArchivePurgedSchema,
   CardNumberedSchema,
+  CardRestoredSchema,
   PositionsRebalancedSchema,
   GithubInvalidatedSchema,
   ...clientMessages,
@@ -767,6 +785,7 @@ export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 export type CardNumbered = z.infer<typeof CardNumberedSchema>;
 export type PositionsRebalanced = z.infer<typeof PositionsRebalancedSchema>;
+export type CardRestored = z.infer<typeof CardRestoredSchema>;
 export type BoardDevelopment = z.infer<typeof BoardDevelopmentSchema>;
 export type CardPullRequestAssociation = z.infer<typeof CardPullRequestAssociationSchema>;
 export type DevelopmentBranch = z.infer<typeof DevelopmentBranchSchema>;

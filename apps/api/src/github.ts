@@ -264,14 +264,18 @@ export async function getAppOwner(apiBase: string, appId: string, privateKeyPem:
 const INSTALLATIONS_PAGE_SIZE = 100;
 const MAX_INSTALLATION_PAGES = 10;
 
-/** `GET /app/installations` with the App JWT: every account the App is installed on, suspended ones flagged. */
+/**
+ * `GET /app/installations` with the App JWT: every account the App is installed on, suspended ones flagged.
+ * `truncated` is true when the page cap stopped the read, so the list may be missing accounts.
+ */
 export async function listAppInstallations(
   apiBase: string,
   appId: string,
   privateKeyPem: string,
-): Promise<Array<{ id: number; account: string; suspended: boolean }>> {
+): Promise<{ installations: Array<{ id: number; account: string; suspended: boolean }>; truncated: boolean }> {
   const jwt = await createGitHubAppJwt(appId, privateKeyPem);
   const installations: Array<{ id: number; account: string; suspended: boolean }> = [];
+  let truncated = true;
   for (let page = 1; page <= MAX_INSTALLATION_PAGES; page++) {
     const items = await githubFetch<Array<{ id: number; account?: { login?: string } | null; suspended_at?: string | null }>>(
       `${apiBase}/app/installations?per_page=${INSTALLATIONS_PAGE_SIZE}&page=${page}`,
@@ -281,19 +285,23 @@ export async function listAppInstallations(
       // An enterprise account has no login; foxban cannot match it to the App's owner.
       if (item.account?.login) installations.push({ id: item.id, account: item.account.login, suspended: Boolean(item.suspended_at) });
     }
-    if (items.length < INSTALLATIONS_PAGE_SIZE) break;
+    if (items.length < INSTALLATIONS_PAGE_SIZE) {
+      truncated = false;
+      break;
+    }
   }
-  return installations;
+  return { installations, truncated };
 }
 
 const MAX_REPOSITORY_PAGES = 50;
 
-/** `GET /installation/repositories` with an installation token: every repo the installation can reach. */
+/** `GET /installation/repositories` with an installation token: every repo the installation can reach. `truncated` is true when the page cap stopped the read. */
 export async function listInstallationRepositories(
   apiBase: string,
   installationToken: string,
-): Promise<Array<{ id: number; fullName: string; private: boolean }>> {
+): Promise<{ repos: Array<{ id: number; fullName: string; private: boolean }>; truncated: boolean }> {
   const repos: Array<{ id: number; fullName: string; private: boolean }> = [];
+  let truncated = true;
   for (let page = 1; page <= MAX_REPOSITORY_PAGES; page++) {
     const data = await githubFetch<{ repositories?: Array<{ id: number; full_name: string; private?: boolean }> }>(
       `${apiBase}/installation/repositories?per_page=${INSTALLATIONS_PAGE_SIZE}&page=${page}`,
@@ -301,9 +309,12 @@ export async function listInstallationRepositories(
     );
     const items = data.repositories ?? [];
     repos.push(...items.map((item) => ({ id: item.id, fullName: item.full_name, private: item.private === true })));
-    if (items.length < INSTALLATIONS_PAGE_SIZE) break;
+    if (items.length < INSTALLATIONS_PAGE_SIZE) {
+      truncated = false;
+      break;
+    }
   }
-  return repos;
+  return { repos, truncated };
 }
 
 /**

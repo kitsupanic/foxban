@@ -47,7 +47,7 @@ import {
   roleColumn,
 } from "./subtask-family";
 import {
-  ARCHIVED_CARD_SELECT,
+  ARCHIVED_CARD_LIST_SELECT,
   allocateTaskNumber,
   createsLifecycleWork,
   deleteCards,
@@ -704,6 +704,15 @@ const MIGRATIONS: MigrationStep[][] = [
     `CREATE INDEX IF NOT EXISTS comments_parent ON comments(parent_comment_id)`,
     `CREATE INDEX IF NOT EXISTS attachments_object_key ON attachments(object_key)`,
     `CREATE INDEX IF NOT EXISTS attachments_card ON attachments(card_id)`,
+  ],
+  [
+    // The same scans for the rest of a card's rows: its checklist, its label joins (and a label's, on label.delete)
+    // and its relations from either end, which the cascade, the transfer bundle and the family reads all walk.
+    `CREATE INDEX IF NOT EXISTS checklist_items_card ON checklist_items(card_id)`,
+    `CREATE INDEX IF NOT EXISTS card_labels_card ON card_labels(card_id)`,
+    `CREATE INDEX IF NOT EXISTS card_labels_label ON card_labels(label_id)`,
+    `CREATE INDEX IF NOT EXISTS card_relations_source ON card_relations(source_card_id)`,
+    `CREATE INDEX IF NOT EXISTS card_relations_target ON card_relations(target_card_id)`,
   ],
 ];
 
@@ -1844,31 +1853,7 @@ export class BoardDO extends DurableObject<Env> {
 
         const comments = readCardComments(sql, cardId);
 
-        const activities = sql
-          .exec<{
-            id: string;
-            cardId: string;
-            actorId: string;
-            sequence: number;
-            createdAt: number;
-            detailJson: string;
-          }>(
-            `SELECT id, card_id AS cardId, actor_id AS actorId, sequence,
-                    created_at AS createdAt, detail_json AS detailJson
-               FROM activities
-              WHERE card_id = ?
-              ORDER BY sequence`,
-            cardId,
-          )
-          .toArray()
-          .map((row) => ({
-            id: row.id,
-            cardId: row.cardId,
-            actorId: row.actorId,
-            sequence: row.sequence,
-            createdAt: row.createdAt,
-            detail: JSON.parse(row.detailJson),
-          }));
+        const activities = readCardActivities(sql, cardId);
 
         const labels = sql
           .exec<{
@@ -2867,10 +2852,15 @@ export class BoardDO extends DurableObject<Env> {
       .toArray()[0]?.id ?? null;
   }
 
-  private taskRecord(
+  /**
+   * One task's row as the summary schema's fields, its key and link built here. The description
+   * is read only when asked for, so listing tasks never loads it.
+   */
+  private readTaskRow(
     cardId: string,
     board: McpBoardIdentity,
-  ): TaskRecord | null {
+    withDescription: boolean,
+  ): { fields: z.infer<typeof TaskSummarySchema>; description: string; columnId: string } | null {
     const sql = this.ctx.storage.sql;
     const row = sql
       .exec<{
@@ -2880,7 +2870,7 @@ export class BoardDO extends DurableObject<Env> {
         createdAt: number; updatedAt: number; archivedAt: number | null;
         archivedColumnTitle: string | null;
       }>(
-        `SELECT id, column_id AS columnId, title, description, position,
+        `SELECT id, column_id AS columnId, title, ${withDescription ? "description" : "''"} AS description, position,
                 task_number AS taskNumber, subtask_done AS subtaskDone,
                 assignee_id AS assigneeId, priority, task_type AS taskType, due_date AS dueDate,
                 created_at AS createdAt, updated_at AS updatedAt,
@@ -2890,72 +2880,58 @@ export class BoardDO extends DurableObject<Env> {
       )
       .toArray()[0];
     if (!row) return null;
-    const column =
-      sql.exec<{ id: string; title: string }>(
-        "SELECT id, title FROM columns WHERE id = ?",
-        row.columnId,
-      ).toArray()[0] ?? null;
     const key = `${board.key}-${row.taskNumber}`;
     const url = new URL(`/board/${encodeURIComponent(board.key)}`, board.appOrigin);
     url.searchParams.set("card", key);
-    if (descriptionByteLength(row.description) > 100_000) {
+    return {
+      fields: {
+        id: row.id,
+        boardId: board.id,
+        taskNumber: row.taskNumber,
+        key,
+        url: url.toString(),
+        title: row.title,
+        priority: row.priority,
+        taskType: row.taskType,
+        assigneeId: row.assigneeId,
+        dueDate: row.dueDate,
+        subtaskDone: row.archivedAt === null ? isCompleted(sql, row.columnId) : row.subtaskDone === 1,
+        position: row.position,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        storedColumnId: row.columnId,
+        effectiveColumnId: row.columnId,
+        archivedAt: row.archivedAt,
+        archivedColumnTitle: row.archivedColumnTitle,
+      },
+      description: row.description,
+      columnId: row.columnId,
+    };
+  }
+
+  private taskRecord(
+    cardId: string,
+    board: McpBoardIdentity,
+  ): TaskRecord | null {
+    const read = this.readTaskRow(cardId, board, true);
+    if (!read) return null;
+    const column =
+      this.ctx.storage.sql.exec<{ id: string; title: string }>(
+        "SELECT id, title FROM columns WHERE id = ?",
+        read.columnId,
+      ).toArray()[0] ?? null;
+    if (descriptionByteLength(read.description) > 100_000) {
       throw new MutationRefusal("result_too_large", "Stored task description exceeds the response limit.");
     }
-    return TaskRecordSchema.parse({
-      id: row.id,
-      boardId: board.id,
-      taskNumber: row.taskNumber,
-      key,
-      url: url.toString(),
-      title: row.title,
-      description: row.description,
-      priority: row.priority,
-      taskType: row.taskType,
-      assigneeId: row.assigneeId,
-      dueDate: row.dueDate,
-      subtaskDone: row.archivedAt === null ? isCompleted(sql, row.columnId) : row.subtaskDone === 1,
-      position: row.position,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-      storedColumnId: row.columnId,
-      effectiveColumnId: row.columnId,
-      archivedAt: row.archivedAt,
-      archivedColumnTitle: row.archivedColumnTitle,
-      column,
-    });
+    return TaskRecordSchema.parse({ ...read.fields, description: read.description, column });
   }
 
   private taskSummary(
     cardId: string,
     board: McpBoardIdentity,
   ): z.infer<typeof TaskSummarySchema> | null {
-    const sql = this.ctx.storage.sql;
-    const row = sql.exec<{
-      id: string; columnId: string; title: string; position: string; taskNumber: number;
-      subtaskDone: number; assigneeId: string | null; priority: Card["priority"];
-      taskType: Card["taskType"]; dueDate: string | null; createdAt: number; updatedAt: number;
-      archivedAt: number | null; archivedColumnTitle: string | null;
-    }>(
-      `SELECT id, column_id AS columnId, title, position, task_number AS taskNumber,
-              subtask_done AS subtaskDone, assignee_id AS assigneeId, priority,
-              task_type AS taskType, due_date AS dueDate, created_at AS createdAt,
-              updated_at AS updatedAt, archived_at AS archivedAt,
-              archived_column_title AS archivedColumnTitle
-         FROM cards WHERE id = ? AND task_number IS NOT NULL`,
-      cardId,
-    ).toArray()[0];
-    if (!row) return null;
-    const key = `${board.key}-${row.taskNumber}`;
-    const url = new URL(`/board/${encodeURIComponent(board.key)}`, board.appOrigin);
-    url.searchParams.set("card", key);
-    return TaskSummarySchema.parse({
-      id: row.id, boardId: board.id, taskNumber: row.taskNumber, key, url: url.toString(),
-      title: row.title, priority: row.priority, taskType: row.taskType,
-      assigneeId: row.assigneeId, dueDate: row.dueDate, subtaskDone: row.archivedAt === null ? isCompleted(sql, row.columnId) : row.subtaskDone === 1,
-      position: row.position, createdAt: row.createdAt, updatedAt: row.updatedAt,
-      storedColumnId: row.columnId, effectiveColumnId: row.columnId, archivedAt: row.archivedAt,
-      archivedColumnTitle: row.archivedColumnTitle,
-    });
+    const read = this.readTaskRow(cardId, board, false);
+    return read && TaskSummarySchema.parse(read.fields);
   }
 
   private mcpFailure(error: MutationRefusal): McpToolResult {
@@ -3310,6 +3286,7 @@ export class BoardDO extends DurableObject<Env> {
       result.purgedCardIds,
       result.numberedCard,
       result.rebalanced,
+      result.restoredCard,
     );
   }
 
@@ -3604,6 +3581,7 @@ export class BoardDO extends DurableObject<Env> {
     purgedCardIds: string[],
     numberedCard: { id: string; taskNumber: number } | undefined,
     rebalanced: PositionsRebalanced | null,
+    restoredCard?: { id: string; description: string },
   ): void {
     // The caller's own bytes are echoed verbatim; the lifecycle extras are ours.
     // The verbatim frame carries the key the client chose; the rewrite follows as its own frame (ADR 0076).
@@ -3612,6 +3590,8 @@ export class BoardDO extends DurableObject<Env> {
       ...(purgedCardIds.length ? [JSON.stringify({ type: "archive.purged", cardIds: purgedCardIds } satisfies ServerMessage)] : []),
       ...(archivedCards.length ? [JSON.stringify({ type: "cards.archived", mutationId: message.mutationId, cards: archivedCards } satisfies ServerMessage)] : []),
       ...(numberedCard ? [JSON.stringify({ type: "card.numbered", mutationId: message.mutationId, id: numberedCard.id, taskNumber: numberedCard.taskNumber } satisfies ServerMessage)] : []),
+      // The snapshot holds archived cards without their text, so every client learns the restored one's here (ADR 0089).
+      ...(restoredCard ? [JSON.stringify({ type: "card.restored", id: restoredCard.id, description: restoredCard.description } satisfies ServerMessage)] : []),
       ...(activities.length ? [JSON.stringify({ type: "activity.recorded", mutationId: message.mutationId, activities } satisfies ServerMessage)] : []),
       ...(rebalanced ? [JSON.stringify(rebalanced satisfies ServerMessage)] : []),
     ];
@@ -3767,7 +3747,8 @@ export class BoardDO extends DurableObject<Env> {
         // An active card's done flag is its column's, read in the same query.
         .map((row) => ({ ...row, subtaskDone: row.subtaskDone === 1 })),
       archivedCards: sql
-        .exec<ArchivedCardRow>(`${ARCHIVED_CARD_SELECT} WHERE archived_at IS NOT NULL`)
+        // No description: nothing shows an archived card's text, and `card.restored` brings it back (ADR 0089).
+        .exec<ArchivedCardRow>(`${ARCHIVED_CARD_LIST_SELECT} WHERE archived_at IS NOT NULL`)
         .toArray()
         .map((row) => ({ ...row, subtaskDone: row.subtaskDone === 1 })),
       // `done` is an INTEGER column; the wire type is a boolean.
