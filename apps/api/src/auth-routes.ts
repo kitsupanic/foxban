@@ -200,7 +200,7 @@ export const authRouter = new Hono<AppEnv>()
     if (!row || !ok) {
       return c.json({ error: "invalid credentials" }, 401);
     }
-    if (!(await startSession(c, row.id, stored))) {
+    if (!(await startSession(c, row.id, { passwordHash: stored }))) {
       return c.json({ error: "invalid credentials" }, 401);
     }
     return c.json(
@@ -449,10 +449,11 @@ export const authRouter = new Hono<AppEnv>()
       await startSession(c, created.userId);
       return signedIn();
     }
-    // Follow a rename, so the avatar stays the account owner's.
+    // Follow a rename, so the avatar stays the account owner's. Both statements re-check the link, so a disconnect
+    // that commits after the lookup above neither gets a login written onto the account nor a session.
     if (row.githubLogin !== account.login) {
-      await c.env.DB.prepare("UPDATE users SET github_login = ? WHERE id = ?").bind(account.login, row.id).run();
+      await c.env.DB.prepare("UPDATE users SET github_login = ? WHERE id = ? AND github_user_id = ?").bind(account.login, row.id, account.id).run();
     }
-    await startSession(c, row.id);
+    if (!(await startSession(c, row.id, { githubUserId: account.id }))) return fail();
     return signedIn();
   });

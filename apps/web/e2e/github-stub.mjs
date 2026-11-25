@@ -116,7 +116,8 @@ function pullRequestPayload(pr) {
     html_url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`,
     merged_at: pr.mergedAt,
     draft: Boolean(pr.draft),
-    head: { ref: pr.head, label: pr.head },
+    // Same-repo PRs, as GitHub sends them: key matching skips a fork's (ADR 0088).
+    head: { ref: pr.head, label: pr.head, repo: { id: repository ? repository.id : 0 } },
     base: { ref: pr.base, repo: { id: repository ? repository.id : 0 } },
     created_at: new Date(pr.createdAt).toISOString(),
     updated_at: new Date(pr.updatedAt).toISOString(),

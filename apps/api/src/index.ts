@@ -42,7 +42,7 @@ import {
   GITHUB_WEBHOOK_PATH,
   loadInstanceGitHubApp,
 } from "./github-app";
-import { drainBackfill } from "./github-backfill";
+import { OPS_CEILING, drainBackfill } from "./github-backfill";
 import { readCardDevelopment, readPullRequest } from "./github-development";
 import { findConnectedRepo, listConnectedRepos } from "./github-repos";
 import { handleGitHubWebhook } from "./github-webhook";
@@ -142,39 +142,60 @@ const ProfileSchema = z
   );
 
 
+/** Where the sweep resumes: the last R2 key it fully handled (`maintenance_state`), kept only while a run stopped short. */
+const RECONCILE_RESUME_KEY = "attachment_reconcile_after";
+
 /**
  * Safety-net GC for historical objects and any future blob that exists without
  * an attachment row or a live provisional lease. Each board's DO makes the
  * keep/delete decision; the global Worker only enumerates R2 keys.
+ *
+ * Subrequests are counted (rough worst case per object, like `drainBackfill`) and the run stops
+ * before `ceiling`; it saves the last key it handled and the next run lists from after it (ADR 0088).
+ * A run that reaches the end of the bucket clears the key.
  */
-export async function reconcileAttachmentObjects(env: Env): Promise<void> {
+export async function reconcileAttachmentObjects(env: Env, ceiling = OPS_CEILING): Promise<void> {
   const failures = new Set<string>();
+  const saved = await env.DB.prepare("SELECT value FROM maintenance_state WHERE key = ?").bind(RECONCILE_RESUME_KEY).first<{ value: string }>();
+  let ops = 1;
+  let lastKey = saved?.value;
+  let outOfBudget = false;
   // Read once per run, not per page: each candidate is rechecked against D1 before its delete anyway.
   let activeAvatars: { map: Map<string, string>; leases: Set<string> } | null = null;
+  let avatarReadCounted = false;
   let cursor: string | undefined;
   do {
-    const listed = await env.ATTACHMENTS.list(cursor === undefined ? undefined : { cursor });
+    const listed = await env.ATTACHMENTS.list(cursor !== undefined ? { cursor } : lastKey !== undefined ? { startAfter: lastKey } : undefined);
+    ops += 1;
     const attachmentItemsByBoard = new Map<string, { key: string; attachmentId: string }[]>();
     const avatarKeysToCheck: { key: string; userId: string; version: string }[] = [];
 
     for (const object of listed.objects) {
-      if (object.key.startsWith("avatars/")) {
-        const parsed = parseAvatarObjectKey(object.key);
-        if (parsed !== null) {
-          avatarKeysToCheck.push({
-            key: object.key,
-            userId: parsed.userId,
-            version: parsed.avatarVersion,
-          });
-        }
+      const avatar = object.key.startsWith("avatars/") ? parseAvatarObjectKey(object.key) : null;
+      const attachment = object.key.startsWith("avatars/") ? null : parseAttachmentObjectKey(object.key);
+      // Worst case per object: an avatar is three D1 calls and an R2 delete (and the first reads the user tables twice); an attachment costs its board's one call.
+      const cost = avatar ? 4 + (avatarReadCounted ? 0 : 2) : attachment && !attachmentItemsByBoard.has(attachment.boardId) ? 1 : 0;
+      if (ops + cost > ceiling) {
+        outOfBudget = true;
+        break;
+      }
+      ops += cost;
+      if (avatar) avatarReadCounted = true;
+      lastKey = object.key;
+
+      if (avatar !== null) {
+        avatarKeysToCheck.push({
+          key: object.key,
+          userId: avatar.userId,
+          version: avatar.avatarVersion,
+        });
         continue;
       }
 
-      const parsed = parseAttachmentObjectKey(object.key);
-      if (parsed === null) continue;
-      const items = attachmentItemsByBoard.get(parsed.boardId);
-      if (items) items.push({ key: object.key, attachmentId: parsed.attachmentId });
-      else attachmentItemsByBoard.set(parsed.boardId, [{ key: object.key, attachmentId: parsed.attachmentId }]);
+      if (attachment === null) continue;
+      const items = attachmentItemsByBoard.get(attachment.boardId);
+      if (items) items.push({ key: object.key, attachmentId: attachment.attachmentId });
+      else attachmentItemsByBoard.set(attachment.boardId, [{ key: object.key, attachmentId: attachment.attachmentId }]);
     }
 
     if (avatarKeysToCheck.length > 0) {
@@ -232,8 +253,16 @@ export async function reconcileAttachmentObjects(env: Env): Promise<void> {
         failures.add(boardId);
       }
     }
+    if (outOfBudget) break;
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor !== undefined);
+  if (outOfBudget) {
+    await env.DB.prepare("INSERT INTO maintenance_state (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .bind(RECONCILE_RESUME_KEY, lastKey)
+      .run();
+  } else {
+    await env.DB.prepare("DELETE FROM maintenance_state WHERE key = ?").bind(RECONCILE_RESUME_KEY).run();
+  }
   // Sweep expired avatar leases
   await env.DB.prepare("DELETE FROM avatar_leases WHERE expires_at <= ?").bind(Date.now()).run();
   // Later pages still run when a board refused; the run fails once, at the end.

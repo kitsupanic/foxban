@@ -230,7 +230,7 @@ export const workspacesRouter = new Hono<AppEnv>()
     const parsed=RemoveSchema.safeParse(await c.req.json().catch(()=>null));if(!parsed.success)return c.json({error:"invalid request"} as const,400);const id=c.req.param("workspaceId"),target=c.req.param("userId"),actor=c.get("user");
     try{
       const resumed=await resolveAccessChangeAttempt(c.env,actor,parsed.data.operationId,"workspace-member-remove",{workspaceId:id,userId:target});
-      const refused=(reason:unknown)=>reason===ACCESS_CHANGE_ABORT.lastAdmin?c.json(LAST_ADMIN,409):reason===ACCESS_CHANGE_ABORT.forbidden?c.json({error:"forbidden"} as const,403):c.json(ACCESS_CONFLICT,409);
+      const refused=(reason:unknown)=>reason===ACCESS_CHANGE_ABORT.lastAdmin?c.json(LAST_ADMIN,409):reason===ACCESS_CHANGE_ABORT.forbidden?c.json({error:"forbidden"} as const,403):reason===ACCESS_CHANGE_ABORT.memberNotFound?c.json({error:"member not found"} as const,404):c.json(ACCESS_CONFLICT,409);
       if(resumed){
         if(resumed.state!=="completed")return c.json(resumed,202);
         return resumed.outcome==="aborted"?refused(resumed.result):c.json(resumed);
@@ -238,6 +238,8 @@ export const workspacesRouter = new Hono<AppEnv>()
       // An admin removes anyone; any member removes themselves, which is leaving.
       const self=await workspaceRecord(c.env,actor.id,id);if(self?.role!=="admin"&&!(self?.role&&target===actor.id))return c.json({error:"forbidden"} as const,403);
       if(await isLastAdmin(c.env,id,target))return c.json(LAST_ADMIN,409);
+      // A non-member is refused before the change reserves anything, so no board is fenced; the commit re-checks.
+      if(target!==actor.id&&!(await workspaceRecord(c.env,target,id))?.role)return c.json({error:"member not found"} as const,404);
       const result=await runAccessChange(c.env,actor,{operationId:parsed.data.operationId,kind:"workspace-member-remove",payload:{workspaceId:id,userId:target},workspaceIds:[id],inheritWorkspaceBoards:true});
       if(result.state!=="completed")return c.json(result,202);
       if(result.outcome==="aborted")return refused(result.result);

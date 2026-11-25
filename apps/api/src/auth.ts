@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import { GITHUB_FETCH_TIMEOUT_MS } from "./github";
 import { boardClient } from "./board-client";
-import { base64Url } from "./base64url";
+import { base64Url, toBase64 } from "./base64url";
 import { REVOKE_SESSIONS_PATH, type SessionRevocation } from "./session-revocation";
 
 /** The signed-in user, as identified by the session cookie. */
@@ -228,13 +228,6 @@ const encoder = new TextEncoder();
 const subtle: SubtleCrypto & {
   timingSafeEqual?: (a: BufferSource, b: BufferSource) => boolean;
 } = crypto.subtle;
-
-function toBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
 
 function fromBase64(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value);
@@ -519,7 +512,7 @@ export async function signUpWithGitHub(
 
   // Admin is derived from the address, and signing up with GitHub never grants it: an account whose address is
   // on the admin list (or with no verified address at all) gets GitHub's private no-reply address instead.
-  const email = emails[0] !== undefined && !isAdminEmail(env, emails[0]) ? emails[0] : `${account.id}+${account.login}@users.noreply.github.com`;
+  const email = emails[0] !== undefined && !isAdminEmail(env, emails[0]) ? emails[0] : `${account.id}+${account.login.toLowerCase()}@users.noreply.github.com`;
   // A list that names the no-reply address itself leaves no safe address: refuse.
   if (isAdminEmail(env, email)) return { ok: false, problem: "error" };
   const userId = crypto.randomUUID();
@@ -537,24 +530,30 @@ export async function signUpWithGitHub(
   }
 }
 
-/** Creates a session row for `userId` and puts a new random id in the response cookie. The row is keyed by that id's SHA-256 (ADR 0084), so a read of D1 is no sign-in. */
+/**
+ * Creates a session row for `userId` and puts a new random id in the response cookie. The row is keyed by that id's SHA-256 (ADR 0084), so a read of D1 is no sign-in.
+ * A `guard` makes the insert conditional on what the caller verified still being true in the same statement, so a password change or a GitHub
+ * disconnect that commits in between wins: `passwordHash` is the stored hash the password matched, `githubUserId` the id the account is linked to.
+ * Resolves false, with nothing created, when the guard no longer holds.
+ */
 export async function startSession(
   c: Context<AppEnv>,
   userId: string,
-  verifiedHash?: string,
+  guard?: { passwordHash: string } | { githubUserId: number },
 ): Promise<boolean> {
   const now = Date.now();
   const id = randomHex(32);
   const rowId = await sha256Hex(id);
-  const inserted = verifiedHash === undefined
+  const inserted = guard === undefined
     ? await c.env.DB.prepare("INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)")
         .bind(rowId, userId, now + SESSION_TTL_MS)
         .run()
     : await c.env.DB.prepare(
+        // The column is one of two literals, never input.
         `INSERT INTO sessions (id, user_id, expires_at)
-         SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)`,
+         SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND ${"passwordHash" in guard ? "password_hash" : "github_user_id"} = ?)`,
       )
-        .bind(rowId, userId, now + SESSION_TTL_MS, userId, verifiedHash)
+        .bind(rowId, userId, now + SESSION_TTL_MS, userId, "passwordHash" in guard ? guard.passwordHash : guard.githubUserId)
         .run();
   if (inserted.meta.changes !== 1) return false;
   // Expired rows are already rejected on read; sweeping them here keeps the table

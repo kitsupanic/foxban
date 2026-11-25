@@ -25,7 +25,7 @@ const COMMITTED = new Date(Date.now() - DAY).toISOString();
 const daysAgo = (days: number) => new Date(Date.now() - days * DAY).toISOString();
 
 /** `repo` limits a pull to one repo's lists; without it every repo lists it. */
-type FakePull = { number: number; title: string; state: "open" | "closed"; updated: string; closed?: string; merged?: boolean; draft?: boolean; head?: string; body?: string; repo?: string };
+type FakePull = { number: number; title: string; state: "open" | "closed"; updated: string; closed?: string; merged?: boolean; draft?: boolean; head?: string; body?: string; repo?: string; fork?: boolean };
 type FakeBranch = { name: string; sha: string; message?: string };
 
 /** What the fake GitHub lists for the repo, plus a record of what the Worker asked. `limit` answers list calls with a 429. */
@@ -62,6 +62,8 @@ beforeEach(() => {
         .filter((pull) => pull.state === state && (!pull.repo || pull.repo === full))
         .sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated))
         .slice((page - 1) * perPage, page * perPage);
+      // A PR from the repo's own branch has its head in the repo asked about; a fork's has another.
+      const repoId = (await env.DB.prepare("SELECT repo_id AS id FROM github_repos WHERE full_name = ? COLLATE NOCASE").bind(full).first<{ id: number }>())?.id ?? REPO_ID;
       return Response.json(
         listed.map((pull) => ({
           number: pull.number,
@@ -73,7 +75,7 @@ beforeEach(() => {
           closed_at: pull.closed ?? null,
           html_url: `https://github.example/${REPO_NAME}/pull/${pull.number}`,
           updated_at: pull.updated,
-          head: { ref: pull.head ?? "topic" },
+          head: { ref: pull.head ?? "topic", repo: { id: pull.fork ? 999 : repoId } },
         })),
       );
     }
@@ -251,6 +253,21 @@ describe("backfill after the App is installed", () => {
     await backfillDone();
     expect(fake.pullRequests).toEqual([]);
     expect(await prNumbers(board)).toEqual([]);
+  });
+});
+
+describe("a fork's pull requests", () => {
+  // ADR 0088: a fork's title and branch are a stranger's text, so the backfill links nothing by key from them either.
+  it("are not linked by key", async () => {
+    const board = await newBoard(2);
+    fake.pulls = [
+      { number: 1, title: `${board.key}-1 from a fork`, state: "open", updated: daysAgo(1), fork: true },
+      { number: 2, title: `${board.key}-2 from the repo`, state: "open", updated: daysAgo(1) },
+    ];
+    await install();
+    await backfillDone();
+    expect(await prNumbers(board, 0)).toEqual([]);
+    expect(await prNumbers(board, 1)).toEqual([2]);
   });
 });
 

@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { readBoundedBody } from "./agent-credentials";
 import { loadInstanceGitHubApp } from "./github-app";
-import { GitHubApiError, getAppOwner } from "./github";
+import { GitHubApiError, createInstallationToken, getAppOwner } from "./github";
 import { drainBackfill } from "./github-backfill";
 import { handleBranchEvent } from "./github-branches";
 import { handlePullRequestEvent } from "./github-development";
-import { connectRepos, disconnectInstallation, disconnectRepos, enqueueBackfill, isConnectedRepo, renameRepo } from "./github-repos";
+import { connectRepos, disconnectInstallation, disconnectRepos, enqueueBackfill, isConnectedRepo, refreshConnectedRepos, renameRepo } from "./github-repos";
 
 type InstanceApp = NonNullable<Awaited<ReturnType<typeof loadInstanceGitHubApp>>>;
 
@@ -65,6 +65,17 @@ async function handleInstallation(
   const added = event === "installation" ? repositories : repositories_added;
   if (added.length === 0) return "applied";
   if (!(await ownsInstallation(env, app, installation.account.login))) return "ignored";
+  if (event === "installation_repositories") {
+    // Deliveries can arrive out of order, so an "added" may be stale (the repo was removed since): connect only repos the installation can still reach.
+    try {
+      await createInstallationToken(env.GITHUB_API_BASE, app.appId, app.privateKey, installation.id, added.map((repo) => repo.id));
+    } catch (error) {
+      if (!(error instanceof GitHubApiError && (error.status === 404 || error.status === 422))) throw error;
+      // A refresh that could not read GitHub would leave the still-reachable repos unconnected: fail so the delivery is retried or repaired.
+      if ((await refreshConnectedRepos(env)) === null) throw error;
+      return "applied";
+    }
+  }
   await connectRepos(env, installation.id, added);
   await enqueueBackfill(env, added.map((repo) => repo.id));
   return "applied";

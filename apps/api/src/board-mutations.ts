@@ -5,6 +5,7 @@
  */
 import { generateNKeysBetween } from "fractional-indexing";
 import {
+  REBALANCE_MAX_POSITIONS,
   removeAttachmentReferences,
   type Activity,
   type ArchivedCard,
@@ -33,19 +34,26 @@ export type HeldRoutes = {
 /** SQLite has no boolean type: `subtask_done` reads back as 0/1, so a SELECT declares this row shape and maps it. */
 export type ArchivedCardRow = Omit<ArchivedCard, "subtaskDone"> & { subtaskDone: number };
 
-/** The one SELECT that reads an `ArchivedCardRow`; callers append their own WHERE. */
-export const ARCHIVED_CARD_SELECT = `SELECT id, column_id AS columnId, title, description, position,
+const archivedCardSelect = (description: string) => `SELECT id, column_id AS columnId, title, ${description} AS description, position,
        task_number AS taskNumber, subtask_done AS subtaskDone,
        assignee_id AS assigneeId, priority, task_type AS taskType, due_date AS dueDate,
        created_at AS createdAt, updated_at AS updatedAt,
        archived_at AS archivedAt, archived_column_title AS archivedColumnTitle
   FROM cards`;
 
+/** The SELECT that reads an `ArchivedCardRow` with its description; callers append their own WHERE. */
+export const ARCHIVED_CARD_SELECT = archivedCardSelect("description");
+
+/** The same row with an empty description: the snapshot's archived cards, whose text nothing shows (ADR 0089). */
+export const ARCHIVED_CARD_LIST_SELECT = archivedCardSelect("''");
+
 type MutationOutcome = {
   activities: Activity[];
   archivedCards: ArchivedCard[];
   purgedCardIds: string[];
   numberedCard?: { id: string; taskNumber: number };
+  /** The card a `card.restore` brought back, with the description the snapshot does not carry (ADR 0089). */
+  restoredCard?: { id: string; description: string };
   /** What a purge held; empty for every other mutation. */
   heldRoutes: HeldRoutes;
   /** The new keys when the mutation's list was rewritten (ADR 0076): the verbatim frame alone leaves peers with the old ones. */
@@ -56,6 +64,7 @@ type ApplyResult = {
   archivedCards: ArchivedCard[];
   purgedCardIds: string[];
   numberedCard?: { id: string; taskNumber: number };
+  restoredCard?: { id: string; description: string };
   /**
    * Set when the mutation was an idempotent replay that wrote nothing: the
    * activity drafts were derived from the same pre-state, so inserting them
@@ -103,6 +112,7 @@ function rebalanceLongKeys(sql: SqlStorage, message: ClientMessage): PositionsRe
   if (!list?.written.some((key) => key.length > REBALANCE_KEY_LENGTH)) return null;
   const rows = sql.exec<{ id: string }>(`SELECT id FROM ${list.table} WHERE ${list.where} ORDER BY position, id`, ...list.args).toArray();
   if (!rows.some((row) => row.id === list.id)) return null; // a stale move of a card or column that is gone wrote nothing
+  if (rows.length > REBALANCE_MAX_POSITIONS) return null; // the frame's schema caps its list: one that clients reject is worse than long keys
   const keys = generateNKeysBetween(null, null, rows.length);
   const positions = rows.map((row, index) => ({ id: row.id, position: keys[index]! }));
   for (const { id, position } of positions) sql.exec(`UPDATE ${list.table} SET position = ? WHERE id = ?`, position, id);
@@ -556,8 +566,8 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
     }
     case "card.restore": {
       const card = sql
-        .exec<{ id: string }>(
-          "SELECT id FROM cards WHERE id = ? AND archived_at IS NOT NULL",
+        .exec<{ id: string; description: string }>(
+          "SELECT id, description FROM cards WHERE id = ? AND archived_at IS NOT NULL",
           message.id,
         )
         .toArray()[0];
@@ -582,7 +592,7 @@ function apply(sql: SqlStorage, message: ClientMessage, now: number, boardId: st
         now,
         message.id,
       );
-      return NO_LIFECYCLE_CHANGES;
+      return { archivedCards: [], purgedCardIds: [], restoredCard: { id: card.id, description: card.description } };
     }
     case "checklist.create":
       requireLiveCard(sql, message.cardId);

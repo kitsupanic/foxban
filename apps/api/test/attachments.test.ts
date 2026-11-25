@@ -1403,6 +1403,45 @@ describe("scheduled attachment and avatar reconciliation", () => {
     expect(reached).toEqual([refusing, serving]);
   });
 
+  it("stops at its subrequest ceiling, saves where it stopped, resumes there next run and clears the mark at the end", async () => {
+    const keys = ["board-budget-a", "board-budget-b", "board-budget-c"].map((board) => `${board}/${crypto.randomUUID()}`).sort();
+    const listedWith: unknown[] = [];
+    const reached: string[] = [];
+    const sweepOf = (objects: string[]) =>
+      ({
+        ...env,
+        ATTACHMENTS: {
+          list: async (options?: unknown) => {
+            listedWith.push(options);
+            return { objects: objects.map((key) => ({ key })), truncated: false };
+          },
+        },
+        BOARD_DO: {
+          idFromName: (name: string) => name,
+          get: (name: string) => ({
+            fetch: async (...args: Parameters<DurableObjectStub["fetch"]>) => {
+              reached.push(name);
+              return env.BOARD_DO.get(env.BOARD_DO.idFromName(name)).fetch(...args);
+            },
+          }),
+        },
+      }) as unknown as typeof env;
+    const mark = () => env.DB.prepare("SELECT value FROM maintenance_state WHERE key = 'attachment_reconcile_after'").first<{ value: string }>();
+    await env.DB.exec("DELETE FROM maintenance_state");
+
+    // The run counts its own reads (the mark, the list) and one board call per board: a ceiling of 4 fits two boards.
+    await reconcileAttachmentObjects(sweepOf(keys), 4);
+    expect(reached).toEqual([keys[0]!.split("/")[0], keys[1]!.split("/")[0]]);
+    expect(await mark()).toEqual({ value: keys[1] });
+
+    // The next run lists from after the mark, finishes the rest and clears the mark.
+    reached.length = 0;
+    await reconcileAttachmentObjects(sweepOf([keys[2]!]), 4);
+    expect(listedWith.at(-1)).toEqual({ startAfter: keys[1] });
+    expect(reached).toEqual([keys[2]!.split("/")[0]]);
+    expect(await mark()).toBeNull();
+  });
+
   it("protects in-flight destination transfer staging from being deleted by the sweep", async () => {
     const cookie = await signup("stage-protect@foxban.test", "Stage Protect User");
     const boardId = await createBoard(cookie, "Transfer Destination Board");

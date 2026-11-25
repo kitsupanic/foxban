@@ -15,7 +15,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useCallback, useRef, type MouseEvent } from "react";
+import { memo, useCallback, useRef, type MouseEvent } from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { useDndMonitor } from "@dnd-kit/core";
 import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
@@ -23,7 +23,7 @@ import type { Card, Label, TaskType } from "@foxban/shared";
 import type { Member } from "../lib/api";
 import { cardFace, type BoardIndex } from "../lib/apply-mutation";
 import { PRIORITY_META } from "../lib/priority";
-import { DUE_STATE_META, dueState, formatDueDate, parseDueDate } from "../lib/due-date";
+import { DUE_STATE_META, dueState, formatDueDate, parseDueDate, useToday } from "../lib/due-date";
 import { LABEL_COLOR_META } from "../lib/labels";
 import { isBlocked, nonSubtaskLinks } from "../lib/relations";
 import { DEVELOPMENT_STATE_META, type CardPullRequestBadge } from "../lib/card-development";
@@ -132,13 +132,14 @@ export function CardFace({
   dragAffordance?: React.ReactNode;
   activator?: CardBodyActivator;
 }) {
+  const today = useToday();
   // Precomputed rather than derived inline: the badge needs the urgency state,
   // the short text, and the full date, and `card.dueDate` narrows only here.
   const due =
     card.dueDate === null
       ? null
       : {
-          state: dueState(card.dueDate),
+          state: dueState(card.dueDate, today),
           text: formatDueDate(card.dueDate),
           full: parseDueDate(card.dueDate).toLocaleDateString(undefined, {
             year: "numeric",
@@ -361,7 +362,24 @@ export function CardFace({
 }
 
 /** A click — single or double — opens the card modal, which owns renaming. */
-export function CardView(props: CardFaceProps & { onOpen: (cardId: string) => void; dropPlacement?: "before" | "after" | "inside" }) {
+type CardViewProps = CardFaceProps & { onOpen: (cardId: string) => void; dropPlacement?: "before" | "after" | "inside" };
+
+/**
+ * Shallow equality, except `labels`: the board index rebuilds every card's label
+ * array on any change, so it is compared by its (state-shared) elements.
+ */
+function sameCardViewProps(prev: CardViewProps, next: CardViewProps): boolean {
+  const keys = new Set([...Object.keys(prev), ...Object.keys(next)]) as Set<keyof CardViewProps>;
+  for (const key of keys) {
+    if (key === "labels") {
+      if (prev.labels.length !== next.labels.length || prev.labels.some((label, i) => label !== next.labels[i])) return false;
+    } else if (!Object.is(prev[key], next[key])) return false;
+  }
+  return true;
+}
+
+/** Memoized so a frame touching one card re-renders that card, not every card on the board. */
+export const CardView = memo(function CardView(props: CardViewProps) {
   // A cancelled mouse/touch drag still owns its eventual release click. The
   // sensor's short document click guard can expire while the button is held.
   // Keep this gesture marked until its click or the next genuine pointerdown.
@@ -432,4 +450,4 @@ export function CardView(props: CardFaceProps & { onOpen: (cardId: string) => vo
       />
     </li>
   );
-}
+}, sameCardViewProps);

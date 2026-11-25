@@ -43,7 +43,7 @@ beforeEach(() => {
         closed_at: item.state === "closed" ? NOW : null,
         html_url: `https://github.example/${REPO_NAME}/pull/${item.number}`,
         updated_at: NOW,
-        head: { ref: "topic" },
+        head: { ref: "topic", repo: { id: REPO_ID } },
         base: { repo: { id: REPO_ID, full_name: REPO_NAME } },
       });
       if (rest) return pull ? Response.json(body(pull)) : Response.json({ message: "Not Found" }, { status: 404 });

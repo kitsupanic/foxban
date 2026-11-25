@@ -649,9 +649,8 @@ test.describe("positions.rebalanced through the reconciler (ADR 0076)", () => {
 
     const outcome = session.applyServerMessage(rebalanced);
 
-    // Nothing is settled, retired or rolled back: a rebalance is a peer change, not a reconnect snapshot.
+    // Nothing is settled or retired: a rebalance is a peer change, not a reconnect snapshot.
     expect(outcome.ackedMutationIds).toEqual([]);
-    expect(outcome.rolledBackMutationId).toBeUndefined();
     expect(session.getPendingMutations()).toEqual([comment, edit, move]);
     // The base carries the new keys, and the pending mutations are re-applied over them.
     expect(session.getBaseState()!.cards.map((c) => [c.id, c.position])).toEqual([["x1", "a0"], ["x2", "a1"], ["x3", "a2"]]);

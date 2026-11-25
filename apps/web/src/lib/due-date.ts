@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from "react";
+
 /** The card's due date on the wire is a timezone-free ISO `YYYY-MM-DD` day. */
 export type DueState = "overdue" | "today" | "upcoming";
 
@@ -36,3 +38,30 @@ export const DUE_STATE_META: Record<DueState, { className: string; prefix: strin
   today: { className: "font-semibold text-warning", prefix: "Due today —", label: "Today" },
   upcoming: { className: "", prefix: "Due", label: "" },
 };
+
+const todayListeners = new Set<() => void>();
+let todayTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleMidnight(): void {
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  todayTimer = setTimeout(() => {
+    for (const listener of todayListeners) listener();
+    scheduleMidnight();
+  }, midnight.getTime() - now.getTime());
+}
+function subscribeToday(listener: () => void): () => void {
+  todayListeners.add(listener);
+  if (todayTimer === undefined) scheduleMidnight();
+  return () => {
+    todayListeners.delete(listener);
+    if (todayListeners.size === 0) {
+      clearTimeout(todayTimer);
+      todayTimer = undefined;
+    }
+  };
+}
+
+/** The viewer's local day, re-rendering at midnight: memoized cards would otherwise keep yesterday's due state. One shared timer. */
+export function useToday(): string {
+  return useSyncExternalStore(subscribeToday, localISODate);
+}

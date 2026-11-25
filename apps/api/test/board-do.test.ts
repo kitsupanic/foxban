@@ -37,6 +37,7 @@ import {
 import { PreparedCardTransferBundleSchema } from "../src/board-do";
 import { REBALANCE_KEY_LENGTH } from "../src/board-mutations";
 import { COMMENT_TIME_TOLERANCE_MS } from "../src/mutation-gate";
+import { pausedD1 } from "./paused-d1";
 import type { z } from "zod";
 beforeAll(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
@@ -331,6 +332,7 @@ async function awaitBroadcast(client: Client, mutationId: string): Promise<Clien
       message.type !== "cards.archived" &&
       message.type !== "archive.purged" &&
       message.type !== "card.numbered" &&
+      message.type !== "card.restored" &&
       message.type !== "positions.rebalanced" &&
       message.type !== "github.invalidated" &&
       message.mutationId === mutationId,
@@ -849,6 +851,48 @@ describe("BoardDO", () => {
     client.close();
   }, 30_000);
 
+  it("answers an assignee check whose D1 read outlives the five-second bound with a retry, keeps the socket open and applies the next frame", async () => {
+    const board = "board-assignee-deadline";
+    const client = await connect(board);
+    await snapshotOf(client);
+    client.send({ type: "column.create", mutationId: "assignee-col", id: "col-1", title: "Todo", position: "a0" });
+    await awaitBroadcast(client, "assignee-col");
+    const stub = env.BOARD_DO.get(env.BOARD_DO.idFromName(board));
+    // D1 never answers the eligibility read: the window must give up on its own rather than hold the input gate.
+    const neverAnswers = new Promise<void>(() => {});
+    const paused = pausedD1(() => neverAnswers);
+    type WithEnv = { env: typeof env };
+    const realEnv = await runInDurableObject(stub, (instance) => {
+      const target = instance as unknown as WithEnv;
+      const real = target.env;
+      target.env = { ...real, DB: paused.db };
+      return real;
+    });
+    const createCard = (mutationId: string, id: string, assigneeId?: string) =>
+      client.send({ type: "card.create", mutationId, id, columnId: "col-1", title: id, position: "a0", ...(assigneeId ? { assigneeId } : {}) });
+
+    const started = Date.now();
+    createCard("assignee-hang", "card-hung", "test-user");
+    const refused = await awaitError(client, "assignee-hang");
+    const elapsed = Date.now() - started;
+    expect(refused.message).toBe("Assignee could not be confirmed. Try again.");
+    expect(elapsed).toBeGreaterThanOrEqual(4_000);
+    expect(elapsed).toBeLessThan(15_000);
+    // The read was attempted once, nothing was written, and the sender's socket is still open.
+    expect(paused.queries()).toBe(1);
+    expect(await countDurableRows(board, "SELECT COUNT(*) AS n FROM cards")).toBe(0);
+    expect(await Promise.race([client.closed.then(() => "closed" as const), scheduler.wait(200).then(() => "open" as const)])).toBe("open");
+
+    // The gate was released by the deadline: with D1 answering again the same socket's next frame applies.
+    await runInDurableObject(stub, (instance) => {
+      (instance as unknown as WithEnv).env = realEnv;
+    });
+    createCard("assignee-next", "card-next", "test-user");
+    await awaitBroadcast(client, "assignee-next");
+    expect(await countDurableRows(board, "SELECT COUNT(*) AS n FROM cards WHERE id = 'card-next' AND assignee_id = 'test-user'")).toBe(1);
+    expect(await countDurableRows(board, "SELECT COUNT(*) AS n FROM cards")).toBe(1);
+  }, 30_000);
+
   it("answers a failed authorization read as an ordinary retry instead of resetting", async () => {
     const board = "board-admission-rejection";
     const client = await connect(board);
@@ -1295,6 +1339,59 @@ describe("BoardDO", () => {
     expect((await commentsOf("board-cascade", "card-a1")).map((comment) => comment.id)).toEqual(["cmt-a1"]);
     expect(restartSnapshot.cardLabels.map((join) => join.id)).toEqual(["join-a1"]);
     expect(restartSnapshot.relations.map((relation) => relation.id)).toEqual(["rel-a1-b1"]);
+  });
+
+  it("sends archived cards without their description, and the restore frame brings it back to every socket (ADR 0089)", async () => {
+    const board = "board-archived-description";
+    const a = await connect(board);
+    const b = await connect(board);
+    await snapshotOf(a);
+    await snapshotOf(b);
+
+    a.send({ type: "column.create", mutationId: "ad-col", id: "col-1", title: "Todo", position: "a0" });
+    a.send({ type: "card.create", mutationId: "ad-card", id: "card-1", columnId: "col-1", title: "Described", position: "a0" });
+    a.send({ type: "card.update", mutationId: "ad-text", id: "card-1", description: "the real **text**" });
+    await awaitBroadcast(a, "ad-text");
+    await awaitBroadcast(b, "ad-text");
+
+    a.send({ type: "card.delete", mutationId: "ad-del", id: "card-1" });
+    // The live archive frame is not a snapshot: it still carries the text, so a peer restoring it has it.
+    const archived = await awaitMatching(b, (message): message is Extract<ServerMessage, { type: "cards.archived" }> => message.type === "cards.archived");
+    expect(archived.cards[0]).toMatchObject({ id: "card-1", description: "the real **text**" });
+    await awaitMatching(a, (message) => message.type === "cards.archived");
+
+    // A fresh socket's snapshot lists the archived card without its text; the row keeps it.
+    const reconnect = await snapshotOf(await connect(board));
+    expect(reconnect.archivedCards).toHaveLength(1);
+    expect(reconnect.archivedCards[0]).toMatchObject({ id: "card-1", title: "Described", description: "" });
+    expect(await countDurableRows(board, "SELECT COUNT(*) AS n FROM cards WHERE id = 'card-1' AND description = 'the real **text**'")).toBe(1);
+
+    // The restore echoes verbatim, then every socket, sender included, gets the text in its own frame.
+    a.send({ type: "card.restore", mutationId: "ad-restore", id: "card-1", columnId: "col-1", position: "a1" });
+    for (const client of [a, b]) {
+      await awaitBroadcast(client, "ad-restore");
+      expect((await client.next()).message).toEqual({ type: "card.restored", id: "card-1", description: "the real **text**" });
+    }
+
+    // A restore the board refuses sends no such frame: the stale id errors and nothing else follows.
+    a.send({ type: "card.restore", mutationId: "ad-again", id: "card-1", columnId: "col-1", position: "a2" });
+    await awaitError(a, "ad-again");
+    const after = await snapshotOf(await connect(board));
+    expect(after.archivedCards).toEqual([]);
+    expect(after.cards[0]).toMatchObject({ id: "card-1", description: "the real **text**" });
+  });
+
+  it("sends the restore frame for an empty description too, so a peer's stale text cannot stay", async () => {
+    const board = "board-archived-empty-description";
+    const a = await connect(board);
+    await snapshotOf(a);
+    a.send({ type: "column.create", mutationId: "ae-col", id: "col-1", title: "Todo", position: "a0" });
+    a.send({ type: "card.create", mutationId: "ae-card", id: "card-1", columnId: "col-1", title: "Bare", position: "a0" });
+    a.send({ type: "card.delete", mutationId: "ae-del", id: "card-1" });
+    await awaitMatching(a, (message) => message.type === "cards.archived");
+    a.send({ type: "card.restore", mutationId: "ae-restore", id: "card-1", columnId: "col-1", position: "a1" });
+    const restored = await awaitMatching(a, (message): message is Extract<ServerMessage, { type: "card.restored" }> => message.type === "card.restored");
+    expect(restored).toEqual({ type: "card.restored", id: "card-1", description: "" });
   });
 
   it("archives one populated card, preserves it through restore, and handles missing and orphan ids", async () => {
@@ -1928,15 +2025,21 @@ describe("BoardDO", () => {
 
     // Verify none of the rejected writes applied.
     const preDeleteSnapshot = await snapshotOf(await connect(board));
+    // The snapshot lists an archived card without its text (ADR 0089): the stored row is what a rejected write would have changed.
     expect(preDeleteSnapshot.archivedCards[0]).toMatchObject({
       id: "card-archived",
       title: "Archived Card",
-      description: archivedDescription,
+      description: "",
       priority: "medium",
       taskType: "task",
       dueDate: null,
       assigneeId: null,
     });
+    expect(
+      await runInDurableObject(env.BOARD_DO.get(env.BOARD_DO.idFromName(board)), (_instance, state) =>
+        state.storage.sql.exec<{ description: string }>("SELECT description FROM cards WHERE id = 'card-archived'").one().description,
+      ),
+    ).toBe(archivedDescription);
     expect(preDeleteSnapshot.checklistItems.map((i) => i.id)).toEqual(["item-ro"]);
     expect(preDeleteSnapshot.attachments.map((at) => at.id)).toEqual([roAttId]);
     expect((await commentsOf(board, "card-archived")).map((c) => c.id)).toEqual(["note-ro"]);
@@ -3068,7 +3171,7 @@ describe("BoardDO activity edge cases", () => {
         .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'schema_version'")
           .toArray()[0]?.value,
     );
-    expect(version).toBe(30);
+    expect(version).toBe(31);
   });
 });
 
@@ -6557,7 +6660,7 @@ describe("BoardDO card details", () => {
         .exec<{ value: number }>("SELECT value FROM meta WHERE key = 'schema_version'")
         .toArray()[0]?.value,
     );
-    expect(version).toBe(30);
+    expect(version).toBe(31);
 
     // The restarted instance still writes: the tables survived intact.
     b.send({
@@ -6651,7 +6754,7 @@ describe("BoardDO card details", () => {
         },
       );
 
-      expect(version).toBe(30);
+      expect(version).toBe(31);
       expect(columnNames).toContain("archived_at");
       expect(columnNames).toContain("archived_column_title");
       expect(columnNames).toContain("subtask_done");

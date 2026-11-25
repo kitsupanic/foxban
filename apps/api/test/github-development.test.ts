@@ -88,6 +88,8 @@ type PullRequestOptions = {
   draft?: boolean;
   merged?: boolean;
   updatedAt?: string;
+  /** The repo the head branch lives in; the base repo's own unless this is a fork's. */
+  headRepoId?: number;
 };
 
 /** A `pull_request` event as GitHub sends it, down to the fields this feature reads. */
@@ -106,7 +108,7 @@ function pullRequestEvent(options: PullRequestOptions = {}) {
       merged: options.merged ?? false,
       html_url: `https://github.example/${repoName}/pull/${number}`,
       updated_at: options.updatedAt ?? at(0),
-      head: { ref: branch },
+      head: { ref: branch, repo: { id: options.headRepoId ?? repoId } },
     },
   };
 }
@@ -183,6 +185,28 @@ describe("matching task keys", () => {
 
     expect((await pullRequestsOn(mine)).map((pr) => pr.number)).toEqual([10]);
     expect(await pullRequestsOn(other)).toEqual([]);
+  });
+
+  // ADR 0088: a fork's title and branch are a stranger's text, so they link nothing by key.
+  it("does not link a fork's pull request by key, but keeps updating one that is already linked", async () => {
+    const board = await newBoard(1);
+    await connect();
+    const named = { title: `${board.key}-1 click here`, branch: `${board.key.toLowerCase()}-1-x` };
+
+    const response = await deliver("pull_request", pullRequestEvent({ number: 20, ...named, headRepoId: 999 }));
+    expect(await response.json()).toEqual({ result: "dropped" });
+    expect(await pullRequestsOn(board)).toEqual([]);
+
+    // The same repo's own branch still links...
+    await deliver("pull_request", pullRequestEvent({ number: 21, ...named }));
+    expect((await pullRequestsOn(board)).map((pr) => pr.number)).toEqual([21]);
+
+    // ...and once linked, the PR keeps updating whatever its head repo says (a deleted fork has no head repo at all).
+    await deliver("pull_request", pullRequestEvent({ number: 21, title: "Renamed", headRepoId: 999, updatedAt: at(60) }));
+    expect((await pullRequestsOn(board)).map((pr) => pr.title)).toEqual(["Renamed"]);
+    const orphan = pullRequestEvent({ number: 21, title: "Renamed again", updatedAt: at(120) });
+    await deliver("pull_request", { ...orphan, pull_request: { ...orphan.pull_request, head: { ref: "x", repo: null } } });
+    expect((await pullRequestsOn(board)).map((pr) => pr.title)).toEqual(["Renamed again"]);
   });
 
   // The newer-event rule runs on `pull_request.updated_at`; an event without it is refused rather than guessed at.

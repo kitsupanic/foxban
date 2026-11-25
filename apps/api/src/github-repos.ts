@@ -87,6 +87,7 @@ export async function enqueueBackfill(env: Env, repoIds: number[]): Promise<void
  * Only the App owner's active installations count; the others are returned as `ignoredAccounts`
  * so the Admin page can say why their repos are missing.
  * Returns null (changing nothing) when GitHub cannot be asked, so a caller shows the last known list.
+ * A list GitHub paged past our cap is partial: what it shows is still connected, but nothing is dropped (ADR 0088).
  */
 export async function refreshConnectedRepos(env: Env): Promise<{ owner: string; ownerIsOrganization: boolean; ignoredAccounts: string[] } | null> {
   try {
@@ -95,7 +96,9 @@ export async function refreshConnectedRepos(env: Env): Promise<{ owner: string; 
     // Without a known owner, an empty answer would wrongly drop everything.
     if (!app || !appOwner) return null;
     const owner = appOwner.login;
-    const active = (await listAppInstallations(env.GITHUB_API_BASE, app.appId, app.privateKey)).filter((installation) => !installation.suspended);
+    const listedInstallations = await listAppInstallations(env.GITHUB_API_BASE, app.appId, app.privateKey);
+    let truncated = listedInstallations.truncated;
+    const active = listedInstallations.installations.filter((installation) => !installation.suspended);
     const isOwner = (installation: { account: string }) => installation.account.toLowerCase() === owner.toLowerCase();
     const installations = active.filter(isOwner);
     const ignoredAccounts = active.filter((installation) => !isOwner(installation)).map((installation) => installation.account);
@@ -103,15 +106,20 @@ export async function refreshConnectedRepos(env: Env): Promise<{ owner: string; 
     const kept: number[] = [];
     for (const { id } of installations) {
       const token = await createInstallationToken(env.GITHUB_API_BASE, app.appId, app.privateKey, id);
-      const repos = await listInstallationRepositories(env.GITHUB_API_BASE, token);
+      const { repos, truncated: reposTruncated } = await listInstallationRepositories(env.GITHUB_API_BASE, token);
+      truncated ||= reposTruncated;
       await connectRepos(env, id, repos);
       await enqueueBackfill(env, repos.filter((repo) => !known.has(repo.id)).map((repo) => repo.id));
       kept.push(...repos.map((repo) => repo.id));
     }
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM github_backfill_queue WHERE repo_id NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(kept)),
-      env.DB.prepare("DELETE FROM github_repos WHERE repo_id NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(kept)),
-    ]);
+    if (truncated) {
+      console.warn("[github-repos] GitHub listed more than the page cap; connected repos not seen were kept");
+    } else {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM github_backfill_queue WHERE repo_id NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(kept)),
+        env.DB.prepare("DELETE FROM github_repos WHERE repo_id NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(kept)),
+      ]);
+    }
     return { owner, ownerIsOrganization: appOwner.isOrganization, ignoredAccounts };
   } catch (error) {
     console.warn("[github-repos] re-read failed:", error instanceof Error ? error.message : error);
