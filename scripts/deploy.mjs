@@ -87,7 +87,12 @@ export function buildConfig(base, env, d1Id) {
     database_id: d1Id,
   }));
   cfg.r2_buckets = base.r2_buckets.map((b) => ({ ...b, bucket_name: env.R2_BUCKET_NAME || `${name}-attachments` }));
-  cfg.ratelimits = base.ratelimits.map((r) => ({ ...r, namespace_id: String(env.RATE_LIMIT_NAMESPACE_ID || r.namespace_id) }));
+  // Each limiter needs its own namespace: RATE_LIMIT_NAMESPACE_ID is the first, the next limiters take the ids after it.
+  const firstNamespace = env.RATE_LIMIT_NAMESPACE_ID ? Number(env.RATE_LIMIT_NAMESPACE_ID) : 0;
+  if (!Number.isInteger(firstNamespace) || firstNamespace < 0) {
+    throw new Error(`RATE_LIMIT_NAMESPACE_ID must be a positive whole number, not "${env.RATE_LIMIT_NAMESPACE_ID}"`);
+  }
+  cfg.ratelimits = base.ratelimits.map((r, i) => ({ ...r, namespace_id: firstNamespace ? String(firstNamespace + i) : r.namespace_id }));
   cfg.vars = { ...base.vars };
   if (env.APP_ORIGIN) cfg.vars.APP_ORIGIN = env.APP_ORIGIN;
   const domain = env.CUSTOM_DOMAIN?.replace(/^https?:\/\//, "").replace(/\/.*$/, "");

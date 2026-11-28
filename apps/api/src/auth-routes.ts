@@ -301,6 +301,11 @@ export const authRouter = new Hono<AppEnv>()
               AND id != ?
               AND EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)`,
         ).bind(user.id, sessionHash, user.id, newHash),
+        // An agent credential is a sign-in no session row holds, so the change ends every one of them too (ADR 0090).
+        c.env.DB.prepare(
+          `UPDATE agent_credentials SET revoked_at = COALESCE(revoked_at, ?)
+            WHERE user_id = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)`,
+        ).bind(Date.now(), user.id, user.id, newHash),
         c.env.DB.prepare("UPDATE sessions SET github_reauth_until = NULL WHERE id = ?").bind(sessionHash),
       ]);
 

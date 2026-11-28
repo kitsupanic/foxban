@@ -2,7 +2,8 @@
 # Images load only from this origin, blob:/data: previews and GitHub avatars
 # (Avatar.tsx: github.com/<login>.png redirects to avatars.githubusercontent.com),
 # so Markdown cannot pull in tracking pixels from other hosts. The YouTube embed
-# is an iframe, not an image, so it is unaffected. Keep MarkdownEditor's
-# same-origin image check in step with this.
+# is an iframe, not an image, so it is unaffected. MarkdownEditor is stricter
+# still: it loads only this origin's card attachments as images
+# (isAttachmentImageSrc in src/lib/markdown-image.ts); keep the two in step.
 /*
   Content-Security-Policy: img-src 'self' data: blob: https://github.com https://avatars.githubusercontent.com

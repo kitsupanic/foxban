@@ -2,11 +2,10 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { BoardAccessModeSchema, type BoardAccessMode, type WorkspaceRole } from "@foxban/shared";
 
-import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, AccessChangeConflict, INVITER_IS_ADMIN, type AccessChangeResult, resolveAccessChangeAttempt, runAccessChange, sendPresenceInvalidate } from "./access-changes";
+import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, AccessChangeConflict, INVITER_IS_ADMIN, OperationIdSchema, type AccessChangeResult, resolveAccessChangeAttempt, runAccessChange, sendPresenceInvalidate } from "./access-changes";
 import { boardOpenSql, createInviteToken, isAdminEmail, rateLimitLookup, requireAdmin, requireAuth, sha256Hex, type AppEnv, type SessionUser } from "./auth";
 
 const WorkspaceNameSchema = z.string().trim().min(1).max(40);
-const OperationIdSchema = z.string().uuid();
 const CreateSchema = z.strictObject({ name: WorkspaceNameSchema });
 const SettingsSchema = z.strictObject({ name: WorkspaceNameSchema.optional(), defaultBoardAccess: BoardAccessModeSchema.optional() }).refine((v)=>v.name!==undefined||v.defaultBoardAccess!==undefined);
 const RoleSchema = z.strictObject({ role: z.enum(["admin","member"]), operationId: OperationIdSchema });
@@ -18,8 +17,8 @@ const INVITE_UNAVAILABLE = { code:"workspace_invite_unavailable", error:"This wo
 const DAY_MS = 86_400_000;
 // A membership that is already there changes nothing, so it runs no access change: that would close every socket of every board for a no-op.
 const alreadyMember=(operationId:string,result:unknown):AccessChangeResult=>({operationId,state:"completed",outcome:"committed",result});
-// A member already, and no access change holds the workspace: one in flight (a removal, say) may still change that, so it goes through runAccessChange and its conflict.
-const isSettledMember=async(env:Env,workspaceId:string,userId:string)=>!!await env.DB.prepare(`SELECT 1 AS present FROM workspace_members WHERE workspace_id=? AND user_id=? AND NOT EXISTS(SELECT 1 FROM access_change_scopes WHERE workspace_id=?)`).bind(workspaceId,userId,workspaceId).first();
+// A member already (with `role`, when given), and no access change holds the workspace: one in flight (a removal, say) may still change that, so it goes through runAccessChange and its conflict.
+const isSettledMember=async(env:Env,workspaceId:string,userId:string,role?:"admin"|"member")=>!!await env.DB.prepare(`SELECT 1 AS present FROM workspace_members WHERE workspace_id=? AND user_id=? AND role=COALESCE(?,role) AND NOT EXISTS(SELECT 1 FROM access_change_scopes WHERE workspace_id=?)`).bind(workspaceId,userId,role??null,workspaceId).first();
 
 type WorkspaceRecord = { id:string;name:string;defaultBoardAccess:BoardAccessMode;role:WorkspaceRole|null;createdAt:number;updatedAt:number };
 type InviteRecord = { id:string;workspaceId:string;role:"member"|"admin";invitedBy:string;createdAt:number;expiresAt:number;revokedAt:number|null };
@@ -220,6 +219,8 @@ export const workspacesRouter = new Hono<AppEnv>()
       const workspace=await requireWorkspaceAdmin(c.env,actor.id,id);if(!workspace)return c.json({error:"forbidden"} as const,403);
       // The same rule the commit and the database enforce, applied first so the person is told what to do.
       if(parsed.data.role==="member"&&await isLastAdmin(c.env,id,target))return c.json(LAST_ADMIN,409);
+      // The role they already hold changes nothing (ADR 0090): no fence, and no demotion to revoke admin links for (ADR 0080).
+      if(await isSettledMember(c.env,id,target,parsed.data.role))return c.json(alreadyMember(parsed.data.operationId,{ok:true}));
       const result=await runAccessChange(c.env,actor,{operationId:parsed.data.operationId,kind:"workspace-member-role",payload:{workspaceId:id,userId:target,role:parsed.data.role},workspaceIds:[id],inheritWorkspaceBoards:true});
       if(result.state!=="completed")return c.json(result,202);
       if(result.outcome==="aborted")return refused(result.result);

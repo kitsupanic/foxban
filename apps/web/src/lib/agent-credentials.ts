@@ -18,6 +18,8 @@ export type IssueCredentialInput = {
   boardIds: string[];
   scopes: AgentScope[];
   expiresInDays: number;
+  /** Required for an account that has a password (ADR 0090). */
+  currentPassword?: string;
 };
 export type IssuedCredential = { credential: CredentialMetadata; token: string };
 export async function fetchAgentCredentialsPage(cursor: string | null): Promise<CredentialPage> {

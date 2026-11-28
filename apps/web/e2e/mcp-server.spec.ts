@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { expect, test, type Page } from "@playwright/test";
-import { createBoard, getBoardUuid, signup, uniqueEmail } from "./helpers";
+import { createBoard, getBoardUuid, PASSWORD, signup, uniqueEmail } from "./helpers";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
@@ -47,6 +47,7 @@ test("generates a scoped token from the MCP server workspace", async ({ page, co
   await dialog.getByLabel(firstName).check();
   await dialog.getByLabel("Create, edit and move tasks").check();
   await dialog.getByLabel("Post comments").check();
+  await dialog.getByLabel("Current password").fill(PASSWORD);
   const issueResponse = page.waitForResponse((response) => response.url().includes("/me/agent-credentials") && response.request().method() === "POST");
   await dialog.getByRole("button", { name: "Generate token" }).click();
   expect((await issueResponse).status()).toBe(201);
@@ -116,6 +117,7 @@ test("validates issuance and preserves manual copy recovery", async ({ page, con
   await dialog.getByRole("button", { name: "Generate token" }).click();
   await expect(dialog.getByText("Enter a token name.")).toBeVisible();
   await expect(dialog.getByText("Select at least one board.")).toBeVisible();
+  await expect(dialog.getByText("Enter your current password.")).toBeVisible();
   await dialog.getByLabel("Token name").fill("Invalid until complete");
   await dialog.getByLabel(firstName).check();
   await dialog.getByLabel("Read boards and tasks").uncheck();
@@ -126,6 +128,12 @@ test("validates issuance and preserves manual copy recovery", async ({ page, con
   expect(posts).toBe(0);
   await dialog.getByLabel("Read boards and tasks").check();
   await dialog.getByLabel("Expires in (days)").fill("1");
+  // A wrong password is refused by the server and nothing is issued; the right one issues.
+  await dialog.getByLabel("Current password").fill("not the password");
+  await dialog.getByRole("button", { name: "Generate token" }).click();
+  await expect(dialog.getByRole("alert").filter({ hasText: "Current password is incorrect." })).toBeVisible();
+  expect(posts).toBe(1);
+  await dialog.getByLabel("Current password").fill(PASSWORD);
   await dialog.getByRole("button", { name: "Generate token" }).click();
   const reveal = page.getByRole("dialog", { name: "Token generated" });
   await expect(reveal).toBeVisible();
@@ -149,6 +157,7 @@ test("locks a pending issue and reports an ambiguous accepted response", async (
   const dialog = await openGenerator(page);
   await dialog.getByLabel("Token name").fill("Ambiguous token");
   await dialog.getByLabel(firstName).check();
+  await dialog.getByLabel("Current password").fill(PASSWORD);
   let accepted = 0;
   await page.route("**/me/agent-credentials", async (route) => {
     if (route.request().method() !== "POST") return route.continue();

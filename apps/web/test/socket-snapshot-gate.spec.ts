@@ -1,11 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { createElement, act } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ClientMessage, ServerMessage } from "@foxban/shared";
+import type { Card, ClientMessage, ServerMessage } from "@foxban/shared";
+import type { BoardState } from "../src/lib/apply-mutation";
+import type { MutationSettledStatus } from "../src/lib/socket";
 
 // Service-free (ADR 0049): `useBoardSocket` under react-dom in Node with a fake WebSocket. A reconnected
 // socket still holds the previous socket's base state, so a write made before its own snapshot lands
-// would be settled as "not confirmed" by that snapshot: it is refused instead.
+// would be settled as "not confirmed" by that snapshot: it is refused instead. Only that first snapshot
+// settles; a later one on the same socket (after a card import) leaves what is in flight pending.
 
 class FakeSocket {
   static readonly OPEN = 1;
@@ -100,4 +103,93 @@ test("a mutation is refused between socket open and its snapshot, on first conne
   expect(second.sent).toHaveLength(1);
 
   await act(async () => root.unmount());
+});
+
+const columnId = "col-a";
+const card = (id: string): Card => ({
+  id, columnId, title: id, description: "", position: "a0", taskNumber: 1, assigneeId: null, priority: "medium",
+  taskType: "task", dueDate: null, subtaskDone: false, createdAt: 1, updatedAt: 1,
+});
+const boardSnapshot = (cards: Card[] = []): ServerMessage => ({
+  type: "snapshot", workflowRolesExplicit: false, columns: [{ id: columnId, title: "A", position: "a0" }], cards, archivedCards: [],
+  checklistItems: [], attachments: [], commentCounts: {}, relations: [], labels: [], cardLabels: [],
+});
+const createCard = (id: string): ClientMessage => ({ type: "card.create", mutationId: crypto.randomUUID(), id, columnId, title: id, position: "a1" });
+
+async function mountBoard() {
+  const { createRoot } = await import("react-dom/client");
+  const { useBoardSocket } = await import("../src/lib/socket");
+  const { boardQueryKey } = await import("../src/lib/board-cache");
+  const socket: { current: ReturnType<typeof useBoardSocket> | null } = { current: null };
+  const boardId = crypto.randomUUID();
+  function Probe() {
+    socket.current = useBoardSocket(boardId);
+    return null;
+  }
+  const queryClient = new QueryClient();
+  const root = createRoot(fakeContainer() as unknown as Element);
+  await act(async () => {
+    root.render(createElement(QueryClientProvider, { client: queryClient }, createElement(Probe)));
+  });
+  await wait(5);
+  const ws = FakeSocket.last!;
+  await act(async () => {
+    ws.open();
+    ws.receive(boardSnapshot());
+  });
+  /** Sends a subscribed write, as a creation dialog does, and records every outcome it is told. */
+  const send = async (msg: ClientMessage) => {
+    const outcomes: MutationSettledStatus[] = [];
+    await act(async () => {
+      socket.current!.subscribeMutation(msg.mutationId, ({ status }) => outcomes.push(status));
+      expect(socket.current!.sendMutation(msg)).toBe(true);
+    });
+    return outcomes;
+  };
+  const cardIds = () => queryClient.getQueryData<BoardState>(boardQueryKey(boardId))!.cards.map((c) => c.id).sort();
+  return { ws, send, cardIds, unmount: () => act(() => root.unmount()) };
+}
+
+test("a later snapshot on the same socket leaves an in-flight create pending, and its late echo accepts it", async () => {
+  const { ws, send, cardIds, unmount } = await mountBoard();
+  const create = createCard("mine");
+  const outcomes = await send(create);
+
+  // A peer moved a card in from another board: the board sends every open socket a fresh snapshot.
+  await act(async () => ws.receive(boardSnapshot([card("imported")])));
+  expect(outcomes).toEqual([]);
+  expect(cardIds()).toEqual(["imported", "mine"]);
+  expect(ws.readyState).toBe(FakeSocket.OPEN);
+
+  await act(async () => ws.receive(create as ServerMessage));
+  expect(outcomes).toEqual(["accepted"]);
+  expect(cardIds()).toEqual(["imported", "mine"]);
+  await unmount();
+});
+
+test("a write kept across a later snapshot still times out on its own timer", async () => {
+  const { ws, send, cardIds, unmount } = await mountBoard();
+  const outcomes = await send(createCard("late"));
+  await act(async () => ws.receive(boardSnapshot([card("imported")])));
+  await wait(5_100);
+  expect(outcomes).toEqual(["timeout"]);
+  expect(cardIds()).toEqual(["imported"]);
+  await unmount();
+});
+
+test("the first snapshot after a reconnect still settles each tracked write, once", async () => {
+  const { ws, send, unmount } = await mountBoard();
+  const kept = await send(createCard("kept"));
+  const lost = await send(createCard("lost"));
+  await act(async () => ws.onclose?.({ code: 1006 }));
+  await wait(600);
+  const reconnected = FakeSocket.last!;
+  expect(reconnected).not.toBe(ws);
+  await act(async () => {
+    reconnected.open();
+    reconnected.receive(boardSnapshot([card("kept")]));
+  });
+  expect(kept).toEqual(["uncertain", "accepted"]);
+  expect(lost).toEqual(["uncertain", "verified-retry"]);
+  await unmount();
 });

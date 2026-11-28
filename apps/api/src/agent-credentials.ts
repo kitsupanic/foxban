@@ -1,21 +1,25 @@
 import { Hono } from "hono";
 import { z } from "zod";
+import { PASSWORD_MAX_LENGTH } from "@foxban/shared";
 import {
   BOARD_SELECT_COLS,
   createInviteToken,
+  rateLimitAuth,
+  requestSessionHash,
   requireAuth,
   SESSION_USER_COLS,
   sha256Hex,
   boardOpenSql,
   isAdminEmail,
   toSessionUser,
+  underAccountLimit,
+  verifyUserPassword,
   type AppEnv,
   type RawBoardRecord,
   type SessionUser,
   type SessionUserRow,
 } from "./auth";
 import { AgentScopeSchema, decodeCursor, encodeCursor, type AgentScope } from "./mcp-contract";
-import { originAllowed } from "./mcp";
 
 const TOKEN_PREFIX = "foxban_mcp_";
 const TOKEN_RE = /^foxban_mcp_[A-Za-z0-9_-]{43}$/;
@@ -27,6 +31,8 @@ const IssueCredentialSchema = z.strictObject({
   boardIds: z.array(z.string().min(1).max(64)).min(1).max(100).refine((ids) => new Set(ids).size === ids.length),
   scopes: z.array(AgentScopeSchema).min(1).max(3).refine((scopes) => new Set(scopes).size === scopes.length),
   expiresInDays: z.number().int().min(1).max(90).default(30),
+  // Absent only for an account with no password, as for a GitHub link (ADR 0081); the route decides which accounts may omit it (ADR 0090).
+  currentPassword: z.string().min(1).max(PASSWORD_MAX_LENGTH).optional(),
 });
 const CredentialListQuerySchema = z.strictObject({
   limit: z.coerce.number().int().min(1).max(50).default(20),
@@ -142,14 +148,16 @@ export async function authenticateAgentCredential(env: Env, authorization: strin
   };
 }
 
+// A cross-origin browser write is refused by the app-wide origin check (ADR 0083), before this router.
 export const agentCredentialsRouter = new Hono<AppEnv>()
   .use("*", async (c, next) => {
     c.header("Cache-Control", "no-store");
-    if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "forbidden" } as const, 403);
     await next();
   })
   .use("*", requireAuth)
-  .post("/", async (c) => {
+  // A credential reaches the user's boards long after the session that issued it ends, so issuing one takes the current
+  // password, behind the same limits as the password routes (ADR 0090): a stolen session alone cannot mint one.
+  .post("/", rateLimitAuth, async (c) => {
     const bytes = await readBoundedBody(c.req.raw, BODY_LIMIT);
     if (bytes === null) return c.json({ error: "request too large" } as const, 413);
     let raw: unknown;
@@ -161,6 +169,12 @@ export const agentCredentialsRouter = new Hono<AppEnv>()
     const parsed = IssueCredentialSchema.safeParse(raw);
     if (!parsed.success) return c.json({ error: "invalid request" } as const, 400);
     const user = c.get("user");
+    if (!(await underAccountLimit(c, user.email))) return c.json({ error: "too many requests" } as const, 429);
+    // An account with no password has nothing to prove (ADR 0081); setting its first password revokes what it issued.
+    const { currentPassword } = parsed.data;
+    if (user.hasPassword && (currentPassword === undefined || !(await verifyUserPassword(c.env, user.id, currentPassword)))) {
+      return c.json({ error: "invalid credentials" } as const, 401);
+    }
     // The ids are distinct (schema), so one row per id means every board opens.
     if ((await listAuthorizedBoards(c.env, { user, boardIds: parsed.data.boardIds })).length !== parsed.data.boardIds.length) {
       return c.json({ error: "forbidden" } as const, 403);
@@ -172,13 +186,17 @@ export const agentCredentialsRouter = new Hono<AppEnv>()
       scopes: parsed.data.scopes, createdAt: now,
       expiresAt: now + parsed.data.expiresInDays * DAY_MS, revokedAt: null,
     };
-    await c.env.DB.prepare(
+    // Only while this session still exists: a password change or GitHub disconnect that deleted it since requireAuth
+    // revoked the user's credentials in its own batch, and one written after that must not outlive it.
+    const { meta } = await c.env.DB.prepare(
       `INSERT INTO agent_credentials(id, user_id, name, token_hash, board_ids_json, scopes_json, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ? AND user_id = ?)`,
     ).bind(
       credential.id, user.id, credential.name, await sha256Hex(token),
       JSON.stringify(credential.boardIds), JSON.stringify(credential.scopes), credential.createdAt, credential.expiresAt,
+      await requestSessionHash(c), user.id,
     ).run();
+    if (meta.changes !== 1) return c.json({ error: "unauthorized" } as const, 401);
     return c.json({ credential, token }, 201);
   })
   .get("/", async (c) => {

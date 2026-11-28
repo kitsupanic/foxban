@@ -127,7 +127,7 @@ You set these in `.env.deploy`. Only `ADMIN_EMAILS` is needed.
 | `D1_DATABASE_NAME` | The name of the database. | The same as `WORKER_NAME` |
 | `R2_BUCKET_NAME` | The name of the file storage for pictures. | `WORKER_NAME` and then `-attachments` |
 | `CUSTOM_DOMAIN` | Your own web address, like `board.example.com`. The domain must be on your Cloudflare account. | You get a `workers.dev` address. |
-| `RATE_LIMIT_NAMESPACE_ID` | A number that must be different for each foxban on one Cloudflare account. | `1001` |
+| `RATE_LIMIT_NAMESPACE_ID` | A number that must be different for each foxban on one Cloudflare account. foxban uses this number and the next one, so keep them 2 apart: `1001`, `1003`, `1005`. | `1001` |
 
 `.env.deploy.example` has the full list, with notes.
 

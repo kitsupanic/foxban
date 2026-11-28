@@ -9,3 +9,13 @@ export function toBase64(bytes: Uint8Array): string {
 export function base64Url(bytes: Uint8Array): string {
   return toBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
+
+/** Decodes standard base64; throws on malformed input. */
+export function fromBase64(text: string): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
+}
+
+/** Decodes base64url, padded or not; throws on malformed input. */
+export function fromBase64Url(text: string): Uint8Array<ArrayBuffer> {
+  return fromBase64(text.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(text.length / 4) * 4, "="));
+}

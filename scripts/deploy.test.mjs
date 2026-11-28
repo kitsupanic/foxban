@@ -24,7 +24,7 @@ test("buildConfig: defaults, custom domain, app origin", () => {
     workers_dev: true,
     d1_databases: [{ binding: "DB", database_name: "foxban" }],
     r2_buckets: [{ binding: "ATTACHMENTS", bucket_name: "foxban-attachments" }],
-    ratelimits: [{ name: "R", namespace_id: "1001" }],
+    ratelimits: [{ name: "R", namespace_id: "1001" }, { name: "A", namespace_id: "1002" }],
     vars: { GITHUB_OAUTH_BASE: "https://github.com" },
   };
   const plain = buildConfig(base, {}, "id1");
@@ -35,7 +35,11 @@ test("buildConfig: defaults, custom domain, app origin", () => {
   assert.equal(custom.name, "kb");
   assert.equal(custom.d1_databases[0].database_name, "kb");
   assert.equal(custom.r2_buckets[0].bucket_name, "kb-attachments");
-  assert.equal(custom.ratelimits[0].namespace_id, "1002");
+  // Two limiters never share a namespace, or one limit would govern both keys.
+  assert.deepEqual(custom.ratelimits.map((r) => r.namespace_id), ["1002", "1003"]);
+  assert.deepEqual(plain.ratelimits.map((r) => r.namespace_id), ["1001", "1002"]);
+  // A typo must stop the deploy, not fall back to the ids another instance may use.
+  assert.throws(() => buildConfig(base, { RATE_LIMIT_NAMESPACE_ID: "1003a" }, "id3"), /RATE_LIMIT_NAMESPACE_ID/);
   assert.deepEqual(custom.routes, [{ pattern: "kb.example.com", custom_domain: true }]);
   assert.equal(custom.workers_dev, false);
   assert.equal(custom.vars.APP_ORIGIN, "https://kb.example.com");

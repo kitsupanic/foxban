@@ -70,16 +70,12 @@ import {
   type GitHubPullRequestRef,
 } from "./github";
 import { agentCredentialsRouter, handleMcpRequest } from "./mcp";
+import { BoardKeySchema } from "./mcp-contract";
 import { readBoundedBody } from "./agent-credentials";
 import { ACCESS_CHANGE_ABORT, ACCESS_CONFLICT, accessChangesRouter, recoverAccessChanges, resolveAccessChangeAttempt, runAccessChange, AccessChangeConflict } from "./access-changes";
 import { workspacesRouter } from "./workspaces";
 import { adminRouter } from "./admin-routes";
 import { authRouter, NameSchema, passwordRequired } from "./auth-routes";
-const BoardKeySchema = z
-  .string()
-  .trim()
-  .toUpperCase()
-  .regex(/^[A-Z][A-Z0-9]{1,9}$/, "must be 2-10 uppercase alphanumeric characters starting with a letter");
 const BoardCreateSchema = z.strictObject({
   name: z.string().trim().min(1).max(200),
   key: BoardKeySchema,
@@ -453,6 +449,19 @@ function githubWriteFailure(c: Context<AppEnv>, err: unknown) {
 }
 
 
+// A board grant that is already as asked changes nothing, so it runs no access change: that would fence the board and
+// close every socket on it for a no-op, which anyone who can open the board could repeat (ADR 0090). Only while no access
+// change holds the board or its workspace: one in flight may still change that, so it goes through runAccessChange and its conflict.
+async function isSettledBoardGrant(env: Env, boardId: string, userId: string, granted: boolean): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS present FROM boards b
+      WHERE b.id = ? AND b.pending_access_operation_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM access_change_scopes s WHERE s.workspace_id = b.workspace_id)
+        AND ${granted ? "" : "NOT "}EXISTS (SELECT 1 FROM board_members m WHERE m.board_id = b.id AND m.user_id = ?)`,
+  ).bind(boardId, userId).first();
+  return row !== null;
+}
+
 // A browser write or socket upgrade from another origin is refused (ADR 0083). Every browser states its origin
 // on those (`Sec-Fetch-Site` or `Origin`); the webhook, MCP and other non-browser callers state neither, so they pass.
 // Whatever the content type: a form, `text/plain` or an `<a ping>` POST all go out without a preflight.
@@ -500,11 +509,14 @@ const app = new Hono<AppEnv>()
       bindings.push(user.id);
       statements.push(c.env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).bind(...bindings));
     }
-    // A linked GitHub id is a sign-in credential (ADR 0065): dropping it ends the other sessions, as a password
-    // change does, in the same batch so an unlinked account never keeps them.
+    // A linked GitHub id is a sign-in credential (ADR 0065): dropping it ends the other sessions and every agent
+    // credential (ADR 0090), as a password change does, in the same batch so an unlinked account never keeps them.
     const sessionHash = await requestSessionHash(c);
     if (githubLogin !== undefined) {
-      statements.push(c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND id != ?").bind(user.id, sessionHash));
+      statements.push(
+        c.env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND id != ?").bind(user.id, sessionHash),
+        c.env.DB.prepare("UPDATE agent_credentials SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?").bind(Date.now(), user.id),
+      );
     }
     if (statements.length > 0) await c.env.DB.batch(statements);
     if (githubLogin !== undefined) {
@@ -944,6 +956,8 @@ const app = new Hono<AppEnv>()
         if(resumed){if(resumed.state!=="completed")return c.json(resumed,202);return resumed.outcome==="aborted"?c.json({error:resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,resumed.result===ACCESS_CHANGE_ABORT.boardNotFound?404:403):c.json({ok:true} as const);}
         const invitee=await c.env.DB.prepare("SELECT id FROM users WHERE id=?").bind(userId).first<{id:string}>();
         if(!invitee)return c.json({error:"user not found"} as const,404);
+        // Only an explicit row settles an add: a Workspace board's member without one gets a row (it outlives a switch to Private).
+        if(await isSettledBoardGrant(c.env,board.id,userId,true))return c.json({ok:true} as const);
         const result=await runAccessChange(c.env,actor,{operationId:attemptId,kind:"board-member-add",payload:{boardId:board.id,userId},workspaceIds:[board.workspaceId],boards:[{boardId:board.id,workspaceId:board.workspaceId}]});
         if(result.state!=="completed")return c.json(result,202);
         if(result.outcome==="aborted")return c.json({error:result.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,result.result===ACCESS_CHANGE_ABORT.boardNotFound?404:403);
@@ -965,6 +979,7 @@ const app = new Hono<AppEnv>()
       if(targetUserId===actor.id)return c.json({error:"cannot remove self from board"} as const,403);
       // A board manager is removed only by someone who manages the board (the reservation and the commit assert it again).
       if(!board.capabilities.canManageBoard&&await c.env.DB.prepare("SELECT 1 AS present FROM board_members WHERE board_id=? AND user_id=? AND role='manager'").bind(board.id,targetUserId).first())return c.json({error:"forbidden"} as const,403);
+      if(await isSettledBoardGrant(c.env,board.id,targetUserId,false))return c.json({ok:true} as const);
       const result=await runAccessChange(c.env,actor,{operationId,kind:"board-member-remove",payload:{boardId:board.id,userId:targetUserId},workspaceIds:[board.workspaceId],boards:[{boardId:board.id,workspaceId:board.workspaceId}]});
       if(result.state!=="completed")return c.json(result,202);
       if(result.outcome==="aborted")return c.json({error:result.result===ACCESS_CHANGE_ABORT.boardNotFound?"board not found":"forbidden"} as const,result.result===ACCESS_CHANGE_ABORT.boardNotFound?404:403);

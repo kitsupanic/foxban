@@ -47,7 +47,7 @@ async function fixture() {
   const board = await create.json<{ id: string; key: string }>();
   const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
     method: "POST", headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ name: "Test client", boardIds: [board.id], scopes: ["boards:read", "tasks:write", "comments:write"] }),
+    body: JSON.stringify({ name: "Test client", boardIds: [board.id], scopes: ["boards:read", "tasks:write", "comments:write"], currentPassword: PASSWORD }),
   });
   expect(issue.status).toBe(201);
   const issued = await issue.json<{ credential: { id: string }; token: string }>();
@@ -244,7 +244,7 @@ async function issueCredential(
 ): Promise<{ token: string; credentialId: string }> {
   const response = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
     method: "POST", headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify({ name: "Test client", boardIds, scopes }),
+    body: JSON.stringify({ name: "Test client", boardIds, scopes, currentPassword: PASSWORD }),
   });
   expect(response.status).toBe(201);
   const issued = await response.json<{ credential: { id: string }; token: string }>();
@@ -456,7 +456,7 @@ describe("MCP transport", () => {
     const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Read only", boardIds: [board.id], scopes: ["boards:read"] }),
+      body: JSON.stringify({ name: "Read only", boardIds: [board.id], scopes: ["boards:read"], currentPassword: PASSWORD }),
     });
     const { token } = await issue.json<{ token: string }>();
     const client = new Client({ name: "scope-test", version: "1.0.0" });
@@ -555,7 +555,7 @@ describe("MCP transport", () => {
     const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST", headers: { "content-type": "application/json", cookie: memberCookie },
       body: JSON.stringify({
-        name: "Membership test", boardIds: [owner.board.id],
+        name: "Membership test", boardIds: [owner.board.id], currentPassword: PASSWORD,
         scopes: ["boards:read", "tasks:write"],
       }),
     });
@@ -657,7 +657,7 @@ describe("MCP transport", () => {
 
     const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST", headers: { ...json, cookie: adminCookie },
-      body: JSON.stringify({ name: "Inherited reader", boardIds: [board.id], scopes: ["boards:read", "tasks:write"] }),
+      body: JSON.stringify({ name: "Inherited reader", boardIds: [board.id], scopes: ["boards:read", "tasks:write"], currentPassword: PASSWORD }),
     });
     const { token } = await issue.json<{ token: string }>();
     const client = new Client({ name: "inherited-members", version: "1.0.0" });
@@ -735,7 +735,7 @@ describe("MCP transport", () => {
 
     const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST", headers: { ...json, cookie: memberCookie },
-      body: JSON.stringify({ name: "Member client", boardIds: [board.id], scopes: ["boards:read", "tasks:write"] }),
+      body: JSON.stringify({ name: "Member client", boardIds: [board.id], scopes: ["boards:read", "tasks:write"], currentPassword: PASSWORD }),
     });
     expect(issue.status).toBe(201);
     const { token } = await issue.json<{ token: string }>();
@@ -1850,7 +1850,7 @@ describe("MCP and workspace admins of Private boards", () => {
     );
     const board = await created.json<{ id: string }>();
     const credential = (who: { cookie: string }) =>
-      send("/me/agent-credentials", "POST", { name: "Test client", boardIds: [board.id], scopes: ["boards:read"] }, who.cookie);
+      send("/me/agent-credentials", "POST", { name: "Test client", boardIds: [board.id], scopes: ["boards:read"], currentPassword: PASSWORD }, who.cookie);
 
     expect((await credential(member)).status).toBe(403);
     const issued = await credential(admin);

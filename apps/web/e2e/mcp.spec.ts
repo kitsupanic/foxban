@@ -24,7 +24,7 @@ function stringField(object: Record<string, unknown>, field: string): string {
 }
 
 import { authTest as test, expect } from "./fixtures";
-import { addColumn, cardBody, cardIn, columnByTitle, createBoard, getBoardUuid } from "./helpers";
+import { addColumn, cardBody, cardIn, columnByTitle, createBoard, getBoardUuid, PASSWORD } from "./helpers";
 
 
 
@@ -67,6 +67,7 @@ test("MCP changes converge with browser edits", async ({ page, browser }) => {
       boardIds: [boardId],
       scopes: ["boards:read", "tasks:write", "comments:write"],
       expiresInDays: 1,
+      currentPassword: PASSWORD,
     },
   });
   expect(issue.status()).toBe(201);
@@ -258,7 +259,7 @@ test("MCP changes converge with browser edits", async ({ page, browser }) => {
     });
     expect(replay.structuredContent).toEqual(createdCall.structuredContent);
     const readOnlyIssue = await page.request.post("/me/agent-credentials", {
-      data: { name: "Helper failure proof", boardIds: [boardId], scopes: ["boards:read"], expiresInDays: 1 },
+      data: { name: "Helper failure proof", boardIds: [boardId], scopes: ["boards:read"], expiresInDays: 1, currentPassword: PASSWORD },
     });
     expect(readOnlyIssue.status()).toBe(201);
     const readOnlyBody = objectValue(await readOnlyIssue.json(), "read-only issuance");

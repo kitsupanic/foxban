@@ -97,3 +97,4 @@ When a decision is made or reversed, add a new numbered file. A reversal never e
 - [0087 — A board's creator opens it only while in its workspace](0087-creator-opens-only-while-in-workspace.md) (amends 0066)
 - [0088 — Fork PRs are not linked by task key; GitHub reads and the nightly sweep stay bounded](0088-fork-prs-not-key-linked-and-bounded-github-reads.md) (amends 0064)
 - [0089 — The snapshot lists archived cards without their description](0089-archived-card-description-not-in-snapshot.md) (extends 0073, 0078)
+- [0090 — Agent credentials need the current password and end with it; a board move takes the creator's seat; a no-op membership write changes nothing](0090-agent-credentials-need-password-and-no-op-access-changes.md) (amends 0055, 0081, 0087)

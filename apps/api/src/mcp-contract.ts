@@ -8,12 +8,16 @@ import {
   descriptionByteLength,
 } from "@foxban/shared";
 import { z } from "zod";
-import { base64Url } from "./base64url";
+import { base64Url, fromBase64Url } from "./base64url";
 
 export const AgentScopeSchema = z.enum(["boards:read", "tasks:write", "comments:write"]);
 export type AgentScope = z.infer<typeof AgentScopeSchema>;
 
-export const BoardKeySchema = z.string().trim().toUpperCase().regex(/^[A-Z][A-Z0-9]{1,9}$/);
+export const BoardKeySchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^[A-Z][A-Z0-9]{1,9}$/, "must be 2-10 uppercase alphanumeric characters starting with a letter");
 const TaskKeySchema = z
   .string()
   .trim()
@@ -357,9 +361,7 @@ export function encodeCursor(value: CursorPayload): string {
 export function decodeCursor(value: string): CursorPayload | null {
   if (value.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
   try {
-    const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const bytes = fromBase64Url(value);
     const parsed: unknown = JSON.parse(
       new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes),
     );

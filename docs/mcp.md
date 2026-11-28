@@ -4,26 +4,27 @@ Foxban exposes an authenticated remote MCP endpoint at `/mcp`. It uses configure
 
 ## Issue and manage credentials
 
-Open **MCP server** (`/mcp-server`) while signed in. It issues, lists and revokes your credentials, and copies the token or a ready-made `mcpServers` / VS Code configuration.
+Open **MCP server** (`/mcp-server`) while signed in. It issues, lists and revokes your credentials, and copies the token or a ready-made `mcpServers` / VS Code configuration. Issuing asks for your current password ([ADR 0090](decisions/0090-agent-credentials-need-password-and-no-op-access-changes.md)); an account that signs in only with GitHub and has no password is not asked.
 
-For scripted setup, the repository helper does the same through your session cookie. The cookie is httpOnly, so `document.cookie` cannot read it; copy it from browser developer tooling. Keep cookies and tokens in environment variables, never command arguments, source, tickets, or logs. From the repository root:
+For scripted setup, the repository helper does the same through your session cookie. The cookie is httpOnly, so `document.cookie` cannot read it; copy it from browser developer tooling. Issuing also needs your current password, which the helper sends as `currentPassword` from `FOXBAN_PASSWORD`; list and revoke do not. Keep cookies, passwords and tokens in environment variables, never command arguments, source, tickets, or logs. From the repository root:
 
 ```bash
 export FOXBAN_ORIGIN='https://foxban.example.com'
 export FOXBAN_SESSION_COOKIE='session=<your-own-session-value>'
+read -rs FOXBAN_PASSWORD && export FOXBAN_PASSWORD
 node apps/api/scripts/mcp-client.mjs credentials issue '{"name":"coding harness","boardIds":["<stable-board-id>"],"scopes":["boards:read","tasks:write","comments:write"],"expiresInDays":30}'
 node apps/api/scripts/mcp-client.mjs credentials list
 node apps/api/scripts/mcp-client.mjs credentials revoke '<credential-id>'
 ```
 
-Issuance returns the raw `foxban_mcp_…` token once. Store it in the harness secret store. List and revoke responses never expose it. Password changes and browser logout do not revoke agent credentials; revoke them explicitly or let them expire.
+Issuance returns the raw `foxban_mcp_…` token once. Store it in the harness secret store. List and revoke responses never expose it. Browser logout does not revoke agent credentials. Changing your password, setting your first one, or disconnecting GitHub revokes every one of them, so issue new ones afterwards; otherwise revoke them explicitly or let them expire.
 
 ## Connect
 
 Configure a compatible MCP client with remote URL `https://foxban.example.com/mcp` and header `Authorization: Bearer <token>`. Clients must accept JSON or SSE responses. The repository helper is tested with `@modelcontextprotocol/client` 2.0.0:
 
 ```bash
-unset FOXBAN_SESSION_COOKIE
+unset FOXBAN_SESSION_COOKIE FOXBAN_PASSWORD
 export FOXBAN_MCP_TOKEN='<one-time-issued-token>'
 node apps/api/scripts/mcp-client.mjs tools
 node apps/api/scripts/mcp-client.mjs call list_boards '{}'

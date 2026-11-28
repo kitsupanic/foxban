@@ -2,7 +2,8 @@ import { SELF, applyD1Migrations, env } from "cloudflare:test";
 import { firstWorkspaceId } from "./first-workspace";
 import { beforeAll, describe, expect, it } from "vitest";
 import { listAuthorizedBoards } from "../src/agent-credentials";
-import type { SessionUser } from "../src/auth";
+import { sha256Hex, type SessionUser } from "../src/auth";
+import { queriesOf, workerWithPausedD1 } from "./paused-d1";
 
 const ORIGIN = "https://foxban.test";
 const PASSWORD = "correct horse battery";
@@ -44,7 +45,7 @@ describe("agent credentials", () => {
     const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Harness", boardIds: [boardId], scopes: ["boards:read"], expiresInDays: 1 }),
+      body: JSON.stringify({ name: "Harness", boardIds: [boardId], scopes: ["boards:read"], expiresInDays: 1, currentPassword: PASSWORD }),
     });
     expect(issue.status).toBe(201);
     expect(issue.headers.get("cache-control")).toBe("no-store");
@@ -78,7 +79,7 @@ describe("agent credentials", () => {
     const issue = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Short lived", boardIds: [boardId], scopes: ["boards:read"], expiresInDays: 1 }),
+      body: JSON.stringify({ name: "Short lived", boardIds: [boardId], scopes: ["boards:read"], expiresInDays: 1, currentPassword: PASSWORD }),
     });
     const issued = await issue.json<{ credential: { id: string }; token: string }>();
     const call = () => SELF.fetch(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${issued.token}`, "content-type": "application/json" }, body: "{}" });
@@ -95,7 +96,7 @@ describe("agent credentials", () => {
     const issue = (ids: string[]) => SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ name: "Many", boardIds: ids, scopes: ["boards:read"] }),
+      body: JSON.stringify({ name: "Many", boardIds: ids, scopes: ["boards:read"], currentPassword: PASSWORD }),
     });
     expect((await issue(boardIds)).status).toBe(201);
     // The MCP board list reads the same 100 ids; D1 refuses a query with more than 100 bound parameters.
@@ -109,17 +110,12 @@ describe("agent credentials", () => {
     const anonymous = await SELF.fetch(`${ORIGIN}/me/agent-credentials`);
     expect(anonymous.status).toBe(401);
     expect(anonymous.headers.get("cache-control")).toBe("no-store");
-    const hostileOrigin = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
-      headers: { origin: "https://evil.test" },
-    });
-    expect(hostileOrigin.status).toBe(403);
-    expect(hostileOrigin.headers.get("cache-control")).toBe("no-store");
     const owner = await signup(`credential-owner-${crypto.randomUUID()}@foxban.test`);
     const other = await signup(`credential-other-${crypto.randomUUID()}@foxban.test`);
     const boardId = await createBoard(owner);
     const mixed = await SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
       method: "POST", headers: { "content-type": "application/json", cookie: other },
-      body: JSON.stringify({ name: "No access", boardIds: [boardId, crypto.randomUUID()], scopes: ["boards:read"] }),
+      body: JSON.stringify({ name: "No access", boardIds: [boardId, crypto.randomUUID()], scopes: ["boards:read"], currentPassword: PASSWORD }),
     });
     expect(mixed.status).toBe(403);
     const count = await env.DB.prepare(
@@ -127,4 +123,130 @@ describe("agent credentials", () => {
     ).first<{ count: number }>();
     expect(count?.count).toBe(0);
   });
+
+  it("refuses a cross-origin browser write with the app-wide origin check", async () => {
+    const cookie = await signup(`credential-origin-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const hostile = await issue(cookie, { name: "Hostile", boardIds: [boardId], scopes: ["boards:read"], currentPassword: PASSWORD }, { origin: "https://evil.test" });
+    expect(hostile.status).toBe(403);
+    // The app's own origin, and a non-browser caller that states none, are not refused.
+    expect((await issue(cookie, { name: "Own origin", boardIds: [boardId], scopes: ["boards:read"], currentPassword: PASSWORD }, { origin: ORIGIN })).status).toBe(201);
+    expect(await countNamed(cookie, "Hostile")).toBe(0);
+  });
+
+  it("needs the current password to issue, and stores nothing without it", async () => {
+    const cookie = await signup(`credential-password-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const body = { name: "Unproven", boardIds: [boardId], scopes: ["boards:read"] };
+    for (const attempt of [body, { ...body, currentPassword: "wrong horse battery" }]) {
+      const refused = await issue(cookie, attempt);
+      expect(refused.status).toBe(401);
+      expect(await refused.json()).toEqual({ error: "invalid credentials" });
+    }
+    // A board the user cannot open is not even looked at before the password is proved.
+    expect((await issue(cookie, { ...body, boardIds: [crypto.randomUUID()] })).status).toBe(401);
+    expect(await countNamed(cookie, "Unproven")).toBe(0);
+  });
+
+  it("issues without a password for an account that has none", async () => {
+    const cookie = await signup(`credential-no-password-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const { id } = await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).json<{ id: string }>();
+    await env.DB.prepare("UPDATE users SET password_hash = '*' WHERE id = ?").bind(id).run();
+    expect((await issue(cookie, { name: "GitHub only", boardIds: [boardId], scopes: ["boards:read"] })).status).toBe(201);
+  });
+
+  it("revokes every credential of the account when the password changes", async () => {
+    const cookie = await signup(`credential-rotate-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const first = await issueToken(cookie, boardId);
+    const second = await issueToken(cookie, boardId);
+    expect((await callMcp(first)).status).not.toBe(401);
+
+    const changed = await SELF.fetch(`${ORIGIN}/auth/password`, {
+      method: "POST", headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ currentPassword: PASSWORD, newPassword: "new horse battery staple" }),
+    });
+    expect(changed.status).toBe(200);
+
+    expect((await callMcp(first)).status).toBe(401);
+    expect((await callMcp(second)).status).toBe(401);
+    expect(await activeCount(cookie)).toBe(0);
+    // The old password no longer issues one; the new one does.
+    expect((await issue(cookie, { name: "After", boardIds: [boardId], scopes: ["boards:read"], currentPassword: PASSWORD })).status).toBe(401);
+    expect((await issue(cookie, { name: "After", boardIds: [boardId], scopes: ["boards:read"], currentPassword: "new horse battery staple" })).status).toBe(201);
+  });
+
+  it("keeps the credentials when a password change is refused", async () => {
+    const cookie = await signup(`credential-rotate-refused-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const token = await issueToken(cookie, boardId);
+    const refused = await SELF.fetch(`${ORIGIN}/auth/password`, {
+      method: "POST", headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ currentPassword: "wrong horse battery", newPassword: "new horse battery staple" }),
+    });
+    expect(refused.status).toBe(401);
+    expect((await callMcp(token)).status).not.toBe(401);
+  });
+
+  it("revokes every credential of the account when GitHub is disconnected", async () => {
+    const cookie = await signup(`credential-disconnect-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const token = await issueToken(cookie, boardId);
+    const { id } = await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).json<{ id: string }>();
+    await env.DB.prepare("UPDATE users SET github_login = 'octo', github_user_id = ? WHERE id = ?").bind(Math.floor(Math.random() * 1e9), id).run();
+
+    const disconnected = await SELF.fetch(`${ORIGIN}/me`, {
+      method: "PATCH", headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ githubLogin: null }),
+    });
+    expect(disconnected.status).toBe(200);
+    expect((await callMcp(token)).status).toBe(401);
+    expect(await activeCount(cookie)).toBe(0);
+  });
+
+  it("writes nothing for a session deleted after requireAuth checked it", async () => {
+    const cookie = await signup(`credential-session-gone-${crypto.randomUUID()}@foxban.test`);
+    const boardId = await createBoard(cookie);
+    const { id } = await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).json<{ id: string }>();
+    const body = { name: "Counted", boardIds: [boardId], scopes: ["boards:read"], currentPassword: PASSWORD };
+    const total = await queriesOf((worker) => worker.fetch("/me/agent-credentials", "POST", { cookie }, body));
+    // The insert is the last query: the session row goes just before it, as another session's password change deletes it.
+    const sessionHash = await sha256Hex(cookie.slice(cookie.indexOf("=") + 1));
+    const late = await workerWithPausedD1(async (n) => {
+      if (n === total - 1) await env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(sessionHash).run();
+    }).fetch("/me/agent-credentials", "POST", { cookie }, { ...body, name: "Late" });
+    expect(late.status).toBe(401);
+    expect(await env.DB.prepare("SELECT name FROM agent_credentials WHERE user_id = ? ORDER BY name").bind(id).all()).toMatchObject({ results: [{ name: "Counted" }] });
+  });
 });
+
+async function issue(cookie: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+  return SELF.fetch(`${ORIGIN}/me/agent-credentials`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie, ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+async function issueToken(cookie: string, boardId: string): Promise<string> {
+  const response = await issue(cookie, { name: "Rotating", boardIds: [boardId], scopes: ["boards:read"], currentPassword: PASSWORD });
+  expect(response.status).toBe(201);
+  return (await response.json<{ token: string }>()).token;
+}
+
+function callMcp(token: string): Promise<Response> {
+  return SELF.fetch(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" });
+}
+
+async function countNamed(cookie: string, name: string): Promise<number> {
+  const { id } = await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).json<{ id: string }>();
+  const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM agent_credentials WHERE user_id = ? AND name = ?").bind(id, name).first<{ count: number }>();
+  return row?.count ?? -1;
+}
+
+async function activeCount(cookie: string): Promise<number> {
+  const { id } = await (await SELF.fetch(`${ORIGIN}/me`, { headers: { cookie } })).json<{ id: string }>();
+  const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM agent_credentials WHERE user_id = ? AND revoked_at IS NULL").bind(id).first<{ count: number }>();
+  return row?.count ?? -1;
+}

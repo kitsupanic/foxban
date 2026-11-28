@@ -35,7 +35,7 @@ async function fixture(inherited: boolean) {
     await env.DB.prepare("INSERT INTO board_members(board_id,user_id,role) VALUES(?,?,'member')").bind(board.id, member.id).run();
   }
   const issued = await request("/me/agent-credentials", member.cookie, {
-    name: "Directory reader", boardIds: [board.id], scopes: ["boards:read"],
+    name: "Directory reader", boardIds: [board.id], scopes: ["boards:read"], currentPassword: "correct horse battery",
   });
   expect(issued.status).toBe(201);
   const { token } = await issued.json<{ token: string }>();

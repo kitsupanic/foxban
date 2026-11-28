@@ -57,8 +57,8 @@ export class BoardReconciler {
   }
 
   /**
-   * Reset authoritative base state to snapshot and clear all pending optimistic mutations.
-   * Derives and returns the new cache state (equivalent to the snapshot).
+   * Reset authoritative base state to snapshot and clear all pending optimistic mutations
+   * (a socket's first snapshot). Derives and returns the new cache state (equivalent to the snapshot).
    */
   applySnapshot(snapshot: BoardState | (ServerMessage & { type: "snapshot" })): {
     cacheState: BoardState;
@@ -73,6 +73,21 @@ export class BoardReconciler {
     this.pending.clear();
     this.baseState = state;
     return { cacheState: this.baseState, settledPending };
+  }
+
+  /**
+   * A later snapshot on the same socket (the board sends one after a card is imported
+   * from another board): it replaces the base, but what was sent before it is late, not
+   * lost, so the pending mutations stay and rebase over it. Returns the cache state.
+   */
+  rebaseOnSnapshot(snapshot: BoardState | (ServerMessage & { type: "snapshot" })): BoardState {
+    this.baseState = extractBoardState(snapshot, this.baseState?.comments);
+    return this.getCacheState()!;
+  }
+
+  /** An own mutation still in flight: no echo, error or rollback yet. */
+  isPending(mutationId: string): boolean {
+    return this.pending.has(mutationId);
   }
 
   /**
