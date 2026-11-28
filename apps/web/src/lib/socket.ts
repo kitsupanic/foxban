@@ -52,7 +52,8 @@ export function useBoardState(boardId: string): BoardState | undefined {
  */
 export type BoardEventObserver = {
   /** A snapshot is about to replace the base; it supersedes all earlier evidence. */
-  snapshot?(msg: Extract<ServerMessage, { type: "snapshot" }>): void;
+  /** `firstOnSocket`: the first snapshot after connect(), which settles; a later one only replaces the base. */
+  snapshot?(msg: Extract<ServerMessage, { type: "snapshot" }>, firstOnSocket: boolean): void;
   /** An accepted broadcast, before the reconciler applies it. `own`: an echo of a mutation this client sent. */
   message?(msg: ServerMessage, own: boolean): void;
   /** An optimistic mutation went out; the cache before and after it. */
@@ -318,6 +319,10 @@ export function useBoardSocket(
         byCard.set(msg.cardId, (byCard.get(msg.cardId) ?? 0) + 1);
       }
       if (msg.type === "snapshot") {
+        // Only the first snapshot after connect() settles: the close before it discarded what was in
+        // flight. A later one on the same socket (sent after a card is imported from another board)
+        // just replaces the base; frames sent before it are late, so they stay pending with their timers.
+        const firstOnSocket = !snapshotSeenRef.current;
         snapshotSeenRef.current = true;
         setAccessState("ready");
         inTransition = false;
@@ -328,32 +333,28 @@ export function useBoardSocket(
         commentReadsRef.current.snapshots += 1;
         void queryClient.invalidateQueries({ queryKey: ["card-comments", boardId] });
         void queryClient.invalidateQueries({ queryKey: ["board-meta-by-key"] });
-        clearTimeout(stableTimer);
-        stableTimer = window.setTimeout(() => {
-          attempt = 0;
-          consecutiveFailures = 0;
-        }, STABLE_CONNECTION_MS);
-        for (const timer of pendingTimersRef.current.values()) clearTimeout(timer);
-        pendingTimersRef.current.clear();
-        eventsRef.current?.snapshot?.(msg);
-        const { cacheState: snapshotState, settledPending } = reconcilerRef.current.applySnapshot(msg);
-        queryClient.setQueryData<BoardState>(boardQueryKey(boardId), snapshotState);
-        for (const { entry, presentInSnapshot } of settledPending) {
-          // A subscribed comment write is also tracked as sent: it is verified below, against its card's read.
-          if (isCommentMessage(entry.msg) && mutationSubscribersRef.current.has(entry.msg.mutationId)) continue;
-          if (presentInSnapshot) {
-            notifyMutation(entry.msg.mutationId, "accepted");
-          } else {
-            notifyMutation(entry.msg.mutationId, "verified-retry");
-          }
+        if (firstOnSocket) {
+          clearTimeout(stableTimer);
+          stableTimer = window.setTimeout(() => {
+            attempt = 0;
+            consecutiveFailures = 0;
+          }, STABLE_CONNECTION_MS);
+          for (const timer of pendingTimersRef.current.values()) clearTimeout(timer);
+          pendingTimersRef.current.clear();
         }
-        // Check any remaining tracked mutations from disconnects/timeouts
+        eventsRef.current?.snapshot?.(msg, firstOnSocket);
+        const reconciler = reconcilerRef.current;
+        const snapshotState = firstOnSocket ? reconciler.applySnapshot(msg).cacheState : reconciler.rebaseOnSnapshot(msg);
+        queryClient.setQueryData<BoardState>(boardQueryKey(boardId), snapshotState);
+        const base = reconciler.getBaseState()!;
+        // Check the tracked mutations no longer in flight (left by a disconnect or a timeout), each once
         for (const [mutationId, sentMsg] of Array.from(pendingSentMutationsRef.current.entries())) {
+          if (reconciler.isPending(mutationId)) continue;
           if (isCommentMessage(sentMsg) && mutationSubscribersRef.current.has(mutationId)) {
             void verifyComment(mutationId, sentMsg);
             continue;
           }
-          const present = isMutationPresentInBoardState(snapshotState, sentMsg);
+          const present = isMutationPresentInBoardState(base, sentMsg);
           if (present) {
             notifyMutation(mutationId, "accepted");
           } else {

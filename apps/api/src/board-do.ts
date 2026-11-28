@@ -44,7 +44,6 @@ import {
   completionFor,
   isCompleted,
   loadFamily,
-  roleColumn,
 } from "./subtask-family";
 import {
   ARCHIVED_CARD_LIST_SELECT,
@@ -1933,9 +1932,16 @@ export class BoardDO extends DurableObject<Env> {
       return Response.json({ error: err instanceof Error ? err.message : "could not route pull requests and branches" }, { status: 500 });
     }
     // Admission comes after the body so no await separates the verdict from the
-    // synchronous import transaction.
-    const admission = await this.admitProtectedPath(boardId, userId);
+    // synchronous import transaction. The assignee is re-read here like the actor: the
+    // Worker's member list is from before the saga, and someone removed since is dropped
+    // (the card lands unassigned) rather than failing the whole move.
+    const admission = await this.admitProtectedPath(
+      boardId,
+      userId,
+      assigneeId === null ? undefined : () => this.currentAssigneeEligible(boardId, assigneeId),
+    );
     if (!admission.admitted) return admission.response;
+    const importedAssigneeId = admission.probeAllowed ? assigneeId : null;
     try {
       const importOutcome = this.ctx.storage.transactionSync(() => {
         const sql = this.ctx.storage.sql;
@@ -2017,7 +2023,7 @@ export class BoardDO extends DurableObject<Env> {
           position,
           taskNumber,
           bundle.card.subtaskDone ? 1 : 0,
-          assigneeId,
+          importedAssigneeId,
           bundle.card.priority,
           bundle.card.taskType === "subtask" ? "task" : bundle.card.taskType,
           bundle.card.dueDate ?? null,
@@ -3063,8 +3069,7 @@ export class BoardDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     const hierarchy = loadFamily(sql, "retained");
     const parentId = hierarchy.parentByChild.get(cardId);
-    const parent = parentId ? this.taskRecord(parentId, input.board) : null;
-    const parentSummary = parent === null ? null : (({ description: _description, column: _column, ...summary }) => summary)(parent);
+    const parentSummary = parentId ? this.taskSummary(parentId, input.board) : null;
     const commentsLimit = Math.min(input.comments?.limit ?? 10, 50);
     const checklistLimit = input.checklist?.limit ?? 50;
     const subtasksLimit = Math.min(input.subtasks?.limit ?? 20, 50);
@@ -3135,19 +3140,18 @@ export class BoardDO extends DurableObject<Env> {
     }
     const childIds = hierarchy.childrenByParent.get(cardId) ?? [];
     const childRecords = childIds
-      .map((id) => this.taskRecord(id, input.board))
-      .filter((record): record is TaskRecord => record !== null)
+      .map((id) => this.taskSummary(id, input.board))
+      .filter((record): record is z.infer<typeof TaskSummarySchema> => record !== null)
       .sort((a, b) => a.position < b.position ? -1 : a.position > b.position ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
       .filter((record) =>
         subtasksAfter === null ||
         record.position > subtasksAfter.first ||
         (record.position === subtasksAfter.first && record.id > subtasksAfter.id)
       );
-    const summaries: Array<Omit<TaskRecord, "description" | "column">> = [];
+    const summaries: Array<z.infer<typeof TaskSummarySchema>> = [];
     let subtaskBytes = 2;
-    for (const record of childRecords) {
+    for (const summary of childRecords) {
       if (summaries.length >= subtasksLimit) break;
-      const { description: _description, column: _column, ...summary } = record;
       const bytes = new TextEncoder().encode(JSON.stringify(summary)).byteLength + (summaries.length ? 1 : 0);
       if (subtaskBytes + bytes > 65_536) break;
       summaries.push(summary);

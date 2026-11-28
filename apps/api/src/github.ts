@@ -2,7 +2,7 @@
  * GitHub App JWT signing and REST API helpers using WebCrypto (no Node APIs).
  */
 import type { DevelopmentPullRequest } from "@foxban/shared";
-import { base64Url } from "./base64url";
+import { base64Url, fromBase64 } from "./base64url";
 
 export interface GitHubRepositoryRef {
   defaultBranch: string;
@@ -48,12 +48,7 @@ function pemToArrayBuffer(pem: string): ArrayBuffer {
     .replace(/-----BEGIN [A-Z ]+-----/g, "")
     .replace(/-----END [A-Z ]+-----/g, "")
     .replace(/\s+/g, "");
-  const binary = atob(cleaned);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
+  return fromBase64(cleaned).buffer;
 }
 
 /** DER type-length-value; lengths under 64 KiB, which a 4096-bit RSA key (about 2.4 KB) is well inside. */

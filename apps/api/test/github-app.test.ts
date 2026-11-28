@@ -280,7 +280,11 @@ describe("a creation that must not store anything", () => {
     expect((await request("POST", "/github-app/manifest", {}, admin)).status).toBe(409);
   });
 
-  it("is switched off when the instance has no encryption key", async () => {
+  it.each([
+    ["has no encryption key", undefined],
+    // 64 hex chars decode as base64 to 48 bytes, which AES-GCM refuses: GitHub's one-time code must not be spent.
+    ["has a key that is not base64 of 32 bytes", "ab".repeat(32)],
+  ])("is switched off when the instance %s", async (_, key) => {
     const admin = await session(true);
     const withoutKey = (method: string, path: string) =>
       worker.fetch!(
@@ -289,7 +293,7 @@ describe("a creation that must not store anything", () => {
           headers: { cookie: admin, "content-type": "application/json" },
           body: method === "POST" ? "{}" : undefined,
         }),
-        { ...env, GITHUB_APP_ENCRYPTION_KEY: undefined } as unknown as typeof env,
+        { ...env, GITHUB_APP_ENCRYPTION_KEY: key } as unknown as typeof env,
         createExecutionContext(),
       );
     expect(await (await withoutKey("GET", "/github-app")).json()).toEqual({ app: null, canCreate: false });

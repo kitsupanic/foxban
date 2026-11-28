@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import { GITHUB_FETCH_TIMEOUT_MS } from "./github";
 import { boardClient } from "./board-client";
-import { base64Url, toBase64 } from "./base64url";
+import { base64Url, fromBase64, toBase64 } from "./base64url";
 import { REVOKE_SESSIONS_PATH, type SessionRevocation } from "./session-revocation";
 
 /** The signed-in user, as identified by the session cookie. */
@@ -228,13 +228,6 @@ const encoder = new TextEncoder();
 const subtle: SubtleCrypto & {
   timingSafeEqual?: (a: BufferSource, b: BufferSource) => boolean;
 } = crypto.subtle;
-
-function fromBase64(value: string): Uint8Array<ArrayBuffer> {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
 
 function randomHex(byteLength: number): string {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength));

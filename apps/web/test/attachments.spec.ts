@@ -29,7 +29,7 @@ const deleteMessage = (mutationId: string): ClientMessage => ({ type: "attachmen
 /** Sends an own delete: the socket reports the cache before and after the optimistic apply. */
 function sendDelete(attachments: ReturnType<typeof createBoardAttachments>, mutationId = "del-1") {
   const before = board();
-  attachments.events.snapshot?.(snapshot(before.attachments));
+  attachments.events.snapshot?.(snapshot(before.attachments), true);
   const msg = deleteMessage(mutationId);
   const after = applyMutation(before, msg, boardId);
   attachments.events.sent?.(msg, before, after);
@@ -81,8 +81,8 @@ test("a peer's accepted delete retires the own pending delete of the same attach
 
 test("a snapshot proves an attachment gone, and a re-create clears that evidence", () => {
   const attachments = createBoardAttachments(boardId);
-  attachments.events.snapshot?.(snapshot(board().attachments));
-  attachments.events.snapshot?.(snapshot([]));
+  attachments.events.snapshot?.(snapshot(board().attachments), true);
+  attachments.events.snapshot?.(snapshot([]), true);
   expect(attachments.getView().descriptionFor("card-1", original)).toBe(cleaned);
 
   attachments.events.message?.({ type: "attachment.create", mutationId: "m", id: "att-1", cardId: "card-1", fileName: "shot.png", contentType: "image/png", size: 10 } as ServerMessage, false);
@@ -94,9 +94,17 @@ test("a transport close does not drop delete evidence; only the reconnect snapsh
   sendDelete(attachments);
   // A close calls none of the events; the gate holds until the snapshot.
   expect(attachments.getView().isDeletePending("card-1")).toBe(true);
-  attachments.events.snapshot?.(snapshot(board().attachments));
+  attachments.events.snapshot?.(snapshot(board().attachments), true);
   expect(attachments.getView().isDeletePending("card-1")).toBe(false);
   expect(attachments.seedDescription("card-1", cleaned)).toBe(cleaned);
+});
+
+test("a later snapshot on the same socket keeps a delete in flight pending", () => {
+  const attachments = createBoardAttachments(boardId);
+  sendDelete(attachments);
+  // Sent after a card import: the delete's own echo is still on its way.
+  attachments.events.snapshot?.(snapshot(board().attachments), false);
+  expect(attachments.getView().isDeletePending("card-1")).toBe(true);
 });
 
 // --- upload ---
@@ -135,7 +143,7 @@ function uploadSetup(response: { ok: boolean; body?: unknown } = { ok: true, bod
   });
   const fake = fakeTransport();
   const scope = createAuthoredScope(fake.transport);
-  const file = new File(["%PDF"], "spec (v2).pdf", { type: "application/pdf" });
+  const file = new File(["%PDF"], "spec (v2)\\.pdf", { type: "application/pdf" });
   return { attachments, fake, scope, posts, file };
 }
 
@@ -150,7 +158,7 @@ test("upload POSTs the bytes, then resolves only when attachment.create is accep
 
   expect(posts).toEqual([{ input: `/boards/${boardId}/attachments`, init: expect.objectContaining({ method: "POST", headers: { "Content-Type": "application/pdf" } }) }]);
   expect(fake.sends).toEqual([
-    { type: "attachment.create", mutationId: expect.any(String), id: "att-9", cardId: "card-1", fileName: "spec (v2).pdf", contentType: "application/pdf", size: 4 },
+    { type: "attachment.create", mutationId: expect.any(String), id: "att-9", cardId: "card-1", fileName: "spec (v2)\\.pdf", contentType: "application/pdf", size: 4 },
   ]);
   expect(settled).toBe(false);
 

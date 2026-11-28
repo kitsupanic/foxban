@@ -1,6 +1,6 @@
 import { APP_NAME } from "@foxban/shared";
 import { z } from "zod";
-import { toBase64 } from "./base64url";
+import { fromBase64, toBase64 } from "./base64url";
 import { convertAppManifest } from "./github";
 
 /** Served by the webhook endpoint (ADR 0064); the manifest tells GitHub to deliver here. */
@@ -45,11 +45,15 @@ function encryptionKeyText(env: Env): string {
   return (env as { GITHUB_APP_ENCRYPTION_KEY?: string }).GITHUB_APP_ENCRYPTION_KEY?.trim() ?? "";
 }
 
-export function canCreateGitHubApp(env: Env): boolean {
-  return encryptionKeyText(env) !== "";
+/** True only when the key imports, so GitHub's one-time code is never spent on an App whose secrets could not be sealed. */
+export async function canCreateGitHubApp(env: Env): Promise<boolean> {
+  try {
+    await sealingKey(env);
+    return true;
+  } catch {
+    return false;
+  }
 }
-
-const fromBase64 = (text: string) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
 
 async function sealingKey(env: Env): Promise<CryptoKey> {
   const raw = encryptionKeyText(env);

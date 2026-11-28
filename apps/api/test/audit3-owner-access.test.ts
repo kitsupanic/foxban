@@ -9,8 +9,9 @@ import type { SessionUser } from "../src/auth";
 
 /**
  * A board's creator opens it only while they are a member of its workspace (ADR 0087). Removal or leaving takes the
- * creator's own `board_members` row with the membership, so they lose the board, and a board move does not give a
- * creator outside the destination a seat again. A row added by hand is a guest row, which anyone who can open the board may remove.
+ * creator's own `board_members` row with the membership, so they lose the board, and a board move to a workspace the
+ * creator is not in takes the seat and does not give one again (ADR 0090). A row added by hand is a guest row, which anyone
+ * who can open the board may remove.
  */
 const ORIGIN = "https://foxban.test";
 const PASSWORD = "correct horse battery";
@@ -166,6 +167,57 @@ describe("a creator outside the workspace", () => {
     const { creator, board } = await movedAway();
     expect(await surfacesFor(creator, board)).toEqual(CLOSED);
     expect((await boardRows(board.id, creator.id)).results).toEqual([]);
+  });
+
+  it("loses the seat when the board moves to a workspace they are not in while they are still in the source", async () => {
+    const admin = await person();
+    const creator = await person();
+    const source = await createWorkspace(admin);
+    const destination = await createWorkspace(admin);
+    await add(admin, source, creator);
+    const board = await createBoard(creator, source, "workspace");
+    expect((await boardRows(board.id, creator.id)).results).toEqual([{ role: "member" }]);
+    const live = await connect(creator, board.id);
+    expect(live.status).toBe(101);
+
+    const moved = await post(
+      `/boards/${board.id}/move-workspace`,
+      { operationId: crypto.randomUUID(), destinationWorkspaceId: destination, expectedWorkspaceId: source, expectedAccessVersion: 0 },
+      admin.cookie,
+    );
+    expect(moved.status).toBe(200);
+
+    expect(await closeCode(live.closed)).toBe(4010);
+    expect(await surfacesFor(creator, board)).toEqual(CLOSED);
+    expect((await boardRows(board.id, creator.id)).results).toEqual([]);
+    expect(await env.DB.prepare("SELECT owner_id AS ownerId FROM boards WHERE id=?").bind(board.id).first()).toEqual({ ownerId: creator.id });
+    expect(await surfacesFor(admin, board)).toEqual(OPENS);
+    // Joining the board's new workspace gives it back through ownership, as joining again does (ADR 0087).
+    await add(admin, destination, creator);
+    expect(await surfacesFor(creator, board)).toEqual(OPENS);
+  });
+
+  it("keeps a row added by hand when the board moves while they are outside the source", async () => {
+    const admin = await person();
+    const creator = await person();
+    const source = await createWorkspace(admin);
+    const destination = await createWorkspace(admin);
+    await add(admin, source, creator);
+    const board = await createBoard(creator, source, "workspace");
+    expect((await removeFromWorkspace(admin, source, creator)).status).toBe(200);
+    expect((await post(`/boards/${board.id}/members`, { userId: creator.id }, admin.cookie)).status).toBe(200);
+    const { accessVersion } = (await env.DB.prepare("SELECT access_version AS accessVersion FROM boards WHERE id=?").bind(board.id).first<{ accessVersion: number }>())!;
+
+    const moved = await post(
+      `/boards/${board.id}/move-workspace`,
+      { operationId: crypto.randomUUID(), destinationWorkspaceId: destination, expectedWorkspaceId: source, expectedAccessVersion: accessVersion },
+      admin.cookie,
+    );
+    expect(moved.status).toBe(200);
+
+    // A guest grant survives a move like any guest's: the seat was already gone with the membership.
+    expect((await boardRows(board.id, creator.id)).results).toEqual([{ role: "member" }]);
+    expect(await surfacesFor(creator, board)).toEqual(OPENS);
   });
 
   it("keeps the seat a board move leaves while they are in the destination", async () => {

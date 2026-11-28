@@ -97,7 +97,7 @@ export function createBoardAttachments(boardId: string, deps: { fetch?: typeof f
   };
 
   const events: BoardEventObserver = {
-    snapshot(msg) {
+    snapshot(msg, firstOnSocket) {
       const snapshotOwners = new Map(msg.attachments.map((attachment) => [attachment.id, attachment.cardId]));
       let next = confirmed;
       for (const id of snapshotOwners.keys()) next = withoutEntry(next, id);
@@ -106,6 +106,11 @@ export function createBoardAttachments(boardId: string, deps: { fetch?: typeof f
         if (!snapshotOwners.has(id)) next = withEntry(next, id, ownerId);
       }
       owners = snapshotOwners;
+      // A later snapshot on the same socket leaves deletes in flight pending: their echo or rollback still comes.
+      if (!firstOnSocket) {
+        publish(next, pending);
+        return;
+      }
       unresolved.clear();
       publish(next, pending.size ? new Map() : pending);
     },
@@ -179,7 +184,7 @@ export function createBoardAttachments(boardId: string, deps: { fetch?: typeof f
     const result: UploadedAttachment = {
       url: `/boards/${boardId}/attachments/${id}`,
       // Brackets and parens would break out of the `![alt](url)` markup.
-      alt: fileName.replace(/[[\]()]/g, ""),
+      alt: fileName.replace(/[[\]()\\]/g, ""),
     };
     // If the socket is closed or the server refuses, the upload's provisional lease
     // remains in the BoardDO and its alarm removes the unclaimed R2 object after one hour.

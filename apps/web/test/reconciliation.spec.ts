@@ -607,6 +607,23 @@ test.describe("Creation settlement through the reconciler", () => {
     expect(absent.settledPending).toHaveLength(1);
     expect(absent.settledPending[0]?.presentInSnapshot).toBe(false);
   });
+
+  test("a later snapshot on the same socket replaces the base and keeps an in-flight creation pending", () => {
+    const session = createBoardReconciler("board-1", emptyBoard());
+    session.sendOptimistic(cardCreate);
+    // A card imported from another board: the board sends a fresh snapshot without the late creation.
+    const imported: Card = { ...session.getCacheState()!.cards[0]!, id: "card-imported", position: "a1" };
+    const cache = session.rebaseOnSnapshot({ ...emptyBoard(), cards: [imported] });
+
+    expect(session.isPending("mut-card")).toBe(true);
+    expect(session.getBaseState()!.cards.map((c) => c.id)).toEqual(["card-imported"]);
+    expect(cache.cards.map((c) => c.id).sort()).toEqual(["card-1", "card-imported"]);
+
+    // The late echo settles it into the base, once.
+    expect(session.applyServerMessage(cardCreate).ackedMutationIds).toEqual(["mut-card"]);
+    expect(session.isPending("mut-card")).toBe(false);
+    expect(session.getCacheState()!.cards.map((c) => c.id).sort()).toEqual(["card-1", "card-imported"]);
+  });
 });
 
 test.describe("positions.rebalanced through the reconciler (ADR 0076)", () => {

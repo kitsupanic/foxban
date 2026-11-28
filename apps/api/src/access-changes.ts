@@ -677,6 +677,21 @@ function commitStatements(
           `INSERT OR IGNORE INTO board_members(board_id,user_id,role)
            SELECT ?,?,'member' WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)`,
         ).bind(boardId, payload.ownerId as string, destination, payload.ownerId as string),
+        // And loses the seat they held in the source when they are not in the destination: it is valid only while they
+        // are in the board's workspace (ADR 0087, 0090). An owner already outside the source holds only a guest row
+        // someone added by hand, which a move keeps as it keeps every guest's. Both scopes are reserved, so neither membership moves.
+        env.DB.prepare(
+          `DELETE FROM board_members WHERE board_id=? AND user_id=?
+              AND EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)
+              AND NOT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)`,
+        ).bind(
+          boardId,
+          payload.ownerId as string,
+          payload.expectedWorkspaceId as string,
+          payload.ownerId as string,
+          destination,
+          payload.ownerId as string,
+        ),
         ...(payload.grantManager
           ? [
               env.DB.prepare(
@@ -1649,7 +1664,7 @@ export async function runAccessChange(
   return driveOperation(env, reserved, Budget.foreground());
 }
 
-const OperationIdSchema = z.string().uuid();
+export const OperationIdSchema = z.string().uuid();
 
 export const accessChangesRouter = new Hono<AppEnv>()
   .use("*", requireAuth)

@@ -9,6 +9,7 @@ import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
+import { isAttachmentImageSrc } from "../lib/markdown-image";
 import { parseYouTubeUrl, type YouTubeVideo } from "../lib/youtube";
 import { YouTubeEmbed } from "./YouTubeEmbed";
 
@@ -486,21 +487,14 @@ const inLinkLinkRenderer: Components["a"] = ({ node: _node, children, ...props }
   </MarkdownInLinkContext.Provider>
 );
 
-function isSameOrigin(src: string): boolean {
-  try {
-    return new URL(src, location.origin).origin === location.origin;
-  } catch {
-    return false;
-  }
-}
-
 const StableMarkdownImage: Components["img"] = ({ node: _node, src, alt, ...props }) => {
   const inLink = useContext(MarkdownInLinkContext);
   const { previewImages, onOpenImage } = useContext(MarkdownPreviewContext);
   const preview =
     !inLink && typeof src === "string" ? previewImages?.get(src) : undefined;
-  if (typeof src === "string" && !isSameOrigin(src)) {
-    // The CSP (public/_headers) would block it anyway; keep it reachable as a link.
+  if (typeof src === "string" && !isAttachmentImageSrc(src, location.href)) {
+    // Another origin's image the CSP (public/_headers) would block; any other path here
+    // every viewer's browser would request. Keep it reachable as a link.
     const label = alt || src;
     return inLink ? (
       <span>{label}</span>

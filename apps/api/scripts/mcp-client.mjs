@@ -52,7 +52,9 @@ const [group, command, argument] = process.argv.slice(2);
 try {
   let output;
   if (group === "credentials" && command === "issue") {
-    output = await credentialRequest("POST", "/me/agent-credentials", parseObject(argument, "credential"));
+    // Issuing needs the account password (ADR 0090); an account without one sends none.
+    const password = process.env.FOXBAN_PASSWORD;
+    output = await credentialRequest("POST", "/me/agent-credentials", { ...parseObject(argument, "credential"), ...(password ? { currentPassword: password } : {}) });
   } else if (group === "credentials" && command === "list") {
     output = await credentialRequest("GET", "/me/agent-credentials");
   } else if (group === "credentials" && command === "revoke") {

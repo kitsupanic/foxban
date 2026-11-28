@@ -67,7 +67,7 @@ export const adminRouter = new Hono<AppEnv>()
           ? `${c.env.GITHUB_OAUTH_BASE}${refresh.ownerIsOrganization ? `/organizations/${refresh.owner}` : ""}/settings/apps/${app.slug}/advanced`
           : null,
       },
-      canCreate: canCreateGitHubApp(c.env),
+      canCreate: await canCreateGitHubApp(c.env),
     });
   })
   // Forgets the App so a new one can be created; GitHub keeps it until its owner deletes it there.
@@ -82,8 +82,9 @@ export const adminRouter = new Hono<AppEnv>()
     requireAdmin,
     zValidator("json", z.object({ organization: z.string().regex(GITHUB_LOGIN_RE).optional() })),
     async (c) => {
-      // No sealing key: the deploy script has not run since this feature shipped.
-      if (!canCreateGitHubApp(c.env)) return c.json({ error: "GitHub App setup needs GITHUB_APP_ENCRYPTION_KEY; redeploy with pnpm run deploy" }, 503);
+      // No usable sealing key: the deploy script has not run since this feature shipped, or the key is not base64 of 32 bytes.
+      if (!(await canCreateGitHubApp(c.env)))
+        return c.json({ error: "GitHub App setup needs GITHUB_APP_ENCRYPTION_KEY (base64 of 32 bytes: openssl rand -base64 32); redeploy with pnpm run deploy" }, 503);
       if (await getInstanceGitHubAppSummary(c.env)) return c.json({ error: "this instance already has a GitHub App" }, 409);
       const state = crypto.randomUUID();
       setCookie(c, GITHUB_APP_MANIFEST_STATE_COOKIE, state, {
@@ -111,7 +112,7 @@ export const adminRouter = new Hono<AppEnv>()
     const code = c.req.query("code");
     const expected = getCookie(c, GITHUB_APP_MANIFEST_STATE_COOKIE);
     deleteCookie(c, GITHUB_APP_MANIFEST_STATE_COOKIE, { path: "/" });
-    if (!state || !code || !expected || state !== expected || !canCreateGitHubApp(c.env)) return fail();
+    if (!state || !code || !expected || state !== expected || !(await canCreateGitHubApp(c.env))) return fail();
     try {
       return (await createInstanceGitHubApp(c.env, code)) ? c.redirect(`${adminPage}?githubApp=created`) : fail();
     } catch {
